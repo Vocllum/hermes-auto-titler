@@ -44,8 +44,8 @@ plugins:
 | `ignore_model_messages` | `false` | true 时评估只喂用户消息，过滤模型回复（A/B 对比用） |
 | `preview_chars` | `200` | 开头/结尾消息只保留前 N 字符（≈ 前几句话），全文梗概模式；0 = 不截断 |
 | `include_all_user_messages` | `true` | 附加全部用户消息（不含附件内容） |
-| `user_message_threshold` | `40` | 用户消息条数上限（0=不限）；超限保留开头 1/4 + 最近 3/4，防超长对话 |
-| `user_message_preview_chars` | `300` | 单条用户消息超长时提取首尾句（保留意图与结论，替代硬切） |
+| `user_message_threshold` | `20` | 用户消息条数上限（0=不限）；超限保留开头 1/4 + 最近 3/4，防超长对话 |
+| `user_message_preview_chars` | `200` | 单条用户消息超过该长度时提取首尾句（各限一半预算，保留意图与结论） |
 | `title_style` | `concise` | `concise` ChatGPT 式 3~5 词一眼看完 / `complete` 5~10 词保留完整脉络 |
 | `strategy` | `conservative` | `conservative` 明显不匹配才改（优先主线）/ `aggressive` 每次优化（优先最近主题） |
 | `model` | `""` | 留空 = 宿主默认模型；本地示例 `deepseek-v4-flash` |

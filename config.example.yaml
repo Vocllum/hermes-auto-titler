@@ -7,8 +7,8 @@ opening_turns: 2
 ignore_model_messages: false
 preview_chars: 200
 include_all_user_messages: true
-user_message_threshold: 40
-user_message_preview_chars: 300
+user_message_threshold: 20
+user_message_preview_chars: 200
 title_style: concise
 strategy: conservative
 model: ""

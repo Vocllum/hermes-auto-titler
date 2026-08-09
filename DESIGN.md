@@ -86,8 +86,8 @@ opening_turns: 2                 # 携带会话开头 N 轮消息（主线锚点
 ignore_model_messages: false     # true = 过滤 assistant 消息（A/B 实验用）
 preview_chars: 200               # 开头/结尾消息只保留前 N 字符（≈前几句话）
 include_all_user_messages: true  # 附加全部用户消息（意图轨迹，不截断、不含附件内容）
-user_message_threshold: 40       # 用户消息条数上限（0=不限）；超限保留开头 1/4 + 最近 3/4
-user_message_preview_chars: 300  # 单条用户消息超长时提取首尾句（保留意图与结论）
+user_message_threshold: 20       # 用户消息条数上限（0=不限）；超限保留开头 1/4 + 最近 3/4
+user_message_preview_chars: 200  # 单条用户消息触发线：超过则提取首尾句（各限一半预算）
 title_style: concise             # concise（3~5 词一眼看完）| complete（5~10 词完整脉络）
 strategy: conservative           # conservative（主线优先，明显不匹配才改）| aggressive（每次优化，优先最近主题）
 model: ""                        # 留空 = 宿主辅助模型；本地 deepseek-v4-flash
@@ -182,11 +182,12 @@ All user messages:          ← 意图轨迹（超长单条提取首尾句，超
 5. **梗概模式输入规模砍半**（37,680→20,286 字符），判定基本一致
 6. **系统噪声必须过滤**：`[System: model changed]`、`[CONTEXT COMPACTION]`、`[ASYNC DELEGATION]`、`[System note: interrupted]`、`[Recent Summary]` 等 Hermes 注入消息混在 user 角色里，会污染意图轨迹
 7. **用户消息上限（防超长对话）**：两个维度独立限制——条数超
-   `user_message_threshold`（默认 40）时保留开头 1/4（主线锚点）+ 最近 3/4
+   `user_message_threshold`（默认 20）时保留开头 1/4（主线锚点）+ 最近 3/4
    （当前意图），中间执行细节丢弃；单条超 `user_message_preview_chars`
-   （默认 300）时用 `smart_preview` 提取首句 + 尾句（各限一半预算），无句子
+   （默认 200）时用 `smart_preview` 提取首句 + 尾句（各限一半预算），无句子
    边界的长串（日志/代码）退化为前 2/3 + 后 1/3 硬切——替代 ChatGPT 的
-   2/3+1/3 硬切方案（切断句子破坏语义）
+   2/3+1/3 硬切方案（切断句子破坏语义）。preview_chars 只是触发线，
+   提取策略固定为「首尾句」，短消息（≤触发线）永远原样保留
 
 ### 5.4 推荐配置（实验后的最优值）
 

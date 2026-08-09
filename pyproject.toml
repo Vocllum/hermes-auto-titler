@@ -1,0 +1,13 @@
+[project]
+name = "hermes-auto-titler"
+version = "0.1.0"
+description = "Hermes plugin: renames session titles when the conversation drifts"
+requires-python = ">=3.11"
+dependencies = ["PyYAML"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["hermes_auto_titler"]

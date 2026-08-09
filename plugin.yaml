@@ -1,0 +1,4 @@
+name: hermes-auto-titler
+version: 0.1.0
+description: "Auto-titler — renames session titles when the conversation drifts"
+author: "Vocllum"

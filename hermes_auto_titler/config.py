@@ -13,6 +13,7 @@ DEFAULTS: dict[str, Any] = {
     "on_close": True,
     "recent_turns": 2,
     "opening_turns": 2,
+    "ignore_model_messages": False,
     "include_all_user_messages": True,
     "strategy": "conservative",
     "model": "",

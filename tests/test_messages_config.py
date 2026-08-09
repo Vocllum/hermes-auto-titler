@@ -57,6 +57,23 @@ def test_load_context_recent_turns_and_all_user():
     assert op1 == [("user", "m1"), ("assistant", "a1")]
 
 
+def test_load_context_ignore_model_messages():
+    conv = [
+        {"role": "user", "content": "m1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "m2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "m3"},
+    ]
+    db = FakeDB(conv)
+    recent, all_user, opening = load_context(
+        db, "s1", recent_turns=2, include_all_user=True, ignore_model_messages=True
+    )
+    assert recent == [("user", "m2"), ("user", "m3")]
+    assert all_user == [("user", "m1"), ("user", "m2"), ("user", "m3")]
+    assert opening == [("user", "m1"), ("user", "m2")]
+
+
 def test_config_load_defaults_and_override(tmp_path):
     cfg = load_config(path=tmp_path / "missing.yaml")
     assert cfg["enabled"] is True

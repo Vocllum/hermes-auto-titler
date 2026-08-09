@@ -37,16 +37,21 @@ def load_context(
     recent_turns: int,
     include_all_user: bool,
     opening_turns: int = 2,
+    ignore_model_messages: bool = False,
 ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
     """返回 (最近 N 轮 user/assistant 对, 全部用户消息, 开头 M 轮)，均为 (role, text)。
 
     开头几轮用于让模型看到会话主线（标题不应被最新小任务带偏）。
+    ignore_model_messages=True 时过滤掉 assistant 消息（recent/opening 只含 user），
+    用于对比实验：判断模型消息对标题判定的影响。
     """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
     for m in conv:
         role = m.get("role")
         if role not in ("user", "assistant"):
+            continue
+        if ignore_model_messages and role == "assistant":
             continue
         text = message_text(m.get("content")).strip()
         if text:

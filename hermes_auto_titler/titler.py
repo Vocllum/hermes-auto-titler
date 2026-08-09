@@ -102,6 +102,7 @@ class AutoTitler:
             int(self.cfg.get("recent_turns", 2)),
             bool(self.cfg.get("include_all_user_messages", True)),
             int(self.cfg.get("opening_turns", 2)),
+            bool(self.cfg.get("ignore_model_messages", False)),
         )
         if not recent:
             return {"action": "skipped", "reason": "no messages"}

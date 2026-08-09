@@ -116,6 +116,18 @@ def test_untitled_session_uses_auto_title_llm():
     assert ("set_auto_title", "Raft 空转排查", "llm") in db.calls
 
 
+def test_legacy_titled_session_is_protected():
+    # NULL provenance + 已有标题：Hermes 官方按 user 权威对待（_title_rank），
+    # llm 写不进去。插件应显式跳过而不是报 failed。
+    db = FakeDB(messages=MSGS, title="旧自动标题", source=None)
+    t, ctx = make_titler(db, text=_dec("rename", "新标题"))
+    r = t.evaluate("s1", force=True)
+    assert r["action"] == "skipped"
+    assert r["reason"] == "legacy title (NULL provenance) is protected"
+    assert ctx.llm.calls == []  # 不调模型
+    assert db.title == "旧自动标题"
+
+
 def test_auto_title_can_be_updated_and_stays_llm():
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t, _ = make_titler(db, text=_dec("rename", "Raft 空转排查"))

@@ -90,6 +90,12 @@ class AutoTitler:
         except Exception:
             current = None
 
+        # NULL provenance（provenance 列出现前的老行）在 Hermes 里按 user 权威
+        # 对待（hermes_state._title_rank：旧自动标题与当年手动 /title 无法区分），
+        # 已有标题时 llm 永远写不进去——这是官方保守设计，尊重它，不算失败。
+        if src is None and current:
+            return {"action": "skipped", "reason": "legacy title (NULL provenance) is protected"}
+
         recent, all_user = load_context(
             db,
             session_id,

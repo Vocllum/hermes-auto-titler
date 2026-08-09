@@ -104,8 +104,8 @@ class AutoTitler:
             int(self.cfg.get("opening_turns", 2)),
             bool(self.cfg.get("ignore_model_messages", False)),
             int(self.cfg.get("preview_chars", 200)),
-            int(self.cfg.get("user_message_threshold", 40)),
-            int(self.cfg.get("user_message_preview_chars", 300)),
+            int(self.cfg.get("user_message_threshold", 20)),
+            int(self.cfg.get("user_message_preview_chars", 200)),
         )
         if not recent:
             return {"action": "skipped", "reason": "no messages"}

@@ -160,6 +160,9 @@ def test_sample_user_messages_head_tail():
     # 不超限或 0 = 不限
     assert sample_user_messages(users, 0) == users
     assert len(sample_user_messages(users[:20], 40)) == 20
+    # 回归：threshold=1 时 tail=0，users[-0:] 会返回全部（101 条）——必须只留 1 条
+    out1 = sample_user_messages(users, 1)
+    assert len(out1) == 1 and out1[0] == ("user", "m0")
 
 
 def test_load_context_user_message_limits():

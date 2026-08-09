@@ -25,7 +25,7 @@ DEFAULTS: dict[str, Any] = {
     "max_title_length": 80,
 }
 
-VALID_STRATEGIES = {"conservative", "balanced", "aggressive"}
+VALID_STRATEGIES = {"conservative", "aggressive"}
 
 
 def _default_config_path() -> Path:

@@ -67,7 +67,7 @@ def smart_preview(text: str, limit: int) -> str:
     parts = [p.strip() for p in _SENT_RE.split(text) if p.strip()]
     if len(parts) >= 2:
         head, tail = parts[0], parts[-1]
-        budget = limit // 2
+        budget = max(1, limit // 2)
         if len(head) > budget:
             head = head[:budget].rstrip()
         if len(tail) > budget:
@@ -86,6 +86,8 @@ def sample_user_messages(users: List[Tuple[str, str]], threshold: int) -> List[T
         return users
     head = max(1, threshold // 4)
     tail = threshold - head
+    if tail <= 0:  # threshold=1 时 users[-0:] 会返回全部，必须单独处理
+        return users[:head]
     return users[:head] + users[-tail:]
 
 

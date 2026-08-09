@@ -44,7 +44,10 @@ class FakeDB:
     def set_auto_title(self, sid, title, *, source):
         self.calls.append(("set_auto_title", title, source))
         self._check_conflict(title)
-        if self.title is None:
+        # 模拟上游 precedence：derived → llm 是升级（允许），
+        # llm → llm 同级 no-op（防自我重命名），user 标题永不覆盖
+        rank = {None: 0, "derived": 1, "llm": 2, "user": 3}
+        if rank.get(self.source, 0) < rank.get(source, 0):
             self.title = title
             self.source = source
             return True
@@ -201,6 +204,28 @@ def test_malformed_model_output_keeps():
     assert r["action"] == "keep"
 
 
+def test_derived_rename_uses_atomic_set_auto_title():
+    # derived → llm 是权威升级：必须走 set_auto_title（单事务），
+    # 不出现两步写的 crash window
+    db = FakeDB(messages=MSGS, title="旧标题", source="derived")
+    t, ctx = make_titler(db, text=_dec("rename", "新标题"))
+    r = t.evaluate("s1", force=True)
+    assert r["action"] == "renamed"
+    auto_calls = [c for c in db.calls if c[0] == "set_auto_title"]
+    assert auto_calls and auto_calls[0][1] == "新标题" and auto_calls[0][2] == "llm"
+    assert not any(c[0] == "set_session_title" for c in db.calls)
+
+
+def test_llm_rename_uses_two_step_with_source_restore():
+    # llm → llm：set_auto_title 同级 no-op，走 set_session_title + 恢复 llm 来源
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    t, ctx = make_titler(db, text=_dec("rename", "新标题"))
+    r = t.evaluate("s1", force=True)
+    assert r["action"] == "renamed"
+    assert ("set_session_title", "新标题") in db.calls
+    assert ("set_session_title_source", "llm") in db.calls
+
+
 def test_parse_decision_tolerates_markdown_fence():
     from hermes_auto_titler.titler import _parse_decision
 
@@ -208,10 +233,10 @@ def test_parse_decision_tolerates_markdown_fence():
     action, title = _parse_decision(text)
     assert action == "rename"
     assert title == "Raft 空转排查"
-    # 关键词启发式兜底
-    action2, title2 = _parse_decision('我认为应该 rename，标题：修显示器 HDR')
-    assert action2 == "rename"
-    assert title2 == "修显示器 HDR"
+    # 非 JSON 自由文本：不猜，保持 keep（宁可不改不写错）
+    action2, title2 = _parse_decision("我认为应该 rename，标题：修显示器 HDR")
+    assert action2 == "keep"
+    assert title2 is None
 
 
 def test_llm_failure_keeps():

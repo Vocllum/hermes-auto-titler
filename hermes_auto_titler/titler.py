@@ -232,14 +232,7 @@ class AutoTitler:
             '- contain no quotation marks.\n'
             f"\nThe configured maximum title length is "
             f"{int(self.cfg.get('max_title_length', 80))} characters.\n"
-            "This is a hard safety limit, not a target length.\n"
-            + (
-                "Titles over 40 characters are considered verbose; even if the meaning "
-                "still fits, suggest a more concise alternative."
-                if style != "complete" else
-                "The complete style allows titles of 40-60 characters; over 60 "
-                "characters is still verbose and should be compressed."
-            )
+            "This is a hard safety limit, not a target length."
         )
 
         lines = []
@@ -298,8 +291,16 @@ class AutoTitler:
             src = None
 
         def apply(t: str) -> bool:
-            if src is None:
-                return bool(db.set_auto_title(session_id, t, source=SessionDB.TITLE_SOURCE_LLM))
+            # 无标题 / derived → llm：set_auto_title 是单事务 CAS（title + source
+            # 一起写），原子，无 crash window。
+            if src is None or src == SessionDB.TITLE_SOURCE_DERIVED:
+                return bool(
+                    db.set_auto_title(session_id, t, source=SessionDB.TITLE_SOURCE_LLM)
+                )
+            # llm → llm：set_auto_title 对同级是 no-op（上游刻意防自我重命名），
+            # 只能走 set_session_title（user 级，必落盘）+ 立刻恢复 llm 来源。
+            # 两步之间是毫秒级窗口；若进程恰在此刻崩溃，标题会停在 user 来源、
+            # 插件从此不再碰它——Hermes 公开 API 无原子覆盖同级的手段，接受。
             if db.set_session_title(session_id, t):
                 try:
                     db.set_session_title_source(session_id, SessionDB.TITLE_SOURCE_LLM)
@@ -363,7 +364,10 @@ class AutoTitler:
 
 
 def _parse_decision(text: str) -> Tuple[str, Optional[str]]:
-    """容错解析模型输出：JSON → 内嵌 JSON → 关键词启发式。"""
+    """容错解析模型输出：只认 JSON（全文或内嵌），不认自由文本启发式。
+
+    宁可 keep 也不从自然语言里猜标题——猜错 = 幻觉写回。
+    """
     text = (text or "").strip()
     candidates = []
 
@@ -388,9 +392,4 @@ def _parse_decision(text: str) -> Tuple[str, Optional[str]]:
         if action in ("keep", "rename"):
             title = str(d.get("title") or "").strip().strip('"').strip("'")
             return action, (title or None)
-    # 启发式兜底
-    if re.search(r"rename", text, re.IGNORECASE):
-        m = re.search(r"(?:title|标题)[\"':：]\s*([^\n\"']+)", text, re.IGNORECASE)
-        if m:
-            return "rename", m.group(1).strip()
     return "keep", None

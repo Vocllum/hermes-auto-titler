@@ -96,11 +96,12 @@ class AutoTitler:
         if src is None and current:
             return {"action": "skipped", "reason": "legacy title (NULL provenance) is protected"}
 
-        recent, all_user = load_context(
+        recent, all_user, opening = load_context(
             db,
             session_id,
             int(self.cfg.get("recent_turns", 2)),
             bool(self.cfg.get("include_all_user_messages", True)),
+            int(self.cfg.get("opening_turns", 2)),
         )
         if not recent:
             return {"action": "skipped", "reason": "no messages"}
@@ -108,7 +109,7 @@ class AutoTitler:
         self._last_eval[session_id] = time.time()
         # derived 来源 + 超长标题（首条消息截断产物）视为低质量，强制重生成
         force_rename = src == SessionDB.TITLE_SOURCE_DERIVED and bool(current) and len(current) > 40
-        action, title = self._generate(current, recent, all_user, force_rename=force_rename)
+        action, title = self._generate(current, recent, all_user, opening, force_rename=force_rename)
         if action != "rename" or not title or title == current:
             log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)
             return {"action": "keep"}
@@ -126,6 +127,7 @@ class AutoTitler:
         current: Optional[str],
         recent: List[Tuple[str, str]],
         all_user: List[Tuple[str, str]],
+        opening: List[Tuple[str, str]],
         force_rename: bool = False,
     ) -> Tuple[str, Optional[str]]:
         strategy = self.cfg.get("strategy", "conservative")
@@ -145,10 +147,17 @@ class AutoTitler:
             "rename 时标题要求：3~8 个词的短语；具体、可检索（别人靠标题能找回这个会话）；"
             "避免「对话」「讨论」「问题」「查询」这类空泛词；语言跟随用户消息；"
             f"不超过 {int(self.cfg.get('max_title_length', 80))} 字符；不要引号。\n"
+            "标题应概括会话的主要任务或主线，而不是最新的一条小任务："
+            "如果会话开头确立了主题且之后围绕它展开（结合「会话开头」与「全部用户消息」判断），"
+            "优先用主线命名；只有会话确实转向了全新主题时才用最新主题命名。\n"
             "超过 40 字符的标题视为冗长，即使语义仍相关也应建议更简洁的替代。"
         )
 
         lines = [f"当前标题：{current or '（无）'}"]
+        lines.append("")
+        lines.append("会话开头：")
+        for role, text in opening:
+            lines.append(f"{role}: {text}")
         lines.append("")
         lines.append("最近对话：")
         for role, text in recent:

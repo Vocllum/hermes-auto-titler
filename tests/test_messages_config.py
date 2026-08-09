@@ -44,12 +44,17 @@ def test_load_context_recent_turns_and_all_user():
         {"role": "assistant", "content": "a3"},
     ]
     db = FakeDB(conv)
-    recent, all_user = load_context(db, "s1", recent_turns=2, include_all_user=True)
+    recent, all_user, opening = load_context(db, "s1", recent_turns=2, include_all_user=True)
     assert recent == [("user", "m2"), ("assistant", "a2"), ("user", "m3"), ("assistant", "a3")]
     assert all_user == [("user", "m1"), ("user", "m2"), ("user", "m3")]
+    # 开头默认取前 2 轮 user 消息及其 assistant 回应
+    assert opening == [("user", "m1"), ("assistant", "a1"), ("user", "m2"), ("assistant", "a2")]
     # tool 消息被过滤；include_all_user=False 时返回空
-    _, none = load_context(db, "s1", recent_turns=2, include_all_user=False)
+    _, none, _ = load_context(db, "s1", recent_turns=2, include_all_user=False)
     assert none == []
+    # opening_turns 可调
+    _, _, op1 = load_context(db, "s1", recent_turns=2, include_all_user=True, opening_turns=1)
+    assert op1 == [("user", "m1"), ("assistant", "a1")]
 
 
 def test_config_load_defaults_and_override(tmp_path):

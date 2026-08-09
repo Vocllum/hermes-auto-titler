@@ -36,8 +36,12 @@ def load_context(
     session_id: str,
     recent_turns: int,
     include_all_user: bool,
-) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
-    """返回 (最近 N 轮 user/assistant 对, 全部用户消息)，均为 (role, text)。"""
+    opening_turns: int = 2,
+) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
+    """返回 (最近 N 轮 user/assistant 对, 全部用户消息, 开头 M 轮)，均为 (role, text)。
+
+    开头几轮用于让模型看到会话主线（标题不应被最新小任务带偏）。
+    """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
     for m in conv:
@@ -58,5 +62,17 @@ def load_context(
                 break
     recent.reverse()
 
+    # 按轮切分（user 消息开头，含其后的 assistant 回应），取前 opening_turns 轮
+    rounds: List[List[Tuple[str, str]]] = []
+    cur: List[Tuple[str, str]] = []
+    for role, text in pairs:
+        if role == "user" and cur:
+            rounds.append(cur)
+            cur = []
+        cur.append((role, text))
+    if cur:
+        rounds.append(cur)
+    opening = [item for r in rounds[:opening_turns] for item in r]
+
     all_user = [(r, t) for r, t in pairs if r == "user"]
-    return recent, (all_user if include_all_user else [])
+    return recent, (all_user if include_all_user else []), opening

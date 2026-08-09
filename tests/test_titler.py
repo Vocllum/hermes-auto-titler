@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, "..")
 
 from hermes_auto_titler.config import DEFAULTS
+from hermes_auto_titler.messages import load_context
 from hermes_auto_titler.titler import AutoTitler
 
 
@@ -249,7 +250,49 @@ def test_short_derived_title_not_forced():
     db = FakeDB(messages=MSGS, title="Raft 空转排查", source="derived")
     t, _ = make_titler(db, text=_dec("keep"))
     r = t.evaluate("s1", force=True)
-    assert r["action"] == "keep"  # 短标题不强制
+    assert r["action"] == "keep"
+
+
+def test_generate_blind_omits_current_title_and_forces_rename():
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    t, ctx = make_titler(db, text=_dec("rename", "新标题"))
+    recent, all_user, opening = load_context(db, "s1", recent_turns=2, include_all_user=True)
+    action, title = t._generate("旧标题", recent, all_user, opening, blind=True)
+    assert (action, title) == ("rename", "新标题")
+    system = ctx.llm.calls[0]["messages"][0]["content"]
+    user_prompt = ctx.llm.calls[0]["messages"][1]["content"]
+    assert "action 必须是 rename" in system
+    assert "当前标题是自动截断" not in system  # 不是 derived 截断文案
+    assert "当前标题：" not in user_prompt  # 原标题不喂给模型
+    assert "会话开头：" in user_prompt
+
+
+def test_retitle_all_skips_user_and_uses_blind():
+    s_llm = {"id": "s1", "title": "旧标题", "message_count": 5}
+    s_user = {"id": "s2", "title": "我手改的", "message_count": 5}
+    s_legacy = {"id": "s3", "title": "老标题", "message_count": 5}
+
+    class MultiDB(FakeDB):
+        def __init__(self):
+            super().__init__(messages=MSGS)
+            self.by_sid = {"s1": "llm", "s2": "user", "s3": None}
+
+        def get_session_title_source(self, sid):
+            return self.by_sid.get(sid)
+
+        def list_sessions_rich(self, limit=20, min_message_count=0, include_children=False):
+            return [s_llm, s_user, s_legacy]
+
+    db = MultiDB()
+    t, ctx = make_titler(db, text=_dec("rename", "盲改标题"))
+    results = t.retitle_all()
+    by_id = {r["session_id"]: r for r in results}
+    assert by_id["s2"]["action"] == "skipped"  # user 手改不动
+    assert by_id["s3"]["action"] == "skipped"  # legacy NULL 保护
+    assert by_id["s1"]["action"] == "renamed"
+    # blind：prompt 里没有当前标题
+    for call in ctx.llm.calls:
+        assert "当前标题：" not in call["messages"][1]["content"]  # 短标题不强制
 
 
 def test_retitle_all_skips_user_and_dry_run():

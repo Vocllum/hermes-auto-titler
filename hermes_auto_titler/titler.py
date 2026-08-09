@@ -70,7 +70,7 @@ class AutoTitler:
 
     # -- 评估 ---------------------------------------------------------------
 
-    def evaluate(self, session_id: str, force: bool = False) -> Dict[str, Any]:
+    def evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
         db = self.db
         if not force:
             last = self._last_eval.get(session_id)
@@ -111,7 +111,10 @@ class AutoTitler:
         self._last_eval[session_id] = time.time()
         # derived 来源 + 超长标题（首条消息截断产物）视为低质量，强制重生成
         force_rename = src == SessionDB.TITLE_SOURCE_DERIVED and bool(current) and len(current) > 40
-        action, title = self._generate(current, recent, all_user, opening, force_rename=force_rename)
+        action, title = self._generate(
+            current, recent, all_user, opening,
+            force_rename=force_rename, blind=blind,
+        )
         if action != "rename" or not title or title == current:
             log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)
             return {"action": "keep"}
@@ -131,9 +134,21 @@ class AutoTitler:
         all_user: List[Tuple[str, str]],
         opening: List[Tuple[str, str]],
         force_rename: bool = False,
+        blind: bool = False,
     ) -> Tuple[str, Optional[str]]:
         strategy = self.cfg.get("strategy", "conservative")
-        if strategy == "aggressive":
+        if blind:
+            # retitle-all 盲改：不提供原标题，直接按内容重新命名
+            if strategy == "aggressive":
+                rule = ("不提供原标题。直接根据会话内容给出最能概括的新标题，"
+                        "action 必须是 rename。优先反映最近对话的主题（用户最近在做什么），"
+                        "其次才是开头主线。")
+            else:
+                rule = ("不提供原标题。直接根据会话内容给出最能概括的新标题，"
+                        "action 必须是 rename。标题应概括会话的主要任务或主线，"
+                        "而不是最新的一条小任务：如果会话开头确立了主题且之后围绕它展开，"
+                        "优先用主线命名；只有会话确实转向了全新主题时才用最新主题命名。")
+        elif strategy == "aggressive":
             rule = ("每次都给出最能概括当前会话的标题；只要与当前标题不同就 rename。"
                     "优先反映最近对话的主题（用户最近在做什么），其次才是开头主线。")
         else:
@@ -141,7 +156,7 @@ class AutoTitler:
                     "标题应概括会话的主要任务或主线，而不是最新的一条小任务："
                     "如果会话开头确立了主题且之后围绕它展开（结合「会话开头」与「全部用户消息」判断），"
                     "优先用主线命名；只有会话确实转向了全新主题时才用最新主题命名。")
-        if force_rename:
+        if force_rename and not blind:
             rule += " 当前标题是自动截断的长文本，不合格，必须给出新的简洁标题（action 必须是 rename）。"
 
         system = (
@@ -154,8 +169,10 @@ class AutoTitler:
             "超过 40 字符的标题视为冗长，即使语义仍相关也应建议更简洁的替代。"
         )
 
-        lines = [f"当前标题：{current or '（无）'}"]
-        lines.append("")
+        lines = []
+        if not blind:
+            lines.append(f"当前标题：{current or '（无）'}")
+            lines.append("")
         lines.append("会话开头：")
         for role, text in opening:
             lines.append(f"{role}: {text}")
@@ -265,7 +282,7 @@ class AutoTitler:
                 results.append({"session_id": sid, "action": "dry-run", "title": row.get("title")})
                 continue
             try:
-                r = self.evaluate(sid, force=True)
+                r = self.evaluate(sid, force=True, blind=True)
                 results.append({"session_id": sid, **r})
             except Exception as e:
                 results.append({"session_id": sid, "action": "error", "reason": str(e)})

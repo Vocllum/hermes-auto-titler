@@ -16,6 +16,7 @@ DEFAULTS: dict[str, Any] = {
     "ignore_model_messages": False,
     "preview_chars": 200,
     "include_all_user_messages": True,
+    "title_style": "concise",
     "strategy": "conservative",
     "model": "",
     "min_interval_minutes": 5,

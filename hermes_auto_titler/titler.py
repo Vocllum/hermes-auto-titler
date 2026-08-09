@@ -159,14 +159,33 @@ class AutoTitler:
         if force_rename and not blind:
             rule += " 当前标题是自动截断的长文本，不合格，必须给出新的简洁标题（action 必须是 rename）。"
 
+        # 标题风格：concise（ChatGPT 式一眼看完）/ complete（保留完整脉络）
+        style = self.cfg.get("title_style", "concise")
+        if style == "complete":
+            style_req = (
+                "标题要求：5~10 个词的短语；可以覆盖会话的主要脉络，"
+                "如有多个并列主题用「A 与 B」结构保留；仍要具体、可检索"
+                "（别人靠标题能找回这个会话）；避免「对话」「讨论」「问题」「查询」这类空泛词；"
+                "语言跟随用户消息；不要引号。"
+            )
+        else:
+            style_req = (
+                "标题要求：3~5 个词的短语；聚焦会话最主要的一个主题，"
+                "像 ChatGPT 会话标题一样一眼能看完；具体、可检索"
+                "（别人靠标题能找回这个会话）；避免「对话」「讨论」「问题」「查询」这类空泛词；"
+                "语言跟随用户消息；不要引号。"
+            )
         system = (
             "你是会话标题维护器，负责判断 Hermes 会话标题是否仍然准确。\n"
             "输出 JSON，格式：{\"action\": \"keep\" 或 \"rename\", \"title\": \"新标题\"}。\n"
             f"{rule}\n"
-            "rename 时标题要求：3~8 个词的短语；具体、可检索（别人靠标题能找回这个会话）；"
-            "避免「对话」「讨论」「问题」「查询」这类空泛词；语言跟随用户消息；"
-            f"不超过 {int(self.cfg.get('max_title_length', 80))} 字符；不要引号。\n"
-            "超过 40 字符的标题视为冗长，即使语义仍相关也应建议更简洁的替代。"
+            f"{style_req}\n"
+            f"最终标题长度不超过 {int(self.cfg.get('max_title_length', 80))} 字符（完整脉络也不能超）。\n"
+            + (
+                "超过 40 字符的标题视为冗长，即使语义仍相关也应建议更简洁的替代。"
+                if style != "complete" else
+                "complete 风格允许 40~60 字符的标题；超过 60 字符仍视为冗长，应压缩。"
+            )
         )
 
         lines = []

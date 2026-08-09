@@ -31,6 +31,25 @@ def message_text(content: Any) -> str:
     return ""
 
 
+# Hermes 系统注入噪声（以 user/assistant 角色混进消息流，不是用户真实意图）：
+# 模型切换通知、上下文压缩标记、子代理批量完成、后台进程完成、系统打断提示等。
+_SYSTEM_NOISE_PREFIXES = (
+    "[system:",
+    "[system note:",
+    "[context compaction",
+    "[async delegation",
+    "[recent summary",
+    "[session arc summary",
+    "[session summary",
+    "[important:",
+)
+
+
+def is_system_noise(text: str) -> bool:
+    t = (text or "").lstrip().lower()
+    return any(t.startswith(p) for p in _SYSTEM_NOISE_PREFIXES)
+
+
 def load_context(
     db,
     session_id: str,
@@ -56,8 +75,9 @@ def load_context(
         if ignore_model_messages and role == "assistant":
             continue
         text = message_text(m.get("content")).strip()
-        if text:
-            pairs.append((role, text))
+        if not text or is_system_noise(text):
+            continue
+        pairs.append((role, text))
 
     def preview(text: str) -> str:
         if preview_chars > 0 and len(text) > preview_chars:

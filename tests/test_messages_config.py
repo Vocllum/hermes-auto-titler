@@ -100,6 +100,31 @@ def test_load_context_preview_chars():
     assert any(len(t) == 500 for _, t in recent0)
 
 
+def test_load_context_filters_system_noise():
+    conv = [
+        {"role": "user", "content": "[System: The active model has changed to deepseek-v4-flash]"},
+        {"role": "user", "content": "真实提问一"},
+        {"role": "assistant", "content": "[ASYNC DELEGATION BATCH COMPLETE — deleg_abc] 一堆子代理结果"},
+        {"role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted..."},
+        {"role": "user", "content": "真实提问二"},
+        {"role": "assistant", "content": "正常回复"},
+        {"role": "user", "content": "[System note: Your previous turn was interrupted mid-run]"},
+        {"role": "user", "content": "[Recent Summary (d0, node 1)] ## 当前状态"},
+    ]
+    db = FakeDB(conv)
+    recent, all_user, opening = load_context(
+        db, "s1", recent_turns=2, include_all_user=True, opening_turns=2
+    )
+    roles_texts = [t for _, t in recent]
+    assert "真实提问一" in roles_texts
+    assert "真实提问二" in roles_texts
+    assert "正常回复" in roles_texts
+    # 系统噪声全部被过滤
+    assert all("[System" not in t and "[ASYNC" not in t and "[CONTEXT" not in t
+               and "[Recent" not in t for _, t in recent + opening + all_user)
+    assert all_user == [("user", "真实提问一"), ("user", "真实提问二")]
+
+
 def test_config_load_defaults_and_override(tmp_path):
     cfg = load_config(path=tmp_path / "missing.yaml")
     assert cfg["enabled"] is True

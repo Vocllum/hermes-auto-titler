@@ -40,6 +40,7 @@ plugins:
 | `every_n_turns` | `3` | 每 N 轮对话结束评估一次 |
 | `on_close` | `true` | 会话关闭信号（gateway/退出）时强制再评估一次 |
 | `recent_turns` | `2` | 每次评估携带最近 N 轮消息 |
+| `opening_turns` | `2` | 额外携带会话开头 N 轮消息（让模型看到主线，避免被最新小任务带偏标题） |
 | `include_all_user_messages` | `true` | 附加全部用户消息（不含附件内容） |
 | `strategy` | `conservative` | `conservative` 明显不匹配才改 / `balanced` / `aggressive` 每次优化 |
 | `model` | `""` | 留空 = 宿主默认模型；本地示例 `deepseek-v4-flash` |

@@ -1,6 +1,6 @@
-"""A/B 对比：带模型消息 vs 忽略模型消息，对同一批会话各评估一次。
+"""A/B 对比：全文梗概模式（preview_chars=200）vs 完整消息（preview_chars=0）。
 
-不写库——直接调 _generate，只打印判定结果。
+不写库——直接调 _generate，只打印判定结果 + 输入规模。
 用法:
   ~/.hermes/hermes-agent/venv/bin/python scripts/ab_compare.py
 """
@@ -51,17 +51,18 @@ def main():
         src = db.get_session_title_source(sid)
         print(f"\n=== {sid[:16]} [{src}] 当前标题: {current}")
 
-        for label, ignore in (("带模型消息", False), ("忽略模型消息", True)):
+        for label, pv in (("梗概200", 200), ("完整0", 0)):
             recent, all_user, opening = load_context(
                 db, sid,
                 recent_turns=2,
                 include_all_user=True,
                 opening_turns=2,
-                ignore_model_messages=ignore,
+                ignore_model_messages=False,
+                preview_chars=pv,
             )
+            n_in = sum(len(t) for _, t in opening + recent + all_user)
             action, title = titler._generate(current, recent, all_user, opening)
-            n_assistant = sum(1 for r, _ in opening + recent if r == "assistant")
-            print(f"  [{label}] (上下文含 assistant {n_assistant} 条) -> {action}: {title}")
+            print(f"  [{label}] 输入{len(opening + recent + all_user)}条/{n_in}字符 -> {action}: {title}")
     db.close()
 
 

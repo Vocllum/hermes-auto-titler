@@ -74,6 +74,32 @@ def test_load_context_ignore_model_messages():
     assert opening == [("user", "m1"), ("user", "m2")]
 
 
+def test_load_context_preview_chars():
+    conv = [
+        {"role": "user", "content": "短消息"},
+        {"role": "assistant", "content": "x" * 500},
+        {"role": "user", "content": "y" * 500},
+    ]
+    db = FakeDB(conv)
+    recent, all_user, opening = load_context(
+        db, "s1", recent_turns=2, include_all_user=True, preview_chars=200
+    )
+    # opening/recent 的超长消息被截断到 200 字符 + 省略号；短消息原样
+    for _, text in recent + opening:
+        assert len(text) <= 201
+    assert any(t == "x" * 200 + "…" for _, t in recent + opening)
+    assert any(t == "y" * 200 + "…" for _, t in recent + opening)
+    assert any(t == "短消息" for _, t in opening)
+    # 用户消息（意图轨迹）不截断
+    assert len(all_user[0][1]) == 3
+    assert len(all_user[1][1]) == 500
+    # preview_chars=0 不截断
+    recent0, _, _ = load_context(
+        db, "s1", recent_turns=1, include_all_user=True, preview_chars=0
+    )
+    assert any(len(t) == 500 for _, t in recent0)
+
+
 def test_config_load_defaults_and_override(tmp_path):
     cfg = load_config(path=tmp_path / "missing.yaml")
     assert cfg["enabled"] is True

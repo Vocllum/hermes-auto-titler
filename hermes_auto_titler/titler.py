@@ -103,6 +103,7 @@ class AutoTitler:
             bool(self.cfg.get("include_all_user_messages", True)),
             int(self.cfg.get("opening_turns", 2)),
             bool(self.cfg.get("ignore_model_messages", False)),
+            int(self.cfg.get("preview_chars", 200)),
         )
         if not recent:
             return {"action": "skipped", "reason": "no messages"}
@@ -133,11 +134,13 @@ class AutoTitler:
     ) -> Tuple[str, Optional[str]]:
         strategy = self.cfg.get("strategy", "conservative")
         if strategy == "aggressive":
-            rule = "每次都给出最能概括当前会话的标题；只要与当前标题不同就 rename。"
-        elif strategy == "balanced":
-            rule = "当前标题已不准确或明显可以更好时 rename，小差异不必改。"
+            rule = ("每次都给出最能概括当前会话的标题；只要与当前标题不同就 rename。"
+                    "优先反映最近对话的主题（用户最近在做什么），其次才是开头主线。")
         else:
-            rule = "只有当前标题明显无法概括会话内容时才 rename，否则 keep。"
+            rule = ("只有当前标题明显无法概括会话内容时才 rename，否则 keep。"
+                    "标题应概括会话的主要任务或主线，而不是最新的一条小任务："
+                    "如果会话开头确立了主题且之后围绕它展开（结合「会话开头」与「全部用户消息」判断），"
+                    "优先用主线命名；只有会话确实转向了全新主题时才用最新主题命名。")
         if force_rename:
             rule += " 当前标题是自动截断的长文本，不合格，必须给出新的简洁标题（action 必须是 rename）。"
 
@@ -148,9 +151,6 @@ class AutoTitler:
             "rename 时标题要求：3~8 个词的短语；具体、可检索（别人靠标题能找回这个会话）；"
             "避免「对话」「讨论」「问题」「查询」这类空泛词；语言跟随用户消息；"
             f"不超过 {int(self.cfg.get('max_title_length', 80))} 字符；不要引号。\n"
-            "标题应概括会话的主要任务或主线，而不是最新的一条小任务："
-            "如果会话开头确立了主题且之后围绕它展开（结合「会话开头」与「全部用户消息」判断），"
-            "优先用主线命名；只有会话确实转向了全新主题时才用最新主题命名。\n"
             "超过 40 字符的标题视为冗长，即使语义仍相关也应建议更简洁的替代。"
         )
 

@@ -38,12 +38,14 @@ def load_context(
     include_all_user: bool,
     opening_turns: int = 2,
     ignore_model_messages: bool = False,
+    preview_chars: int = 200,
 ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
     """返回 (最近 N 轮 user/assistant 对, 全部用户消息, 开头 M 轮)，均为 (role, text)。
 
     开头几轮用于让模型看到会话主线（标题不应被最新小任务带偏）。
-    ignore_model_messages=True 时过滤掉 assistant 消息（recent/opening 只含 user），
-    用于对比实验：判断模型消息对标题判定的影响。
+    ignore_model_messages=True 时过滤掉 assistant 消息（recent/opening 只含 user）。
+    preview_chars：opening/recent 的每条消息只保留前 N 字符（≈ 前几句话），
+    让模型看到的是「开头两句 + 结尾两句」的全文梗概，而不是被超长回复淹没。
     """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
@@ -57,10 +59,15 @@ def load_context(
         if text:
             pairs.append((role, text))
 
+    def preview(text: str) -> str:
+        if preview_chars > 0 and len(text) > preview_chars:
+            return text[:preview_chars] + "…"
+        return text
+
     recent: List[Tuple[str, str]] = []
     seen_user = 0
     for role, text in reversed(pairs):
-        recent.append((role, text))
+        recent.append((role, preview(text)))
         if role == "user":
             seen_user += 1
             if seen_user >= recent_turns:
@@ -74,10 +81,11 @@ def load_context(
         if role == "user" and cur:
             rounds.append(cur)
             cur = []
-        cur.append((role, text))
+        cur.append((role, preview(text)))
     if cur:
         rounds.append(cur)
     opening = [item for r in rounds[:opening_turns] for item in r]
 
+    # 用户消息 = 意图轨迹，保持全量（不截断）
     all_user = [(r, t) for r, t in pairs if r == "user"]
     return recent, (all_user if include_all_user else []), opening

@@ -42,8 +42,9 @@ plugins:
 | `recent_turns` | `2` | 每次评估携带最近 N 轮消息 |
 | `opening_turns` | `2` | 额外携带会话开头 N 轮消息（让模型看到主线，避免被最新小任务带偏标题） |
 | `ignore_model_messages` | `false` | true 时评估只喂用户消息，过滤模型回复（A/B 对比用） |
+| `preview_chars` | `200` | 开头/结尾消息只保留前 N 字符（≈ 前几句话），全文梗概模式；0 = 不截断 |
 | `include_all_user_messages` | `true` | 附加全部用户消息（不含附件内容） |
-| `strategy` | `conservative` | `conservative` 明显不匹配才改 / `balanced` / `aggressive` 每次优化 |
+| `strategy` | `conservative` | `conservative` 明显不匹配才改（优先主线）/ `aggressive` 每次优化（优先最近主题） |
 | `model` | `""` | 留空 = 宿主默认模型；本地示例 `deepseek-v4-flash` |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔 |
 | `max_title_length` | `80` | 标题最大字符数（上限 100，Hermes 限制） |

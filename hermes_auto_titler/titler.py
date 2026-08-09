@@ -104,6 +104,8 @@ class AutoTitler:
             int(self.cfg.get("opening_turns", 2)),
             bool(self.cfg.get("ignore_model_messages", False)),
             int(self.cfg.get("preview_chars", 200)),
+            int(self.cfg.get("user_message_threshold", 40)),
+            int(self.cfg.get("user_message_preview_chars", 300)),
         )
         if not recent:
             return {"action": "skipped", "reason": "no messages"}
@@ -140,68 +142,120 @@ class AutoTitler:
         if blind:
             # retitle-all 盲改：不提供原标题，直接按内容重新命名
             if strategy == "aggressive":
-                rule = ("不提供原标题。直接根据会话内容给出最能概括的新标题，"
-                        "action 必须是 rename。优先反映最近对话的主题（用户最近在做什么），"
-                        "其次才是开头主线。")
+                rule = (
+                    "The current title is NOT provided. Generate the best title "
+                    "directly from the conversation content; action MUST be rename. "
+                    "Prioritize the most recent topic (what the user is doing now), "
+                    "then the opening through-line."
+                )
             else:
-                rule = ("不提供原标题。直接根据会话内容给出最能概括的新标题，"
-                        "action 必须是 rename。标题应概括会话的主要任务或主线，"
-                        "而不是最新的一条小任务：如果会话开头确立了主题且之后围绕它展开，"
-                        "优先用主线命名；只有会话确实转向了全新主题时才用最新主题命名。")
+                rule = (
+                    "The current title is NOT provided. Generate the best title "
+                    "directly from the conversation content; action MUST be rename. "
+                    "Prefer the session's main task or through-line over the latest "
+                    "minor subtask: if the opening established a topic and later turns "
+                    "stayed on it, name the session by the through-line; only switch to "
+                    "the newest topic when the conversation genuinely changed direction."
+                )
         elif strategy == "aggressive":
-            rule = ("每次都给出最能概括当前会话的标题；只要与当前标题不同就 rename。"
-                    "优先反映最近对话的主题（用户最近在做什么），其次才是开头主线。")
+            rule = (
+                "Always propose the title that best summarizes the current conversation; "
+                "rename whenever it differs from the current title. "
+                "Prioritize the most recent topic (what the user is doing now), "
+                "then the opening through-line."
+            )
         else:
-            rule = ("只有当前标题明显无法概括会话内容时才 rename，否则 keep。"
-                    "标题应概括会话的主要任务或主线，而不是最新的一条小任务："
-                    "如果会话开头确立了主题且之后围绕它展开（结合「会话开头」与「全部用户消息」判断），"
-                    "优先用主线命名；只有会话确实转向了全新主题时才用最新主题命名。")
+            rule = (
+                "Only rename when the current title clearly fails to summarize the "
+                "conversation; otherwise keep. Prefer the session's main task or "
+                "through-line over the latest minor subtask: if the opening established "
+                "a topic and later turns stayed on it (judge from the Opening and All "
+                "user messages sections), name the session by the through-line; only "
+                "switch to the newest topic when the conversation genuinely changed "
+                "direction."
+            )
         if force_rename and not blind:
-            rule += " 当前标题是自动截断的长文本，不合格，必须给出新的简洁标题（action 必须是 rename）。"
+            rule += (
+                " The current title is a truncated auto-generated string and is "
+                "unacceptable; you must provide a new concise title (action MUST be rename)."
+            )
 
         # 标题风格：concise（ChatGPT 式一眼看完）/ complete（保留完整脉络）
         style = self.cfg.get("title_style", "concise")
         if style == "complete":
             style_req = (
-                "标题要求：5~10 个词的短语；可以覆盖会话的主要脉络，"
-                "如有多个并列主题用「A 与 B」结构保留；仍要具体、可检索"
-                "（别人靠标题能找回这个会话）；避免「对话」「讨论」「问题」「查询」这类空泛词；"
-                "语言跟随用户消息；不要引号。"
+                "COMPLETE STYLE\n"
+                "Generate a compact, descriptive conversation title that captures the "
+                "main subject and the most important distinguishing context.\n"
+                "It may preserve an additional major topic, constraint, or outcome when "
+                "that information materially helps identify the conversation.\n"
+                "Keep it natural and easily readable in a sidebar. Do not turn the "
+                "title into a sentence or a miniature summary."
             )
         else:
             style_req = (
-                "标题要求：3~5 个词的短语；聚焦会话最主要的一个主题，"
-                "像 ChatGPT 会话标题一样一眼能看完；具体、可检索"
-                "（别人靠标题能找回这个会话）；避免「对话」「讨论」「问题」「查询」这类空泛词；"
-                "语言跟随用户消息；不要引号。"
+                "CONCISE STYLE\n"
+                "Generate a short, natural conversation title that can be understood "
+                "at a glance in a sidebar.\n"
+                "Use the shortest wording that still clearly identifies the "
+                "conversation's main subject or task.\n"
+                "Prefer:\n"
+                "- a compact topic or task phrase rather than a sentence;\n"
+                "- one primary subject rather than a list of everything discussed;\n"
+                "- distinctive terms that make the conversation easy to recognize and "
+                "find later;\n"
+                "- natural title length and phrasing for the language being used.\n"
+                "Omit:\n"
+                "- secondary or temporary subtopics;\n"
+                "- unnecessary qualifiers and implementation details;\n"
+                "- generic words such as \"conversation\", \"discussion\", \"question\", "
+                "or \"query\";\n"
+                "- words that do not help distinguish this conversation from others.\n"
+                "Do not try to preserve every important detail. If information must be "
+                "sacrificed to keep the title immediately scannable, preserve the main "
+                "identifying concept.\n"
+                "The title should feel like a sidebar label, not a summary."
             )
         system = (
-            "你是会话标题维护器，负责判断 Hermes 会话标题是否仍然准确。\n"
-            "输出 JSON，格式：{\"action\": \"keep\" 或 \"rename\", \"title\": \"新标题\"}。\n"
-            f"{rule}\n"
-            f"{style_req}\n"
-            f"最终标题长度不超过 {int(self.cfg.get('max_title_length', 80))} 字符（完整脉络也不能超）。\n"
+            "You maintain concise, useful titles for Hermes conversations.\n"
+            "Return JSON only:\n"
+            '{"action":"keep"|"rename","title":"..."}\n'
+            f"\n{rule}\n"
+            f"\n{style_req}\n"
+            "\nThe title must:\n"
+            "- identify the conversation at a glance;\n"
+            "- preserve the main task or subject, not incidental details;\n"
+            "- use specific, searchable wording;\n"
+            '- avoid generic words such as "conversation", "discussion", "question", '
+            'or "query";\n'
+            '- match the dominant language of the user\'s messages;\n'
+            '- contain no quotation marks.\n'
+            f"\nThe configured maximum title length is "
+            f"{int(self.cfg.get('max_title_length', 80))} characters.\n"
+            "This is a hard safety limit, not a target length.\n"
             + (
-                "超过 40 字符的标题视为冗长，即使语义仍相关也应建议更简洁的替代。"
+                "Titles over 40 characters are considered verbose; even if the meaning "
+                "still fits, suggest a more concise alternative."
                 if style != "complete" else
-                "complete 风格允许 40~60 字符的标题；超过 60 字符仍视为冗长，应压缩。"
+                "The complete style allows titles of 40-60 characters; over 60 "
+                "characters is still verbose and should be compressed."
             )
         )
 
         lines = []
         if not blind:
-            lines.append(f"当前标题：{current or '（无）'}")
+            lines.append(f"Current title: {current or '(none)'}")
             lines.append("")
-        lines.append("会话开头：")
+        lines.append("Opening:")
         for role, text in opening:
             lines.append(f"{role}: {text}")
         lines.append("")
-        lines.append("最近对话：")
+        lines.append("Recent:")
         for role, text in recent:
             lines.append(f"{role}: {text}")
         if all_user:
             lines.append("")
-            lines.append("会话中的全部用户消息：")
+            lines.append("All user messages:")
             for _, text in all_user:
                 lines.append(f"user: {text}")
         user_prompt = "\n".join(lines)

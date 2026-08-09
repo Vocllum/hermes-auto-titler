@@ -16,6 +16,8 @@ DEFAULTS: dict[str, Any] = {
     "ignore_model_messages": False,
     "preview_chars": 200,
     "include_all_user_messages": True,
+    "user_message_threshold": 40,
+    "user_message_preview_chars": 300,
     "title_style": "concise",
     "strategy": "conservative",
     "model": "",

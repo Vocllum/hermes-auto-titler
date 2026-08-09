@@ -125,6 +125,57 @@ def test_load_context_filters_system_noise():
     assert all_user == [("user", "真实提问一"), ("user", "真实提问二")]
 
 
+def test_smart_preview_extracts_first_last_sentence():
+    from hermes_auto_titler.messages import smart_preview
+
+    # 正常句子：保留首句 + 尾句
+    text = "第一句说明意图。中间有大量执行细节，这里省略。最后一句是结论！"
+    out = smart_preview(text, 20)
+    assert "第一句说明意图" in out and "最后一句是结论" in out
+    assert "中间有大量执行细节" not in out
+    # 短消息原样
+    assert smart_preview("短消息", 300) == "短消息"
+    # 无句子边界长串：硬切前 2/3 + 后 1/3
+    blob = "x" * 1000
+    out = smart_preview(blob, 90)
+    assert out.startswith("x" * 60) and out.endswith("x" * 30)
+    assert "…" in out
+    # 换行也算边界
+    multi = "第一行\n第二行\n第三行"
+    out = smart_preview(multi, 12)
+    assert "第一行" in out and "第三行" in out
+
+
+def test_sample_user_messages_head_tail():
+    from hermes_auto_titler.messages import sample_user_messages
+
+    users = [(f"user", f"m{i}") for i in range(100)]
+    out = sample_user_messages(users, 40)
+    assert len(out) == 40
+    # 前 1/4（10 条）+ 后 3/4（30 条）
+    assert out[0] == ("user", "m0")
+    assert out[9] == ("user", "m9")
+    assert out[10] == ("user", "m70")
+    assert out[-1] == ("user", "m99")
+    # 不超限或 0 = 不限
+    assert sample_user_messages(users, 0) == users
+    assert len(sample_user_messages(users[:20], 40)) == 20
+
+
+def test_load_context_user_message_limits():
+    conv = [{"role": "user", "content": f"消息{i}内容。"} for i in range(20)]
+    db = FakeDB(conv)
+    _, all_user, _ = load_context(
+        db, "s1", recent_turns=1, include_all_user=True,
+        user_message_threshold=8, user_message_preview_chars=10,
+    )
+    assert len(all_user) == 8  # 前 2 + 后 6
+    assert all_user[0][1].startswith("消息0")
+    assert all_user[-1][1].startswith("消息19")
+    # 首尾句提取生效（短消息原样，超长的被提取）
+    assert all(len(t) <= 20 for _, t in all_user)
+
+
 def test_config_load_defaults_and_override(tmp_path):
     cfg = load_config(path=tmp_path / "missing.yaml")
     assert cfg["enabled"] is True

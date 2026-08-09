@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, List, Tuple
 
 
@@ -50,6 +51,44 @@ def is_system_noise(text: str) -> bool:
     return any(t.startswith(p) for p in _SYSTEM_NOISE_PREFIXES)
 
 
+# 句子边界：中文/通用标点 + 换行 + 英文句点后跟空白
+_SENT_RE = re.compile(r"[。！？…!?]|(?<=\.)\s|\n")
+
+
+def smart_preview(text: str, limit: int) -> str:
+    """超长消息提取首尾句（替代硬切）。
+
+    - 长度 ≤ limit：原样
+    - 有句子边界：保留第一句 + 最后一句（各限 limit//2），中间省略
+    - 无句子边界（单行长串：日志/代码）：硬切前 2/3 + 后 1/3
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    parts = [p.strip() for p in _SENT_RE.split(text) if p.strip()]
+    if len(parts) >= 2:
+        head, tail = parts[0], parts[-1]
+        budget = limit // 2
+        if len(head) > budget:
+            head = head[:budget].rstrip()
+        if len(tail) > budget:
+            tail = tail[-budget:].lstrip()
+        return f"{head} … {tail}"
+    cut = limit * 2 // 3
+    return text[:cut].rstrip() + " … " + text[-(limit - cut):].lstrip()
+
+
+def sample_user_messages(users: List[Tuple[str, str]], threshold: int) -> List[Tuple[str, str]]:
+    """用户消息条数上限：超限时保留开头 1/4（主线锚点）+ 最近 3/4（当前意图）。
+
+    threshold <= 0 表示不限。中间的执行细节对标题价值最低，直接丢弃。
+    """
+    if threshold <= 0 or len(users) <= threshold:
+        return users
+    head = max(1, threshold // 4)
+    tail = threshold - head
+    return users[:head] + users[-tail:]
+
+
 def load_context(
     db,
     session_id: str,
@@ -58,6 +97,8 @@ def load_context(
     opening_turns: int = 2,
     ignore_model_messages: bool = False,
     preview_chars: int = 200,
+    user_message_threshold: int = 0,
+    user_message_preview_chars: int = 0,
 ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
     """返回 (最近 N 轮 user/assistant 对, 全部用户消息, 开头 M 轮)，均为 (role, text)。
 
@@ -65,6 +106,8 @@ def load_context(
     ignore_model_messages=True 时过滤掉 assistant 消息（recent/opening 只含 user）。
     preview_chars：opening/recent 的每条消息只保留前 N 字符（≈ 前几句话），
     让模型看到的是「开头两句 + 结尾两句」的全文梗概，而不是被超长回复淹没。
+    user_message_threshold：用户消息条数上限，超限时首尾采样（前 1/4 + 后 3/4）。
+    user_message_preview_chars：单条用户消息超长时提取首尾句（smart_preview）。
     """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
@@ -106,6 +149,9 @@ def load_context(
         rounds.append(cur)
     opening = [item for r in rounds[:opening_turns] for item in r]
 
-    # 用户消息 = 意图轨迹，保持全量（不截断）
-    all_user = [(r, t) for r, t in pairs if r == "user"]
-    return recent, (all_user if include_all_user else []), opening
+    # 用户消息 = 意图轨迹；超长单条提取首尾句，超条数首尾采样
+    users = [(r, t) for r, t in pairs if r == "user"]
+    if user_message_preview_chars > 0:
+        users = [(r, smart_preview(t, user_message_preview_chars)) for r, t in users]
+    users = sample_user_messages(users, user_message_threshold)
+    return recent, (users if include_all_user else []), opening

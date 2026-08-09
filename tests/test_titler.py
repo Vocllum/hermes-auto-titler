@@ -261,10 +261,10 @@ def test_generate_blind_omits_current_title_and_forces_rename():
     assert (action, title) == ("rename", "新标题")
     system = ctx.llm.calls[0]["messages"][0]["content"]
     user_prompt = ctx.llm.calls[0]["messages"][1]["content"]
-    assert "action 必须是 rename" in system
-    assert "当前标题是自动截断" not in system  # 不是 derived 截断文案
-    assert "当前标题：" not in user_prompt  # 原标题不喂给模型
-    assert "会话开头：" in user_prompt
+    assert "MUST be rename" in system or "must be rename" in system.lower()
+    assert "truncated auto-generated" not in system  # 不是 derived 截断文案
+    assert "Current title:" not in user_prompt  # 原标题不喂给模型
+    assert "Opening:" in user_prompt
 
 
 def test_retitle_all_skips_user_and_uses_blind():
@@ -292,7 +292,7 @@ def test_retitle_all_skips_user_and_uses_blind():
     assert by_id["s1"]["action"] == "renamed"
     # blind：prompt 里没有当前标题
     for call in ctx.llm.calls:
-        assert "当前标题：" not in call["messages"][1]["content"]  # 短标题不强制
+        assert "Current title:" not in call["messages"][1]["content"]  # 短标题不强制
 
 
 def test_retitle_all_skips_user_and_dry_run():

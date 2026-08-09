@@ -78,13 +78,15 @@ def smart_preview(text: str, limit: int) -> str:
 
 
 def sample_user_messages(users: List[Tuple[str, str]], threshold: int) -> List[Tuple[str, str]]:
-    """用户消息条数上限：超限时保留开头 1/4（主线锚点）+ 最近 3/4（当前意图）。
+    """用户消息条数上限：超限时保留开头 1 条（起点锚点）+ 最近 N-1 条（当前意图）。
 
-    threshold <= 0 表示不限。中间的执行细节对标题价值最低，直接丢弃。
+    head + tail 策略：第一条锚定会话从哪里开始，最近消息反映当前方向；
+    中间的旧主题（含压缩续接会话的祖先内容）对标题价值最低，直接丢弃。
+    threshold <= 0 表示不限。
     """
     if threshold <= 0 or len(users) <= threshold:
         return users
-    head = max(1, threshold // 4)
+    head = 1
     tail = threshold - head
     if tail <= 0:  # threshold=1 时 users[-0:] 会返回全部，必须单独处理
         return users[:head]
@@ -108,7 +110,7 @@ def load_context(
     ignore_model_messages=True 时过滤掉 assistant 消息（recent/opening 只含 user）。
     preview_chars：opening/recent 的每条消息只保留前 N 字符（≈ 前几句话），
     让模型看到的是「开头两句 + 结尾两句」的全文梗概，而不是被超长回复淹没。
-    user_message_threshold：用户消息条数上限，超限时首尾采样（前 1/4 + 后 3/4）。
+    user_message_threshold：用户消息条数上限，超限时 head+tail 采样（开头 1 条 + 最近 N-1 条）。
     user_message_preview_chars：单条用户消息超长时提取首尾句（smart_preview）。
     """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []

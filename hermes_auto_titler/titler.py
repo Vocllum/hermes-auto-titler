@@ -199,6 +199,8 @@ class AutoTitler:
                 "at a glance in a sidebar.\n"
                 "Use the shortest wording that still clearly identifies the "
                 "conversation's main subject or task.\n"
+                "When several descriptions would identify the conversation equally "
+                "well, always choose the shortest one.\n"
                 "Prefer:\n"
                 "- a compact topic or task phrase rather than a sentence;\n"
                 "- one primary subject rather than a list of everything discussed;\n"
@@ -239,16 +241,29 @@ class AutoTitler:
         if not blind:
             lines.append(f"Current title: {current or '(none)'}")
             lines.append("")
-        lines.append("Opening:")
+        lines.append(
+            "Opening (the session's starting turns; the main through-line anchor):"
+        )
         for role, text in opening:
             lines.append(f"{role}: {text}")
         lines.append("")
-        lines.append("Recent:")
+        lines.append(
+            "Recent (the latest turns; shows whether the conversation has shifted):"
+        )
         for role, text in recent:
             lines.append(f"{role}: {text}")
         if all_user:
             lines.append("")
-            lines.append("All user messages:")
+            lines.append(
+                "User-message trajectory (how the conversation evolved over time):"
+            )
+            lines.append(
+                "Use it to identify recurring or sustained intent, not to collect "
+                "every topic mentioned. A topic appearing in only a small portion "
+                "of the trajectory should not override the conversation's "
+                "established main subject unless the recent context shows a clear "
+                "and sustained shift to that topic."
+            )
             for _, text in all_user:
                 lines.append(f"user: {text}")
         user_prompt = "\n".join(lines)

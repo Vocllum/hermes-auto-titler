@@ -289,7 +289,7 @@ def test_generate_blind_omits_current_title_and_forces_rename():
     assert "MUST be rename" in system or "must be rename" in system.lower()
     assert "truncated auto-generated" not in system  # 不是 derived 截断文案
     assert "Current title:" not in user_prompt  # 原标题不喂给模型
-    assert "Opening:" in user_prompt
+    assert "Opening (" in user_prompt
 
 
 def test_retitle_all_skips_user_and_uses_blind():

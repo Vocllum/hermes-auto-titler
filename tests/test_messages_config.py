@@ -152,10 +152,9 @@ def test_sample_user_messages_head_tail():
     users = [(f"user", f"m{i}") for i in range(100)]
     out = sample_user_messages(users, 40)
     assert len(out) == 40
-    # 前 1/4（10 条）+ 后 3/4（30 条）
+    # 开头 1 条（起点锚点）+ 最近 39 条（当前意图）
     assert out[0] == ("user", "m0")
-    assert out[9] == ("user", "m9")
-    assert out[10] == ("user", "m70")
+    assert out[1] == ("user", "m61")
     assert out[-1] == ("user", "m99")
     # 不超限或 0 = 不限
     assert sample_user_messages(users, 0) == users

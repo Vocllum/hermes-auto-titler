@@ -86,7 +86,7 @@ opening_turns: 2                 # 携带会话开头 N 轮消息（主线锚点
 ignore_model_messages: false     # true = 过滤 assistant 消息（A/B 实验用）
 preview_chars: 200               # 开头/结尾消息只保留前 N 字符（≈前几句话）
 include_all_user_messages: true  # 附加全部用户消息（意图轨迹，不截断、不含附件内容）
-user_message_threshold: 20       # 用户消息条数上限（0=不限）；超限保留开头 1/4 + 最近 3/4
+user_message_threshold: 20       # 用户消息条数上限（0=不限）；超限保留开头 1 条 + 最近 N-1 条
 user_message_preview_chars: 200  # 单条用户消息触发线：超过则提取首尾句（各限一半预算）
 title_style: concise             # concise（3~5 词一眼看完）| complete（5~10 词完整脉络）
 strategy: conservative           # conservative（主线优先，明显不匹配才改）| aggressive（每次优化，优先最近主题）
@@ -113,13 +113,20 @@ The title must: identify at a glance; preserve main task; specific & searchable;
 avoid generic words; match dominant user language; no quotation marks.
 The configured maximum title length is {max_title_length} characters.
 This is a hard safety limit, not a target length.
-{冗长阈值}                  ← concise: 超 40 字符视为冗长；complete: 40~60 合理，超 60 压缩
 
 [user]
 Current title: xxx          ← 非 blind 模式才给（避免旧标题引导模型）
-Opening:                    ← opening 轮（每条 preview_chars 字符）
-Recent:                     ← recent 轮（每条 preview_chars 字符）
-All user messages:          ← 意图轨迹（超长单条提取首尾句，超条数首尾采样）
+Opening (the session's starting turns; the main through-line anchor):
+                            ← opening 轮（每条 preview_chars 字符）——主线锚点
+Recent (the latest turns; shows whether the conversation has shifted):
+                            ← recent 轮（每条 preview_chars 字符）——判断是否转题
+User-message trajectory (how the conversation evolved over time):
+  Use it to identify recurring or sustained intent, not to collect every
+  topic mentioned. A topic appearing in only a small portion of the
+  trajectory should not override the conversation's established main
+  subject unless the recent context shows a clear and sustained shift
+  to that topic.
+                            ← 意图轨迹（超长单条提取首尾句，超条数 head+tail 采样）
 ```
 
 提示词全文为英文（2026-08-10 定稿，用户提供草稿）：策略段是唯一随
@@ -139,7 +146,7 @@ All user messages:          ← 意图轨迹（超长单条提取首尾句，超
 
 | 风格 | 要求 |
 |---|---|
-| concise（默认） | 3~5 个词的短语；聚焦最主要的一个主题；像 ChatGPT 会话标题一样一眼能看完 |
+| concise（默认） | 3~5 个词的短语；聚焦最主要的一个主题；像 ChatGPT 会话标题一样一眼能看完；「When several descriptions would identify the conversation equally well, always choose the shortest one.」（2026-08-10 薇因评审加入：比规定字数更自然，随语言自适应） |
 | complete | 5~10 个词的短语；可以覆盖主要脉络，多主题用「A 与 B」结构保留 |
 
 设计动机（岚 2026-08-10）：评分时「注重概括包含完整信息但没考虑标题太复杂」——用户应能自定义要更完整的脉络还是更简洁准确的概括，但完整也不能太长。
@@ -182,12 +189,25 @@ All user messages:          ← 意图轨迹（超长单条提取首尾句，超
 5. **梗概模式输入规模砍半**（37,680→20,286 字符），判定基本一致
 6. **系统噪声必须过滤**：`[System: model changed]`、`[CONTEXT COMPACTION]`、`[ASYNC DELEGATION]`、`[System note: interrupted]`、`[Recent Summary]` 等 Hermes 注入消息混在 user 角色里，会污染意图轨迹
 7. **用户消息上限（防超长对话）**：两个维度独立限制——条数超
-   `user_message_threshold`（默认 20）时保留开头 1/4（主线锚点）+ 最近 3/4
-   （当前意图），中间执行细节丢弃；单条超 `user_message_preview_chars`
+   `user_message_threshold`（默认 20）时 head+tail 采样：保留开头 1 条
+   （起点锚点）+ 最近 N-1 条（当前意图），中间旧主题（含压缩续接会话
+   的祖先内容）对标题价值最低直接丢弃；单条超 `user_message_preview_chars`
    （默认 200）时用 `smart_preview` 提取首句 + 尾句（各限一半预算），无句子
    边界的长串（日志/代码）退化为前 2/3 + 后 1/3 硬切——替代 ChatGPT 的
    2/3+1/3 硬切方案（切断句子破坏语义）。preview_chars 只是触发线，
    提取策略固定为「首尾句」，短消息（≤触发线）永远原样保留
+8. **上下文角色必须告诉模型**（2026-08-10 薇因评审）：Opening = 主线锚点、
+   trajectory = 判断长期走势（不是关键词合集）、Recent = 判断是否已转题。
+   轨迹段附英文说明（recurring/sustained intent；小比例主题不得覆盖已确立
+   主线，除非 recent 显示持续转向）。这是「20 组抽样发现少数跑主线」后的
+   修正——不是继续加上下文，而是把现有上下文的角色说精确
+9. **改版前后 20 组抽样对比**（同 20 会话，SEED=7）：加角色说明 + 最短句 +
+   head+tail 采样后，平均标题长度 23.55 → 21.05 字符（-11%），≤20 字符
+   7 → 10 个，≥30 字符 5 → 2 个；多数标题更短更准（「Mac 通过 cua-driver
+   控制 Windows 桌面」→「Mac 远程控制 Windows」），个别反变长（#9 Codex
+   验证注入、#16 ChatGPT 恢复官方账号——concise 最短句未压住）；第 6 组
+   「Dia 密码导入」依旧跑题，根因查明为压缩摘要被噪声过滤 + 该会话唯一
+   非噪声 user 消息就是「导入密码」——信息不足而非轨迹污染
 
 ### 5.4 推荐配置（实验后的最优值）
 

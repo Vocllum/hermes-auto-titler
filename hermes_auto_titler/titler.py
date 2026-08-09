@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,15 +19,6 @@ from hermes_state import SessionDB
 from .messages import load_context
 
 log = logging.getLogger(__name__)
-
-_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "action": {"type": "string", "enum": ["keep", "rename"]},
-        "title": {"type": "string"},
-    },
-    "required": ["action"],
-}
 
 _db: Optional[SessionDB] = None
 
@@ -107,12 +100,17 @@ class AutoTitler:
             return {"action": "skipped", "reason": "no messages"}
 
         self._last_eval[session_id] = time.time()
-        action, title = self._generate(current, recent, all_user)
+        # derived 来源 + 超长标题（首条消息截断产物）视为低质量，强制重生成
+        force_rename = src == SessionDB.TITLE_SOURCE_DERIVED and bool(current) and len(current) > 40
+        action, title = self._generate(current, recent, all_user, force_rename=force_rename)
         if action != "rename" or not title or title == current:
+            log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)
             return {"action": "keep"}
         written = self._write(db, session_id, title)
         if written:
+            log.info("auto-titler %s: renamed -> %r", session_id[:12], written)
             return {"action": "renamed", "title": written}
+        log.warning("auto-titler %s: rename failed to write title %r", session_id[:12], title)
         return {"action": "failed"}
 
     # -- 模型生成 -----------------------------------------------------------
@@ -122,6 +120,7 @@ class AutoTitler:
         current: Optional[str],
         recent: List[Tuple[str, str]],
         all_user: List[Tuple[str, str]],
+        force_rename: bool = False,
     ) -> Tuple[str, Optional[str]]:
         strategy = self.cfg.get("strategy", "conservative")
         if strategy == "aggressive":
@@ -130,6 +129,8 @@ class AutoTitler:
             rule = "当前标题已不准确或明显可以更好时 rename，小差异不必改。"
         else:
             rule = "只有当前标题明显无法概括会话内容时才 rename，否则 keep。"
+        if force_rename:
+            rule += " 当前标题是自动截断的长文本，不合格，必须给出新的简洁标题（action 必须是 rename）。"
 
         system = (
             "你是会话标题维护器，负责判断 Hermes 会话标题是否仍然准确。\n"
@@ -137,7 +138,8 @@ class AutoTitler:
             f"{rule}\n"
             "rename 时标题要求：3~8 个词的短语；具体、可检索（别人靠标题能找回这个会话）；"
             "避免「对话」「讨论」「问题」「查询」这类空泛词；语言跟随用户消息；"
-            f"不超过 {int(self.cfg.get('max_title_length', 80))} 字符；不要引号。"
+            f"不超过 {int(self.cfg.get('max_title_length', 80))} 字符；不要引号。\n"
+            "超过 40 字符的标题视为冗长，即使语义仍相关也应建议更简洁的替代。"
         )
 
         lines = [f"当前标题：{current or '（无）'}"]
@@ -153,27 +155,23 @@ class AutoTitler:
         user_prompt = "\n".join(lines)
 
         try:
-            from agent.plugin_llm import PluginLlmTextInput
-
-            res = self.ctx.llm.complete_structured(
-                instructions=user_prompt,
-                input=[PluginLlmTextInput(text=user_prompt)],
-                system_prompt=system,
-                json_schema=_SCHEMA,
-                schema_name="title_decision",
+            res = self.ctx.llm.complete(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_prompt},
+                ],
                 model=self.cfg.get("model") or None,
                 temperature=0.2,
                 max_tokens=150,
                 timeout=30,
                 purpose="auto-title",
             )
-            parsed = getattr(res, "parsed", None) or {}
+            text = getattr(res, "text", "") or ""
         except Exception as e:
             log.warning("auto-titler LLM call failed: %s", e)
             return "keep", None
 
-        action = str(parsed.get("action", "keep")).lower()
-        title = str(parsed.get("title") or "").strip().strip('"').strip("'")
+        action, title = _parse_decision(text)
         if action == "rename" and title:
             return "rename", title
         return "keep", None
@@ -256,3 +254,37 @@ class AutoTitler:
             except Exception as e:
                 results.append({"session_id": sid, "action": "error", "reason": str(e)})
         return results
+
+
+def _parse_decision(text: str) -> Tuple[str, Optional[str]]:
+    """容错解析模型输出：JSON → 内嵌 JSON → 关键词启发式。"""
+    text = (text or "").strip()
+    candidates = []
+
+    def try_loads(s: str) -> Optional[dict]:
+        try:
+            d = json.loads(s)
+            return d if isinstance(d, dict) else None
+        except Exception:
+            return None
+
+    if text:
+        candidates.append(try_loads(text))
+    if not any(candidates):
+        # 提取第一个含 action 的 JSON 对象（容忍 markdown 围栏/前后缀）
+        m = re.search(r"\{[^{}]*\"action\"[^{}]*\}", text)
+        if m:
+            candidates.append(try_loads(m.group(0)))
+    for d in candidates:
+        if not d:
+            continue
+        action = str(d.get("action", "keep")).lower()
+        if action in ("keep", "rename"):
+            title = str(d.get("title") or "").strip().strip('"').strip("'")
+            return action, (title or None)
+    # 启发式兜底
+    if re.search(r"rename", text, re.IGNORECASE):
+        m = re.search(r"(?:title|标题)[\"':：]\s*([^\n\"']+)", text, re.IGNORECASE)
+        if m:
+            return "rename", m.group(1).strip()
+    return "keep", None

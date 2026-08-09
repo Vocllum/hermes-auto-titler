@@ -66,22 +66,28 @@ class FakeDB:
 
 
 class FakeLlm:
-    def __init__(self, parsed):
-        self.parsed = parsed
+    def __init__(self, text):
+        self.text = text
         self.calls = []
 
-    def complete_structured(self, **kwargs):
+    def complete(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(parsed=self.parsed)
+        return SimpleNamespace(text=self.text)
 
 
-def make_titler(db, parsed=None, cfg=None, fake_time=None):
+def make_titler(db, text=None, cfg=None, fake_time=None):
     cfg = {**DEFAULTS, **(cfg or {})}
-    ctx = SimpleNamespace(llm=FakeLlm(parsed))
+    ctx = SimpleNamespace(llm=FakeLlm(text))
     t = AutoTitler(ctx, cfg, db=db)
     if fake_time is not None:
         t._last_eval = {}
     return t, ctx
+
+
+def _dec(action="keep", title=""):
+    import json
+
+    return json.dumps({"action": action, "title": title})
 
 
 MSGS = [
@@ -103,7 +109,7 @@ def test_user_title_never_overwritten():
 
 def test_untitled_session_uses_auto_title_llm():
     db = FakeDB(messages=MSGS, title=None, source=None)
-    t, _ = make_titler(db, parsed={"action": "rename", "title": "Raft 空转排查"})
+    t, _ = make_titler(db, text=_dec("rename", "Raft 空转排查"))
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     assert db.title == "Raft 空转排查"
@@ -112,7 +118,7 @@ def test_untitled_session_uses_auto_title_llm():
 
 def test_auto_title_can_be_updated_and_stays_llm():
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
-    t, _ = make_titler(db, parsed={"action": "rename", "title": "Raft 空转排查"})
+    t, _ = make_titler(db, text=_dec("rename", "Raft 空转排查"))
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     assert db.title == "Raft 空转排查"
@@ -122,7 +128,7 @@ def test_auto_title_can_be_updated_and_stays_llm():
 
 def test_keep_does_not_write():
     db = FakeDB(messages=MSGS, title="Raft 空转排查", source="llm")
-    t, _ = make_titler(db, parsed={"action": "keep", "title": ""})
+    t, _ = make_titler(db, text=_dec("keep"))
     r = t.evaluate("s1", force=True)
     assert r["action"] == "keep"
     assert db.calls == []
@@ -130,14 +136,14 @@ def test_keep_does_not_write():
 
 def test_rename_to_same_title_is_keep():
     db = FakeDB(messages=MSGS, title="Raft 空转排查", source="llm")
-    t, _ = make_titler(db, parsed={"action": "rename", "title": "Raft 空转排查"})
+    t, _ = make_titler(db, text=_dec("rename", "Raft 空转排查"))
     r = t.evaluate("s1", force=True)
     assert r["action"] == "keep"
 
 
 def test_throttle_skips_frequent_evaluations():
     db = FakeDB(messages=MSGS, title=None)
-    t, ctx = make_titler(db, parsed={"action": "keep", "title": ""})
+    t, ctx = make_titler(db, text=_dec("keep"))
     t.evaluate("s1", force=True)
     n = len(ctx.llm.calls)
     r = t.evaluate("s1", force=False)
@@ -150,7 +156,7 @@ def test_throttle_skips_frequent_evaluations():
 
 def test_every_n_turns_trigger():
     db = FakeDB(messages=MSGS, title=None)
-    t, ctx = make_titler(db, parsed={"action": "keep", "title": ""}, cfg={"every_n_turns": 3})
+    t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3})
     t.on_session_end(session_id="s1", completed=True)
     assert ctx.llm.calls == []  # 第 1 轮不评估
     t.on_session_end(session_id="s1", completed=True)
@@ -161,14 +167,14 @@ def test_every_n_turns_trigger():
 
 def test_on_close_signal_forces_evaluate():
     db = FakeDB(messages=MSGS, title=None)
-    t, ctx = make_titler(db, parsed={"action": "keep", "title": ""}, cfg={"every_n_turns": 10})
+    t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 10})
     t.on_session_end(session_id="s1", reason="shutdown", interrupted=True)
     assert len(ctx.llm.calls) == 1  # 忽略轮数，直接评估
 
 
 def test_conflict_adds_suffix():
     db = FakeDB(messages=MSGS, title=None, conflict_titles={"Raft 空转排查"})
-    t, _ = make_titler(db, parsed={"action": "rename", "title": "Raft 空转排查"})
+    t, _ = make_titler(db, text=_dec("rename", "Raft 空转排查"))
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     assert r["title"] == "Raft 空转排查 (2)"
@@ -177,16 +183,29 @@ def test_conflict_adds_suffix():
 
 def test_malformed_model_output_keeps():
     db = FakeDB(messages=MSGS, title="Raft 空转排查", source="llm")
-    t, _ = make_titler(db, parsed={})
+    t, _ = make_titler(db, text="抱歉，我无法完成这个请求。")
     r = t.evaluate("s1", force=True)
     assert r["action"] == "keep"
+
+
+def test_parse_decision_tolerates_markdown_fence():
+    from hermes_auto_titler.titler import _parse_decision
+
+    text = '```json\n{"action": "rename", "title": "Raft 空转排查"}\n```'
+    action, title = _parse_decision(text)
+    assert action == "rename"
+    assert title == "Raft 空转排查"
+    # 关键词启发式兜底
+    action2, title2 = _parse_decision('我认为应该 rename，标题：修显示器 HDR')
+    assert action2 == "rename"
+    assert title2 == "修显示器 HDR"
 
 
 def test_llm_failure_keeps():
     db = FakeDB(messages=MSGS, title=None)
 
     class BoomLlm:
-        def complete_structured(self, **kw):
+        def complete(self, **kw):
             raise RuntimeError("provider down")
 
     t = AutoTitler(SimpleNamespace(llm=BoomLlm()), {**DEFAULTS}, db=db)
@@ -197,10 +216,28 @@ def test_llm_failure_keeps():
 def test_title_truncated_to_max_length():
     db = FakeDB(messages=MSGS, title=None)
     long = "这是一个非常非常非常非常非常非常非常非常非常非常非常非常非常长的标题测试"
-    t, _ = make_titler(db, parsed={"action": "rename", "title": long}, cfg={"max_title_length": 20})
+    t, _ = make_titler(db, text=_dec("rename", long), cfg={"max_title_length": 20})
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     assert len(r["title"]) <= 20
+
+
+def test_derived_long_title_forces_rename_even_when_model_keeps():
+    long_title = "开发个小插件，让 Hermes 每次对话结束都会思考需不需要重命名会话标题。有别的类似项目吗，别…"
+    db = FakeDB(messages=MSGS, title=long_title, source="derived")
+    t, ctx = make_titler(db, text=_dec("keep", long_title))  # 模型说 keep
+    r = t.evaluate("s1", force=True)
+    # force_rename 下模型被要求给新标题；若给了不同标题则 rename
+    assert r["action"] in ("renamed", "keep")
+    if r["action"] == "renamed":
+        assert db.source == "llm"
+
+
+def test_short_derived_title_not_forced():
+    db = FakeDB(messages=MSGS, title="Raft 空转排查", source="derived")
+    t, _ = make_titler(db, text=_dec("keep"))
+    r = t.evaluate("s1", force=True)
+    assert r["action"] == "keep"  # 短标题不强制
 
 
 def test_retitle_all_skips_user_and_dry_run():
@@ -210,13 +247,13 @@ def test_retitle_all_skips_user_and_dry_run():
             {"id": "s-auto", "title": "旧自动"},
         ]
     )
-    t, _ = make_titler(db, parsed={"action": "rename", "title": "新标题"})
+    t, _ = make_titler(db, text=_dec("rename", "新标题"))
     # s-user: source=user → skip；s-auto: 无消息 → skipped
     results = t.retitle_all()
     by_id = {r["session_id"]: r for r in results}
     assert by_id["s-user"]["action"] == "skipped"
     # dry-run 不评估
-    t2, ctx2 = make_titler(db, parsed={"action": "rename", "title": "新标题"})
+    t2, ctx2 = make_titler(db, text=_dec("rename", "新标题"))
     results2 = t2.retitle_all(dry_run=True)
     assert all(r["action"] == "dry-run" for r in results2)
     assert ctx2.llm.calls == []

@@ -215,6 +215,8 @@ class AutoTitler:
                 "product, project, or feature name.\n"
                 "- Searchability does not require completeness. A few strong "
                 "identifying terms are better than a descriptive title.\n"
+                "- Aim for at most five words. Use fewer whenever the "
+                "conversation stays recognizable.\n"
                 "\n"
                 "Before returning the title, compress it once more:\n"
                 "remove every word or phrase that can be removed while the "

@@ -146,7 +146,7 @@ User-message trajectory (how the conversation evolved over time):
 
 | 风格 | 要求 |
 |---|---|
-| concise（默认） | 薇因 2026-08-10 定稿版：minimal sidebar label, not a summary——一个短短语、最少可识别概念；丢弃次要主题/结果/方法/平台设备限定词/实现细节；避免连词冒号逗号和多段标题；搜索性≠完整性；返回前再压缩一遍（remove every word that can be removed）。全文照录见 4.1 |
+| concise（默认） | 薇因 2026-08-10 定稿版：minimal sidebar label, not a summary——一个短短语、最少可识别概念；丢弃次要主题/结果/方法/平台设备限定词/实现细节；避免连词冒号逗号和多段标题；搜索性≠完整性；返回前再压缩一遍（remove every word that can be removed）+ 软词数锚点「Aim for at most five words. Use fewer whenever the conversation stays recognizable.」（词数比字符数语言无关：中文 5 词≈10-15 字、英文 5 词≈25-30 字符；实验 4 见 5.3） |
 | complete | 5~10 个词的短语；可以覆盖主要脉络，多主题用「A 与 B」结构保留 |
 
 设计动机（岚 2026-08-10）：评分时「注重概括包含完整信息但没考虑标题太复杂」——用户应能自定义要更完整的脉络还是更简洁准确的概括，但完整也不能太长。
@@ -201,18 +201,16 @@ User-message trajectory (how the conversation evolved over time):
    轨迹段附英文说明（recurring/sustained intent；小比例主题不得覆盖已确立
    主线，除非 recent 显示持续转向）。这是「20 组抽样发现少数跑主线」后的
    修正——不是继续加上下文，而是把现有上下文的角色说精确
-9. **改版前后 20 组抽样对比**（同 20 会话，SEED=7）：三版对比——
+9. **改版前后 20 组抽样对比**（同 20 会话，SEED=7）：四版对比——
    v1 初版平均 23.55 字符（≤20: 7，≥30: 5）；v2 加角色说明 + 最短句 +
    head+tail 采样后 21.05（≤20: 10，≥30: 2）；v3 换薇因 concise 原版
-   （minimal label + compress once more）后 19.65（≤20: 11，≥30: 3）。
-   多数标题更短更准（「闪白屏问题排查：MPO与MyDockFinder」→「闪白屏 MPO
-   排查」24→10；「Codex 换用 opencode-go 与 Hermes 验证注入排查」36→31；
-   「ChatGPT 恢复官方账号，Codex 子代理走 deepseek」34→22），但 v3 仍有个
-   别反例：#4 搜索选型把三个服务名全堆上（28→35）、#15 加括号限定词
-   （16→29）、#20 平台限定词没丢（28→31）——模型倾向保留实体与限定词，
-   规则「Drop platform/device qualifiers」未完全生效；第 6 组「Dia 密码
-   导入」依旧，根因查明为压缩摘要被噪声过滤 + 该会话唯一非噪声 user
-   消息就是「导入密码」——信息不足而非轨迹污染
+   （minimal label + compress once more）后 19.65（≤20: 11，≥30: 3）；
+   v4 在 v3 上加 5 词软锚点后 **16.6（≤20: 15，≥30: 0，最长 27）**，
+   同配置第二轮 v4b 17.0（≤20: 14，≥30: 0）——方差小，稳定。v3 的三
+   个反例全部收敛：#4 搜索选型 35→21→8（三服务名不再全堆）、#15
+   29→17（括号限定词消失）、#20 31→24→23（平台词压缩）。词数锚点比
+   规则描述更能压住模型「保留实体与限定词」的惯性；模型自然收敛到
+   2-3 词/8-17 字符，多数在锚点内仍有余量
 
 ### 5.4 推荐配置（实验后的最优值）
 

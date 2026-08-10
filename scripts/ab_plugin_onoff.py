@@ -11,6 +11,7 @@
   ~/.hermes/hermes-agent/venv/bin/python scripts/ab_plugin_onoff.py
 """
 
+import os
 import random
 import sys
 from pathlib import Path
@@ -69,9 +70,18 @@ def main():
     titler = AutoTitler(Ctx(), cfg, db=db)
 
     rows = db.list_sessions_rich(limit=1000, min_message_count=MIN_MSGS, include_children=False)
-    rng = random.Random(SEED)
-    sampled = rng.sample(rows, min(N_SAMPLES, len(rows)))
-    sampled.sort(key=lambda r: r.get("message_count") or 0)
+    sids_env = os.environ.get("AB_SIDS", "")
+    if sids_env:
+        # 固定会话集（截断 sid 前缀，逗号分隔）：按给定顺序跑，保证跨版本逐条可比
+        wanted = [s.strip() for s in sids_env.split(",") if s.strip()]
+        sampled = [r for r in rows if any(r["id"].startswith(w) for w in wanted)]
+        sampled.sort(key=lambda r: next(
+            i for i, w in enumerate(wanted) if r["id"].startswith(w)))
+        print(f"[fixed-sids] 匹配 {len(sampled)}/{len(wanted)} 个会话")
+    else:
+        rng = random.Random(SEED)
+        sampled = rng.sample(rows, min(N_SAMPLES, len(rows)))
+        sampled.sort(key=lambda r: r.get("message_count") or 0)
 
     lines = [
         "| # | 消息数 | 会话简报（开头+最近，≤500 字符） | 关闭：Hermes 原生 derived | "

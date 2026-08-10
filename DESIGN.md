@@ -223,6 +223,19 @@ User-message trajectory (how the conversation evolved over time):
    跟示例）与实体本身长的（verify_on_stop/OpenCode Go/Desktop SSH——
    压缩即失去可检索性，属合理长度）。**要点：旧侧边栏标题是旧版代码
    生成的，新提示词需插件重载 + 重跑才可见**
+11. **主线压缩约束（v6，2026-08-10 岚反馈「精简过头」）**：岚看 v5 结果
+   指出「不够概括」——「自动标题 prompt 精简」反映的是当前子任务而非
+   大主题；原版虽长但至少概括完整大意。教训：v3-v5 全在教「删」，没教
+   「删完仍概括大主题」，模型为最短从 recent 取材。v6 修正：5 词锚点
+   改为「recognizable as a whole」+ 新增「title 必须覆盖整个会话的主线，
+   不能只是最近子主题；不确定时选更宽的主题」+ compress 段限定「压缩后
+   不再覆盖主线就保留长版」。效果：平均 15.7 → 15.05（长度让步于概括
+   性），但质量明显回归主线（codex 接入 opencode-go、Hermes symlink
+   目录修复、Skill Viking 审查修复、闪白屏MPO修复 7 字符）；点名会话
+   Polymate →「Polymate 配置」11 字符命中岚期望。残余：压缩续接会话
+   （opening 是 [Session Arc Summary] 被噪声过滤）主线锚点丢失，模型仍
+   偏向当前方向（如当前会话 →「自动标题提示词迭代」）——第 6 组同款
+   根因，候选修法：从压缩摘要提取主线标题作弱 opening
 
 ### 5.4 推荐配置（实验后的最优值）
 

@@ -100,7 +100,7 @@ max_display_width: 40            # 列宽硬上限（全角 2 列/半角 1 列�
 
 ---
 
-## 4. 提示词设计（v13 定稿，2026-08-10 四方案对比胜出）
+## 4. 提示词设计（v13 定稿；2026-08-11 语义化重构 LABEL/SUMMARY + 信息层级）
 
 ### 4.1 结构
 
@@ -109,12 +109,23 @@ max_display_width: 40            # 列宽硬上限（全角 2 列/半角 1 列�
 You maintain concise titles for Hermes conversations.
 Return JSON only: {"action":"keep"|"rename","title":"..."}
 {rule}                     ← 策略段（英文：conservative / aggressive / blind）
-{style_req}                ← 风格段（英文：CONCISE STYLE / COMPLETE STYLE）
+{style_req}                ← 风格段（英文：LABEL STYLE / SUMMARY STYLE）
+Information hierarchy:
+- Subject comes from the session opening (or the earlier history
+  summary when the original opening was compacted away); it is the
+  main topic the session started about. A device or entity that
+  appears only in the final turns is detail, not the subject.
+- Main intent comes from the user-message trajectory.
+- Recent turns show the latest event, current state, or a genuine
+  topic shift; they must never define the subject by themselves.
 Rules:
-- Aim for at most 12 characters; never exceed {max_title_len}
-  (Chinese and Latin each count as 1 character).
-- Keep key product names and identifiers (e.g. Codex, OpenViking,
-  verify_on_stop) exact; use up to {max_title_len} rather than dropping them.
+- Length is a guardrail, not the goal: aim for at most 12 characters;
+  never exceed {max_title_len} (Chinese and Latin each count as 1 char).
+- Keep key product names and identifiers exact and correctly cased;
+  expand informal abbreviations from the user's messages instead of
+  copying them: ov -> OpenViking, skill -> Skill, Codex, Hermes, DeepSeek.
+- When the conversation has two distinct tasks, name both entities
+  even if it uses the full length budget.
 - No trailing punctuation, no quotes.
 - Use the dominant language of the user's messages.
 Good: {"action":"rename","title":"Dia密码导入Apple密码"}
@@ -124,14 +135,16 @@ Reply with JSON only.
 
 [user]
 Current title: xxx          ← 非 blind 模式才给（避免旧标题引导模型）
-Opening (the session's starting turns; the main through-line anchor):
+Opening (the session's starting turns; the main through-line anchor;
+primary subject source):
                             ← 有真实 opening 时只放开头轮；摘要永远不混入
 Earlier history summary (weak hint; may contain stale subtask details.
 Use it only to recover the broad earlier topic when the original opening is unavailable):
                             ← 仅当原始 opening 因压缩不可见时提供；否则整段省略
-Recent (the latest turns; shows whether the conversation has shifted):
+Recent (the latest turns; the current event, state, or a genuine topic
+shift — never the subject by itself):
                             ← recent 轮（每条 preview_chars 字符）——判断是否转题
-User-message trajectory (how the conversation evolved):
+User-message trajectory (how the conversation evolved; the main intent source):
                             ← 意图轨迹（超长单条提取首尾句，超条数 head+tail 采样）
 ```
 
@@ -139,7 +152,8 @@ User-message trajectory (how the conversation evolved):
 
 - **全局任务优先**：`{rule}` 与 `{style_req}` 都显式写「opening 确立的主线任务」是基调、「永远不要用最新子任务命名」。这是四方案对比后岚拍板的硬要求——GPT 逆向方案（extract key point）太倾向当前工作（产出「已修复」「已清理禁用」等完成态），v13 用「Name the MAIN TASK, not the latest subtask」对抗
 - **few-shot 三例**：Good（`Dia密码导入Apple密码`）、Too narrow（`关闭验证注入`——实际是子任务却被 GPT 方案选中）、Too vague（`Code changes`）。「Too narrow」示例直接来自四方案对比中 GPT 列 #9 的翻车案例
-- **实体优先于长度**：规则明确「宁可用满 16 字符也不丢关键产品名/标识符」——v11 曾因过度压缩丢掉 Codex/verify_on_stop/OpenViking
+- **实体优先于长度**：规则明确「宁可用满 16 字符也不丢关键产品名/标识符」——v11 曾因过度压缩丢掉 Codex/verify_on_stop/OpenViking；2026-08-11 再强化为「规范大小写 + 展开缩写」（ov → OpenViking、skill → Skill），因为实测模型会照抄用户消息里的小写/缩写写法（#10 会话「skill报错排查与ov清理」）
+- **信息层级（2026-08-11 新增）**：Subject 只来自 Opening/history；Intent 来自用户轨迹；Recent 只是事件/转题信号、永远不能单独定义 Subject。这是 #7 会话（YICO 主线跑偏）教训的 prompt 层落地——压缩会话里 Recent 常被结尾 AI 复盘占满，没有层级约束时模型会拿结尾事件当主题
 - **清洗**：`_clean_title` 式规范化（去引号、去 `Title:` 前缀、尾部标点 rstrip）+ `_write` 双重硬截断（字符上限 + 列宽上限）
 
 ### 4.2 策略段（strategy）
@@ -152,14 +166,14 @@ User-message trajectory (how the conversation evolved):
 
 设计沿革：最初有 balanced 三档，岚拍板删除——「保守和激进不需要平衡、激进=更倾向于最近的消息」（v10 前）；v13 四方案对比后又把 aggressive 的「优先最近主题」改为「主线优先」，与岚的全局任务偏好对齐。
 
-### 4.3 风格段（title_style）
+### 4.3 风格段（title_style）：信息类型是第一约束，长度只是护栏
 
-| 风格 | 要求 |
-|---|---|
-| concise（默认） | 开头确立的主线任务就是基调；**永远不要用最新子任务命名**；一个短短语、最少可识别概念 |
-| complete | 保留开头主线任务 + 最重要的区分性上下文；双主题可用「A 与 B」（与/and 连接） |
+| 风格 | 语义 | prompt 原文 |
+|---|---|---|
+| concise（默认） | **LABEL 主体标签**：Subject + 最小区分意图，不重述经过 | `LABEL STYLE: name the conversation. Identify its main subject and only the minimum intent needed to distinguish it. Do not retell what happened.` |
+| complete | **SUMMARY 简短事件梗概**：Subject + 主要意图/事件/纠偏 | `SUMMARY STYLE: briefly describe what the conversation is mainly about. Preserve the main subject and the most important intent, event, or correction.` |
 
-设计动机（岚 2026-08-10）：评分时「注重概括包含完整信息但没考虑标题太复杂」——用户应能自定义要更完整的脉络还是更简洁准确的概括，但完整也不能太长。
+设计动机（岚 2026-08-11）：不用「3~5 词 / 5~10 词」这类长度语言定义风格——长度应降级成护栏（12 目标 / `max_title_length` 硬限仍保留在 Rules），信息类型才是第一约束。取用优先级：concise = Subject > Intent >>> Event；complete = Subject + Intent/Event；Recent 永远不能单独定义 Subject。
 
 ### 4.4 通用要求（两风格共有）
 
@@ -335,6 +349,21 @@ Hermes `_load_directory_module` 要求插件根目录直接有 `__init__.py`，�
 四方案对比 #5 暴露：cron 任务注入的会话会写入 `MEMORY_MAINTENANCE_SUMMARY …` 标记（消息角色可能是 user 或 assistant）。Hermes 原生方案只喂首条消息，直接把它当用户意图，标题跑飞成整段注入文本。
 
 **修复已落地**：`_SYSTEM_NOISE_PREFIXES` 加入大小写不敏感的 `memory_maintenance_summary` 前缀，和 `[system:]`、`[context compaction]`、`[async delegation]`、`[important:]` 一样在进入 recent/opening/用户轨迹前过滤；回归测试覆盖 marker 不出现在三类上下文中。该项不再属于 V2 候选。
+
+### 6.8 压缩会话的「结尾实体」会抢走 Subject（调查：YICO 案例）
+
+2026-08-11 岚问：会话 `20260810_005212_f9e167` 主体明明是「副屏触摸屏校准」，为什么生成「YICO实为sRGB集线器」？取证（59 条消息）：
+
+- 真实用户消息只有 3 条（重连线 / 关机 / 「为什么是 yico」），首条是 8387 字符压缩摘要，assistant 28 条 + tool 27 条——**AI 消息占绝对多数**
+- 轮切分按 user 开头：压缩后第一个真实 user 在 #32，前 31 条 assistant 残骸全挤进第一个 opening 轮，无用户提问锚点
+- Recent 最后 7 条里 6 条是 assistant 的 YICO 复盘；轨迹最后一条也是用户问 YICO；摘要前 200 字符内 YICO 出现 3 次（活动任务就叫「YICO 触摸屏校准」）——信息分布上 YICO 完全主导
+- 温度对比实验（/tmp 临时脚本）没同步 `earlier_summary` 4 元组改动，模型连摘要锚点都没有
+
+结论：不是单一原因，是「压缩后 opening 无 user 锚点 + Recent 被结尾 AI 复盘占满 + YICO 高频」叠加。prompt 层修复 = Information hierarchy（Subject 只来自 Opening/history、Recent 永远不能单独定义 Subject、结尾才出现的设备/实体不是 Subject）；结构层修复 = 摘要作为独立 weak hint 提供（已在前一版落地）。实测：非盲改路径（真实运行）下该会话 keep 现标题「触摸屏校准误认 YICO 集线器」，不再被 YICO 抢跑；盲改（retitle-all）模式下对 YICO 偏好仍不稳定，属模型能力边界，未继续堆 prompt。
+
+### 6.9 模型照抄用户消息的小写/缩写实体（调查：skill/ov 案例）
+
+会话 `20260810_015334_f41e41` 只有 1 条用户消息（原文即小写「skill」「ov」），模型生成「skill报错排查与ov清理」——照抄而非规范。修复 = Rules 直白映射（`ov -> OpenViking, skill -> Skill`）+ 双任务双实体规则。实测：盲改输出「Skill报错排查与清理」、非盲改输出「Skill排错与OV清理」，规范大小写生效；OV 缩写仍在 12 字符护栏内可接受（岚确认）。
 
 ---
 

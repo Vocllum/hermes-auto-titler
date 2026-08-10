@@ -9,7 +9,7 @@ preview_chars: 200
 include_all_user_messages: true
 user_message_threshold: 20
 user_message_preview_chars: 200
-title_style: concise
+title_style: concise  # concise = LABEL：主体标签（Subject + 最小区分意图）；complete = SUMMARY：简短事件梗概（Subject + 主要意图/事件）。信息类型是第一约束，长度只是护栏
 strategy: conservative
 model: ""
 min_interval_minutes: 5

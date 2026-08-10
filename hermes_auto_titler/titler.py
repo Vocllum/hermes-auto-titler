@@ -164,21 +164,22 @@ class AutoTitler:
                 "action MUST be rename."
             )
 
-        # 标题风格：concise（一眼看完，开头主体为基调）/ complete（可保留
-        # 双主题脉络）。长度以字符计：中文/英文各算 1 字符，12 为目标、
-        # max_title_length 为硬上限；代码 _write 双重硬截断。
+        # 标题风格：concise = 主体标签（Subject + 最小区分意图）/ complete =
+        # 简短事件梗概（Subject + 主要意图/事件）。信息类型是第一约束，
+        # 长度只是护栏（12 为目标、max_title_length 为硬上限）。
         max_title_len = int(self.cfg.get("max_title_length", 16))
         style = self.cfg.get("title_style", "concise")
         if style == "complete":
             style_req = (
-                "COMPLETE STYLE: keep the opening main task plus its most "
-                "important distinguishing context; two parallel subjects "
-                "joined with 与/and are allowed."
+                "SUMMARY STYLE: briefly describe what the conversation is "
+                "mainly about. Preserve the main subject and the most "
+                "important intent, event, or correction."
             )
         else:
             style_req = (
-                "CONCISE STYLE: the main task established at the opening "
-                "is the base tone; never title after a latest subtask."
+                "LABEL STYLE: name the conversation. Identify its main "
+                "subject and only the minimum intent needed to distinguish "
+                "it. Do not retell what happened."
             )
         system = (
             "You maintain concise titles for Hermes conversations.\n"
@@ -186,12 +187,26 @@ class AutoTitler:
             '{"action":"keep"|"rename","title":"..."}\n'
             f"\n{rule}\n"
             f"\n{style_req}\n"
+            "\nInformation hierarchy:\n"
+            "- Subject comes from the session opening (or the earlier "
+            "history summary when the original opening was compacted away); "
+            "it is the main topic the session started about. A device or "
+            "entity that appears only in the final turns is detail, not "
+            "the subject.\n"
+            "- Main intent comes from the user-message trajectory.\n"
+            "- Recent turns show the latest event, current state, or a "
+            "genuine topic shift; they must never define the subject by "
+            "themselves.\n"
             "\nRules:\n"
-            f"- Aim for at most 12 characters; never exceed {max_title_len} "
-            "(Chinese and Latin each count as 1 character).\n"
-            "- Keep key product names and identifiers (e.g. Codex, "
-            "OpenViking, verify_on_stop) exact; use up to "
-            f"{max_title_len} rather than dropping them.\n"
+            f"- Length is a guardrail, not the goal: aim for at most 12 "
+            f"characters; never exceed {max_title_len} (Chinese and Latin "
+            "each count as 1 character).\n"
+            "- Keep key product names and identifiers exact and correctly "
+            "cased; expand informal abbreviations from the user's messages "
+            "instead of copying them: ov -> OpenViking, skill -> Skill, "
+            "Codex, Hermes, DeepSeek.\n"
+            "- When the conversation has two distinct tasks, name both "
+            "entities even if it uses the full length budget.\n"
             "- No trailing punctuation, no quotes.\n"
             "- Use the dominant language of the user's messages.\n"
             'Good: {"action":"rename","title":"Dia密码导入Apple密码"}\n'
@@ -205,7 +220,8 @@ class AutoTitler:
             lines.append(f"Current title: {current or '(none)'}")
             lines.append("")
         lines.append(
-            "Opening (the session's starting turns; the main through-line anchor):"
+            "Opening (the session's starting turns; the main through-line "
+            "anchor; primary subject source):"
         )
         for role, text in opening:
             lines.append(f"{role}: {text}")
@@ -219,13 +235,17 @@ class AutoTitler:
             lines.append(earlier_summary)
         lines.append("")
         lines.append(
-            "Recent (the latest turns; shows whether the conversation has shifted):"
+            "Recent (the latest turns; the current event, state, or a genuine "
+            "topic shift — never the subject by itself):"
         )
         for role, text in recent:
             lines.append(f"{role}: {text}")
         if all_user:
             lines.append("")
-            lines.append("User-message trajectory (how the conversation evolved):")
+            lines.append(
+                "User-message trajectory (how the conversation evolved; "
+                "the main intent source):"
+            )
             for _, text in all_user:
                 lines.append(f"user: {text}")
         user_prompt = "\n".join(lines)

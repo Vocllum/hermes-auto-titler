@@ -146,7 +146,7 @@ User-message trajectory (how the conversation evolved over time):
 
 | 风格 | 要求 |
 |---|---|
-| concise（默认） | 薇因 2026-08-10 定稿版：minimal sidebar label, not a summary——一个短短语、最少可识别概念；丢弃次要主题/结果/方法/平台设备限定词/实现细节；避免连词冒号逗号和多段标题；搜索性≠完整性；返回前再压缩一遍（remove every word that can be removed）+ 软词数锚点「Aim for at most five words. Use fewer whenever the conversation stays recognizable.」（词数比字符数语言无关：中文 5 词≈10-15 字、英文 5 词≈25-30 字符；实验 4 见 5.3） |
+| concise（默认） | 薇因 2026-08-10 定稿版：minimal sidebar label, not a summary——一个短短语、最少可识别概念；丢弃次要主题/结果/方法/平台设备限定词/实现细节；避免连词冒号逗号和多段标题；搜索性≠完整性；返回前再压缩一遍（remove every word that can be removed）+ 软词数锚点「Aim for at most five words. Use fewer whenever the conversation stays recognizable.」+ few-shot 示例（Good/Bad→Better，用岚侧边栏实测案例，见 5.3 结论 10） |
 | complete | 5~10 个词的短语；可以覆盖主要脉络，多主题用「A 与 B」结构保留 |
 
 设计动机（岚 2026-08-10）：评分时「注重概括包含完整信息但没考虑标题太复杂」——用户应能自定义要更完整的脉络还是更简洁准确的概括，但完整也不能太长。
@@ -211,6 +211,18 @@ User-message trajectory (how the conversation evolved over time):
    29→17（括号限定词消失）、#20 31→24→23（平台词压缩）。词数锚点比
    规则描述更能压住模型「保留实体与限定词」的惯性；模型自然收敛到
    2-3 词/8-17 字符，多数在锚点内仍有余量
+10. **few-shot 示例（v5，2026-08-10 岚侧边栏实测点名）**：岚看真实侧边栏
+   指出仍太长，给出「行/不行」示例（行：Viking 插件功能审查、浏览器
+   自动工作流、Windhawk备份恢复搞定；不行：搜索方案对比：Firecrawl、
+   Tavily、AnySearch、TencentDB 替代 OpenViking 部署与数据迁移、Polymate
+   QQ 机器人权限与限流设置、hermes-auto-titler 自动标题插件开发）。
+   → 提示词加 Good/Bad→Better 示例 + 单专有名词规则（多于一个实体名=
+   over-listing，只留最能识别的那个）。效果：v4b 17.0 → v5 15.7 平均，
+   ≤10 从 3 → 6，≤15 从 6 → 9；「搜索方案对比」6 字符直接命中示例。
+   剩余「长」分两类：可压缩的（Polymate 权限与限流设置 16，模型未完全
+   跟示例）与实体本身长的（verify_on_stop/OpenCode Go/Desktop SSH——
+   压缩即失去可检索性，属合理长度）。**要点：旧侧边栏标题是旧版代码
+   生成的，新提示词需插件重载 + 重跑才可见**
 
 ### 5.4 推荐配置（实验后的最优值）
 

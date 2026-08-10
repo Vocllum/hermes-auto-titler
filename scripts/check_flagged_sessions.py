@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hermes_state import SessionDB
 from hermes_auto_titler.config import load_config
-from hermes_auto_titler.messages import load_context
+from hermes_auto_titler.messages import load_context_with_summary
 from hermes_auto_titler.titler import AutoTitler
 
 class Ctx:
@@ -37,12 +37,15 @@ for r in sorted(hits, key=lambda r: -(r.get("message_count") or 0)):
     sid = r["id"]
     n = r.get("message_count") or 0
     old = (r.get("title") or "").strip()
-    recent, all_user, opening = load_context(
+    recent, all_user, opening, earlier_summary = load_context_with_summary(
         db, sid, recent_turns=2, include_all_user=True, opening_turns=2,
         preview_chars=200,
     )
     try:
-        action, title = titler._generate(None, recent, all_user, opening, blind=True)
+        action, title = titler._generate(
+            None, recent, all_user, opening,
+            blind=True, earlier_summary=earlier_summary,
+        )
     except Exception as e:
         action, title = "keep", f"(生成失败: {e})"
     print(f"\n{sid}  msgs={n}")

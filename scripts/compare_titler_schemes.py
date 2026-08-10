@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hermes_state import SessionDB  # noqa: E402
 
 from hermes_auto_titler.config import load_config  # noqa: E402
-from hermes_auto_titler.messages import load_context, message_text  # noqa: E402
+from hermes_auto_titler.messages import load_context_with_summary, message_text  # noqa: E402
 from hermes_auto_titler.titler import AutoTitler  # noqa: E402
 
 
@@ -78,7 +78,7 @@ def call_llm(ctx, system, user_text, max_tokens=300):
                 {"role": "user", "content": user_text[:4000]},
             ],
             model=None,
-            temperature=0.2,
+            temperature=0,
             max_tokens=max_tokens,
             timeout=30,
             purpose="auto-title",
@@ -155,17 +155,22 @@ def main():
     print("|---|--------|--------|--------|--------|--------|")
     for i, row in enumerate(sampled, 1):
         sid = row["id"]
-        recent, all_user, opening = load_context(
+        recent, all_user, opening, earlier_summary = load_context_with_summary(
             db, sid, recent_turns=2, include_all_user=True, opening_turns=2,
             preview_chars=200,
         )
         # v13：当前插件 prompt（全局任务版）
-        action, v13 = titler._generate(None, recent, all_user, opening, blind=True)
+        action, v13 = titler._generate(
+            None, recent, all_user, opening, blind=True,
+            earlier_summary=earlier_summary,
+        )
         v13 = v13 if action == "rename" and v13 else "(keep)"
 
         # v14：提取管线
-        raw_chars = sum(len(t) for _, t in opening + all_user)
+        raw_chars = sum(len(t) for _, t in opening + all_user) + len(earlier_summary or "")
         extract_src = []
+        if earlier_summary:
+            extract_src.append(f"Earlier history summary: {earlier_summary}")
         for role, text in opening:
             extract_src.append(f"{role}: {text}")
         extract_src.append("--- user messages ---")

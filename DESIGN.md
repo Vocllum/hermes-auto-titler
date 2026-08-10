@@ -124,10 +124,11 @@ Reply with JSON only.
 
 [user]
 Current title: xxx          ← 非 blind 模式才给（避免旧标题引导模型）
-Opening (the session's starting turns; the main through-line anchor.
-  If a compressed history summary appears first, treat it as earlier
-  history of the same session):
-                            ← opening 轮（每条 preview_chars 字符）——主线锚点
+Opening (the session's starting turns; the main through-line anchor):
+                            ← 有真实 opening 时只放开头轮；摘要永远不混入
+Earlier history summary (weak hint; may contain stale subtask details.
+Use it only to recover the broad earlier topic when the original opening is unavailable):
+                            ← 仅当原始 opening 因压缩不可见时提供；否则整段省略
 Recent (the latest turns; shows whether the conversation has shifted):
                             ← recent 轮（每条 preview_chars 字符）——判断是否转题
 User-message trajectory (how the conversation evolved):
@@ -196,7 +197,7 @@ User-message trajectory (how the conversation evolved):
 3. **preview 100≈200≈400，0（完整）最差**——完整消息有噪声且可能超时空输出；50 信息不足。100 是最优性价比
 4. **轮数 1/1 优于 2/2**——2/2 更容易被尾部话题带偏（「消息平台配置」被带成「修复 Raft 侧边栏」）。首尾各 1 轮 + 用户全量轨迹是最稳组合
 5. **梗概模式输入规模砍半**（37,680→20,286 字符），判定基本一致
-6. **系统噪声必须过滤**：`[System: model changed]`、`[CONTEXT COMPACTION]`、`[ASYNC DELEGATION]`、`[System note: interrupted]`、`[Recent Summary]` 等 Hermes 注入消息混在 user 角色里，会污染意图轨迹
+6. **系统噪声必须过滤**：`[System: model changed]`、`[CONTEXT COMPACTION]`、`[ASYNC DELEGATION]`、`[System note: interrupted]`、`MEMORY_MAINTENANCE_SUMMARY` 等 Hermes/cron 注入消息混在 user/assistant 角色里，会污染意图轨迹；`[Recent Summary]`/`[Session Arc Summary]` 属于另一类，按第 12 条单独处理
 7. **用户消息上限（防超长对话）**：两个维度独立限制——条数超
    `user_message_threshold`（默认 20）时 head+tail 采样：保留开头 1 条
    （起点锚点）+ 最近 N-1 条（当前意图），中间旧主题（含压缩续接会话
@@ -241,23 +242,10 @@ User-message trajectory (how the conversation evolved):
    不再覆盖主线就保留长版」。效果：平均 15.7 → 15.05（长度让步于概括
    性），但质量明显回归主线（codex 接入 opencode-go、Hermes symlink
    目录修复、Skill Viking 审查修复、闪白屏MPO修复 7 字符）；点名会话
-   Polymate →「Polymate 配置」11 字符命中岚期望。残余：压缩续接会话
-   （opening 是 [Session Arc Summary] 被噪声过滤）主线锚点丢失，模型仍
-   偏向当前方向（如当前会话 →「自动标题提示词迭代」）——第 6 组同款
-   根因，候选修法：从压缩摘要提取主线标题作弱 opening
-12. **摘要锚点（v7，2026-08-10 岚拍板）**：压缩续接会话的原始消息被摘要
-   替换，会话起点不存在于库中——「过滤掉往下取」取到的是压缩点之后的
-   助手干活消息，主线锚点丢失。修法：摘要类噪声（[Recent Summary]/
-   [Session Arc Summary]/[Session Summary]）从「整条过滤」改为收集，取
-   最早一条、按 preview_chars 截断后插到 opening 第一条（历史锚点）；
-   仍不进用户轨迹（轨迹保持纯净）；纯系统通知类（[System:]/[CONTEXT
-   COMPACTION]/[ASYNC]）保持过滤；prompt Opening 段加说明。效果：压缩
-   续接会话组 15.25 → 14.75（Dia「Dia密码导入Apple密码」14→「Dia 密码
-   导入」8、Tailscale 17→14、当前会话回到「自动标题插件优化」）；
-   非压缩组波动（如搜索方案 6→29）为模型随机性（输入相同输出不同），
-   非锚点影响。副作用：个别会话被摘要里的具体任务词带偏（#15「Windows
-   装 cua-driver」）、摘要标题较完整时会诱使模型复述（Polymate 21 字符
-   一次）。34 测试通过
+   Polymate →「Polymate 配置」11 字符命中岚期望。残余：压缩续接会话的原始
+   opening 被摘要替换时，不能把压缩后的助手干活消息当作全局主线；这一
+   语义问题由第 12 条的独立 weak summary 段修正。
+12. **压缩摘要是独立 weak hint（v7 重构，2026-08-10）**：压缩续接会话的原始消息被摘要替换，会话起点可能不存在于库中。摘要类前缀（`[Recent Summary]`/`[Session Arc Summary]`/`[Session Summary]`）先收集，但**永远不进入 Opening、Recent 或用户轨迹**：有真实 opening 时完全不提供摘要；只有摘要先于所有可见真实消息、说明原始 opening 可能已丢失时，才单独增加 `Earlier history summary (weak hint; may contain stale subtask details...)` 段。这样把摘要明确降级为恢复 broad topic 的弱线索，避免模型把摘要中的陈旧子任务当作当前 opening。摘要仍按 `preview_chars` 截断，取最早一条。对应回归测试覆盖「摘要在开头」「真实 opening 在摘要前」「摘要不进三类上下文」三种路径
 
 ### 5.4 提示词演进 v8→v13（2026-08-10 岚 0 分否决过度设计）
 
@@ -316,7 +304,9 @@ max_title_length: 16        # v13 定稿：字符硬上限（中/英各 1 字符
 
 `complete_structured` 在 opencode-go provider 每次返回 400 `invalid_request_error: This response_format type is unavailable now`，异常被 catch 后静默返回 keep——hook 跑了但从不改名，标题无任何变化。
 
-**修复**：`ctx.llm.complete(messages=[...], temperature=0.2, max_tokens=150, timeout=30, purpose="auto-title")` + `_parse_decision` 容错解析（JSON → 提取含 action 的内嵌 JSON → 关键词正则启发式兜底）。任何 provider 兼容。
+**修复**：`ctx.llm.complete(messages=[...], temperature=0, max_tokens=150, timeout=30, purpose="auto-title")` + `_parse_decision` 容错解析（JSON → 提取含 action 的内嵌 JSON → 关键词正则启发式兜底）。`temperature=0` 固定标题生成，减少同一输入仅因采样产生的漂移；任何 provider 兼容。
+
+**temperature 对比（2026-08-10）**：固定 10 个真实会话各调用一次 `0.2` 与 `0`，仅 2/10 次输出相同。`0.2` 平均 12.2 字符、最长 18；`0` 平均 12.6 字符、最长 16。`0` 的结果在「AnySearch 值不值得用」「opencode-go 切换与验证」等会话里保留了更明确的任务/结果边界，未观察到质量退化；因此正式调用和比较脚本统一使用 `temperature=0`。这是一组质量抽样，不把一次调用当成 provider 的绝对确定性保证。
 
 ### 6.2 目录插件必须根目录有 `__init__.py`
 
@@ -340,9 +330,11 @@ Hermes `_load_directory_module` 要求插件根目录直接有 `__init__.py`，�
 
 `derived` 来源 + 标题 >40 字符 = 首条消息截断产物，模型即使判定 keep 也要强制 rename（`force_rename` 追加「当前标题是自动截断的长文本，不合格」）。
 
-### 6.7 cron 注入消息会伪装成首条用户消息
+### 6.7 cron 注入消息会伪装成首条用户消息（已修复）
 
-四方案对比 #5 暴露：cron 任务注入的会话以 `MEMORY_MAINTENANCE_SUMMARY …` 开头（role=user），Hermes 原生方案（只喂首条消息）直接把它当用户意图，标题跑飞成整段注入文本。我们插件的 `_SYSTEM_NOISE_PREFIXES` 目前覆盖 `[system:`/`[context compaction`/`[async delegation`/`[important:` 等，**不含** `MEMORY_MAINTENANCE_SUMMARY` 类前缀——遇到 cron 注入开头会话时轨迹会被污染（v13 对比用的是 opening+轨迹，首条消息只是 opening 之一，影响小于 Hermes 方案，但应补前缀）。
+四方案对比 #5 暴露：cron 任务注入的会话会写入 `MEMORY_MAINTENANCE_SUMMARY …` 标记（消息角色可能是 user 或 assistant）。Hermes 原生方案只喂首条消息，直接把它当用户意图，标题跑飞成整段注入文本。
+
+**修复已落地**：`_SYSTEM_NOISE_PREFIXES` 加入大小写不敏感的 `memory_maintenance_summary` 前缀，和 `[system:]`、`[context compaction]`、`[async delegation]`、`[important:]` 一样在进入 recent/opening/用户轨迹前过滤；回归测试覆盖 marker 不出现在三类上下文中。该项不再属于 V2 候选。
 
 ---
 
@@ -384,5 +376,4 @@ Git 提交身份：`git -c user.name="Vocllum" -c user.email="149675937+Vocllum@
 - retitle-all 跳过刚评估过的会话（`_last_eval` 时间戳过滤 ~5 分钟，一行实现，当前未加——显式操作重复评估场景少，保持轻量）
 - legacy NULL 标题的官方升级路径（需上游支持，当前尊重保护）
 - v14 提取管线作超长会话降级选项（输入 20 倍压缩但提取幻觉风险，#6 跑偏案例，见 §5.5；触发条件可定为「输入超阈值才启用」）
-- 噪声前缀补 `MEMORY_MAINTENANCE_SUMMARY` 类 cron 注入（见 §6.7）
 - 中英混排空格规范化（`Codex装OpenViking` → `Codex 装 OpenViking`，v12 暴露的书写规范缺口，v13 靠 prompt 示例缓解，未做代码层 normalize）

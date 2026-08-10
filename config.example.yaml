@@ -14,3 +14,4 @@ strategy: conservative
 model: ""
 min_interval_minutes: 5
 max_title_length: 16
+max_display_width: 40

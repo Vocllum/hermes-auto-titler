@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_state import SessionDB
 
-from .messages import display_width, load_context, truncate_to_width
+from .messages import display_width, load_context_with_summary, truncate_to_width
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ class AutoTitler:
         if src is None and current:
             return {"action": "skipped", "reason": "legacy title (NULL provenance) is protected"}
 
-        recent, all_user, opening = load_context(
+        recent, all_user, opening, earlier_summary = load_context_with_summary(
             db,
             session_id,
             int(self.cfg.get("recent_turns", 2)),
@@ -116,6 +116,7 @@ class AutoTitler:
         action, title = self._generate(
             current, recent, all_user, opening,
             force_rename=force_rename, blind=blind,
+            earlier_summary=earlier_summary,
         )
         if action != "rename" or not title or title == current:
             log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)
@@ -137,6 +138,7 @@ class AutoTitler:
         opening: List[Tuple[str, str]],
         force_rename: bool = False,
         blind: bool = False,
+        earlier_summary: Optional[str] = None,
     ) -> Tuple[str, Optional[str]]:
         strategy = self.cfg.get("strategy", "conservative")
         if blind:
@@ -203,12 +205,18 @@ class AutoTitler:
             lines.append(f"Current title: {current or '(none)'}")
             lines.append("")
         lines.append(
-            "Opening (the session's starting turns; the main through-line anchor. "
-            "If a compressed history summary appears first, treat it as earlier "
-            "history of the same session):"
+            "Opening (the session's starting turns; the main through-line anchor):"
         )
         for role, text in opening:
             lines.append(f"{role}: {text}")
+        if earlier_summary:
+            lines.append("")
+            lines.append(
+                "Earlier history summary (weak hint; may contain stale subtask details. "
+                "Use it only to recover the broad earlier topic when the original "
+                "opening is unavailable):"
+            )
+            lines.append(earlier_summary)
         lines.append("")
         lines.append(
             "Recent (the latest turns; shows whether the conversation has shifted):"
@@ -229,7 +237,7 @@ class AutoTitler:
                     {"role": "user", "content": user_prompt},
                 ],
                 model=self.cfg.get("model") or None,
-                temperature=0.2,
+                temperature=0,
                 max_tokens=150,
                 timeout=30,
                 purpose="auto-title",

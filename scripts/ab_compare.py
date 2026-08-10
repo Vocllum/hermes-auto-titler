@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hermes_state import SessionDB
 
 from hermes_auto_titler.config import load_config
-from hermes_auto_titler.messages import load_context
+from hermes_auto_titler.messages import load_context_with_summary
 from hermes_auto_titler.titler import AutoTitler
 
 # 抽样：长会话（多用户消息/多轮）优先，覆盖各种形态
@@ -52,7 +52,7 @@ def main():
         print(f"\n=== {sid[:16]} [{src}] 当前标题: {current}")
 
         for label, pv in (("梗概200", 200), ("完整0", 0)):
-            recent, all_user, opening = load_context(
+            recent, all_user, opening, earlier_summary = load_context_with_summary(
                 db, sid,
                 recent_turns=2,
                 include_all_user=True,
@@ -60,8 +60,11 @@ def main():
                 ignore_model_messages=False,
                 preview_chars=pv,
             )
-            n_in = sum(len(t) for _, t in opening + recent + all_user)
-            action, title = titler._generate(current, recent, all_user, opening)
+            n_in = sum(len(t) for _, t in opening + recent + all_user) + len(earlier_summary or "")
+            action, title = titler._generate(
+                current, recent, all_user, opening,
+                earlier_summary=earlier_summary,
+            )
             print(f"  [{label}] 输入{len(opening + recent + all_user)}条/{n_in}字符 -> {action}: {title}")
     db.close()
 

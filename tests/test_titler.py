@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, "..")
 
 from hermes_auto_titler.config import DEFAULTS
-from hermes_auto_titler.messages import load_context
+from hermes_auto_titler.messages import load_context, load_context_with_summary
 from hermes_auto_titler.titler import AutoTitler
 
 
@@ -300,6 +300,13 @@ def test_short_derived_title_not_forced():
     assert r["action"] == "keep"
 
 
+def test_title_generation_uses_zero_temperature():
+    db = FakeDB(messages=MSGS, title=None)
+    t, ctx = make_titler(db, text=_dec("keep"))
+    t.evaluate("s1", force=True)
+    assert ctx.llm.calls[0]["temperature"] == 0
+
+
 def test_generate_blind_omits_current_title_and_forces_rename():
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t, ctx = make_titler(db, text=_dec("rename", "新标题"))
@@ -312,6 +319,28 @@ def test_generate_blind_omits_current_title_and_forces_rename():
     assert "truncated auto-generated" not in system  # 不是 derived 截断文案
     assert "Current title:" not in user_prompt  # 原标题不喂给模型
     assert "Opening (" in user_prompt
+
+
+def test_generate_renders_summary_as_separate_weak_hint():
+    messages = [
+        {"role": "user", "content": "[Session Arc Summary (d1, node 73)] # 当前焦点：X 项目开发"},
+        {"role": "user", "content": "压缩后的可见开头"},
+        {"role": "assistant", "content": "继续处理"},
+    ]
+    db = FakeDB(messages=messages, title=None)
+    t, ctx = make_titler(db, text=_dec("rename", "X 项目开发"))
+    recent, all_user, opening, summary = load_context_with_summary(
+        db, "s1", recent_turns=2, include_all_user=True, opening_turns=1
+    )
+    action, title = t._generate(
+        None, recent, all_user, opening, blind=True, earlier_summary=summary
+    )
+    assert (action, title) == ("rename", "X 项目开发")
+    prompt = ctx.llm.calls[0]["messages"][1]["content"]
+    opening_block = prompt.split("Opening (", 1)[1].split("Earlier history summary", 1)[0]
+    assert "Session Arc Summary" not in opening_block
+    assert "Earlier history summary (weak hint" in prompt
+    assert "Session Arc Summary" in prompt
 
 
 def test_retitle_all_skips_user_and_uses_blind():

@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hermes_state import SessionDB
 
 from hermes_auto_titler.config import load_config
-from hermes_auto_titler.messages import load_context
+from hermes_auto_titler.messages import load_context_with_summary
 from hermes_auto_titler.titler import AutoTitler
 
 # 7 组参数：preview / opening / recent / style（全部：带AI、用户全量、过滤噪声、conservative+blind）
@@ -88,17 +88,18 @@ def main():
         # ---- 矩阵生成 ----
         print("--- 标题矩阵（全部 conservative + blind 重新生成 + 过滤噪声）---")
         for label, pv, op, rt, style in CONFIGS:
-            recent, all_user, opening = load_context(
+            recent, all_user, opening, earlier_summary = load_context_with_summary(
                 db, sid, recent_turns=rt, include_all_user=True,
                 opening_turns=op, ignore_model_messages=False, preview_chars=pv,
             )
-            n_chars = sum(len(t) for _, t in opening + recent + all_user)
+            n_chars = sum(len(t) for _, t in opening + recent + all_user) + len(earlier_summary or "")
             saved = titler.cfg.get("title_style")
             if style != saved:
                 titler.cfg["title_style"] = style
             try:
                 action, title = titler._generate(
-                    current, recent, all_user, opening, blind=True)
+                    current, recent, all_user, opening,
+                    blind=True, earlier_summary=earlier_summary)
             finally:
                 titler.cfg["title_style"] = saved
             print(f"  {label}: {title or '(空)'}  [输入{len(opening+recent+all_user)}条/{n_chars}字符]")

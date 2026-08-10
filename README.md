@@ -5,7 +5,8 @@ Hermes 插件：会话标题自动维护。每次对话结束后按配置的轮�
 ## 工作原理
 
 - 挂 `on_session_end` hook（每轮对话结束触发），按 `every_n_turns` 轮数节流评估
-- 评估输入：当前标题 + 最近 N 轮消息 +（可选）全部用户消息，只取纯文本，附件仅留占位符
+- 评估输入：当前标题 + 会话开头/最近消息 +（可选）全部用户消息，只取纯文本，附件仅留占位符；压缩历史摘要只有在原始 opening 不可见时作为单独 weak hint 提供
+- Hermes/cron 系统注入（包括 `MEMORY_MAINTENANCE_SUMMARY`）在进入模型前过滤
 - 判断模型独立于主对话（默认宿主模型，可配 deepseek-v4-flash），输出 `keep` / `rename` JSON
 - 写回遵守 Hermes 标题来源优先级：**用户手改的标题永不覆盖**；自动标题（llm/derived）可更新且保持可升级
 - 标题冲突（被其他会话占用）自动加后缀重试
@@ -47,10 +48,11 @@ plugins:
 | `user_message_threshold` | `20` | 用户消息条数上限（0=不限）；超限保留开头 1/4 + 最近 3/4，防超长对话 |
 | `user_message_preview_chars` | `200` | 单条用户消息超过该长度时提取首尾句（各限一半预算，保留意图与结论） |
 | `title_style` | `concise` | `concise` ChatGPT 式 3~5 词一眼看完 / `complete` 5~10 词保留完整脉络 |
-| `strategy` | `conservative` | `conservative` 明显不匹配才改（优先主线）/ `aggressive` 每次优化（优先最近主题） |
+| `strategy` | `conservative` | `conservative` 明显不匹配才改（优先开头主线）/ `aggressive` 每次优化（开头主线仍优先于最新子任务） |
 | `model` | `""` | 留空 = 宿主默认模型；本地示例 `deepseek-v4-flash` |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔 |
-| `max_title_length` | `80` | 标题最大字符数（上限 100，Hermes 限制） |
+| `max_title_length` | `16` | 标题最大字符数（12 为目标，16 为字符硬上限；Hermes 上限 100） |
+| `max_display_width` | `40` | 侧边栏显示列宽硬上限（中/全角 2 列，半角 1 列） |
 
 ## 命令
 

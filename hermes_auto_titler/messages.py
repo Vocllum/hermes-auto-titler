@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 
 def char_cols(ch: str) -> int:
@@ -78,11 +78,13 @@ _SYSTEM_NOISE_PREFIXES = (
     "[context compaction",
     "[async delegation",
     "[important:",
+    # cron-memory-maintenance 的最终标记（通常以 assistant 角色写回消息流）
+    "memory_maintenance_summary",
 )
 
-# 压缩摘要（混在 user 角色）：同样不是用户意图，不进轨迹；但它是压缩续接
-# 会话唯一的历史浓缩（原始消息已被替换），作为 opening 的「历史锚点」——
-# 否则模型只能看到压缩点之后的助手干活消息，主线锚点丢失（标题漂移根因）。
+# 压缩摘要（混在 user 角色）：不是用户意图，也不进轨迹；只有在原始 opening
+# 已被压缩替换时，作为单独的「Earlier history summary」弱提示返回。这样它不再
+# 冒充 Opening，也不会把摘要中的过时子任务误当成真实开头。
 _SUMMARY_PREFIXES = (
     "[recent summary",
     "[session arc summary",
@@ -142,7 +144,7 @@ def sample_user_messages(users: List[Tuple[str, str]], threshold: int) -> List[T
     return users[:head] + users[-tail:]
 
 
-def load_context(
+def load_context_with_summary(
     db,
     session_id: str,
     recent_turns: int,
@@ -152,19 +154,22 @@ def load_context(
     preview_chars: int = 200,
     user_message_threshold: int = 0,
     user_message_preview_chars: int = 0,
-) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
-    """返回 (最近 N 轮 user/assistant 对, 全部用户消息, 开头 M 轮)，均为 (role, text)。
+) -> Tuple[
+    List[Tuple[str, str]],
+    List[Tuple[str, str]],
+    List[Tuple[str, str]],
+    Optional[str],
+]:
+    """返回 (recent, all_user, opening, earlier_summary)。
 
-    开头几轮用于让模型看到会话主线（标题不应被最新小任务带偏）。
-    ignore_model_messages=True 时过滤掉 assistant 消息（recent/opening 只含 user）。
-    preview_chars：opening/recent 的每条消息只保留前 N 字符（≈ 前几句话），
-    让模型看到的是「开头两句 + 结尾两句」的全文梗概，而不是被超长回复淹没。
-    user_message_threshold：用户消息条数上限，超限时 head+tail 采样（开头 1 条 + 最近 N-1 条）。
-    user_message_preview_chars：单条用户消息超长时提取首尾句（smart_preview）。
+    earlier_summary 只在可见消息中没有真实 opening、且存在压缩摘要时提供；
+    它永远不进入 opening、recent 或用户意图轨迹。
     """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
     summaries: List[str] = []
+    saw_visible_opening = False
+    saw_summary = False
     for m in conv:
         role = m.get("role")
         if role not in ("user", "assistant"):
@@ -176,9 +181,12 @@ def load_context(
             continue
         if is_summary(text):
             summaries.append(text)
+            saw_summary = True
             continue
         if is_system_noise(text):
             continue
+        if not saw_summary:
+            saw_visible_opening = True
         pairs.append((role, text))
 
     def preview(text: str) -> str:
@@ -207,14 +215,38 @@ def load_context(
     if cur:
         rounds.append(cur)
     opening = [item for r in rounds[:opening_turns] for item in r]
-    # 压缩摘要作历史锚点：放在 opening 最前（时间上早于所有可见消息）。
-    # 取最早一条（最接近会话起点，主线线索最原始）；截断与 opening 一致。
-    if summaries:
-        opening.insert(0, ("user", preview(summaries[0])))
+    # 摘要永远不进入 opening；只有它先于所有可见真实消息时，才作为独立弱提示。
+    earlier_summary = preview(summaries[0]) if summaries and not saw_visible_opening else None
 
     # 用户消息 = 意图轨迹；超长单条提取首尾句，超条数首尾采样
     users = [(r, t) for r, t in pairs if r == "user"]
     if user_message_preview_chars > 0:
         users = [(r, smart_preview(t, user_message_preview_chars)) for r, t in users]
     users = sample_user_messages(users, user_message_threshold)
-    return recent, (users if include_all_user else []), opening
+    return recent, (users if include_all_user else []), opening, earlier_summary
+
+
+def load_context(
+    db,
+    session_id: str,
+    recent_turns: int,
+    include_all_user: bool,
+    opening_turns: int = 2,
+    ignore_model_messages: bool = False,
+    preview_chars: int = 200,
+    user_message_threshold: int = 0,
+    user_message_preview_chars: int = 0,
+) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
+    """兼容旧调用：返回 (recent, all_user, opening)，不暴露摘要弱提示。"""
+    recent, all_user, opening, _ = load_context_with_summary(
+        db,
+        session_id,
+        recent_turns,
+        include_all_user,
+        opening_turns,
+        ignore_model_messages,
+        preview_chars,
+        user_message_threshold,
+        user_message_preview_chars,
+    )
+    return recent, all_user, opening

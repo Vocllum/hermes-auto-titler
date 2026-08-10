@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hermes_state import SessionDB
 
 from hermes_auto_titler.config import load_config
-from hermes_auto_titler.messages import load_context
+from hermes_auto_titler.messages import load_context_with_summary
 from hermes_auto_titler.titler import AutoTitler
 
 SHOW = 10
@@ -70,13 +70,16 @@ def main():
     for i, (row, tsrc) in enumerate(picked, 1):
         sid = row["id"]
         current = row.get("title") or ""
-        recent, all_user, opening = load_context(
+        recent, all_user, opening, earlier_summary = load_context_with_summary(
             db, sid,
             recent_turns=2, include_all_user=True,
             opening_turns=2, ignore_model_messages=False,
             preview_chars=200,
         )
-        action, title = titler._generate(current, recent, all_user, opening, blind=blind)
+        action, title = titler._generate(
+            current, recent, all_user, opening,
+            blind=blind, earlier_summary=earlier_summary,
+        )
         n_msgs = row.get("message_count") or 0
         n_user = sum(1 for r, _ in all_user)
         traj = " | ".join(clip(t, 80) for _, t in all_user[:8])

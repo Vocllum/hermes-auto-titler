@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, "..")
 
 from hermes_auto_titler.config import DEFAULTS, load_config, save_config
-from hermes_auto_titler.messages import load_context, message_text
+from hermes_auto_titler.messages import load_context, load_context_with_summary, message_text
 
 
 def test_message_text_plain_string():
@@ -103,6 +103,7 @@ def test_load_context_preview_chars():
 def test_load_context_filters_system_noise():
     conv = [
         {"role": "user", "content": "[System: The active model has changed to deepseek-v4-flash]"},
+        {"role": "user", "content": "MEMORY_MAINTENANCE_SUMMARY\n\n定时记忆维护完成"},
         {"role": "user", "content": "真实提问一"},
         {"role": "assistant", "content": "[ASYNC DELEGATION BATCH COMPLETE — deleg_abc] 一堆子代理结果"},
         {"role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted..."},
@@ -112,24 +113,24 @@ def test_load_context_filters_system_noise():
         {"role": "user", "content": "[Recent Summary (d0, node 1)] ## 当前状态"},
     ]
     db = FakeDB(conv)
-    recent, all_user, opening = load_context(
+    recent, all_user, opening, summary = load_context_with_summary(
         db, "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     roles_texts = [t for _, t in recent]
     assert "真实提问一" in roles_texts
     assert "真实提问二" in roles_texts
     assert "正常回复" in roles_texts
-    # 纯系统通知噪声全部被过滤（摘要类除外——见 opening 锚点断言）
+    # 纯系统通知噪声全部被过滤；摘要不混入 opening
     assert all("[System" not in t and "[ASYNC" not in t and "[CONTEXT" not in t
                for _, t in recent + opening + all_user)
-    # 摘要不进轨迹
     assert all_user == [("user", "真实提问一"), ("user", "真实提问二")]
-    assert all("[Recent" not in t for _, t in recent + all_user)
-    # 摘要作为历史锚点出现在 opening 第一条（压缩续接会话的主线线索）
-    assert opening[0] == ("user", "[Recent Summary (d0, node 1)] ## 当前状态")
+    assert all("[Recent" not in t for _, t in recent + opening + all_user)
+    # 有真实 opening 时，不提供 summary hint；摘要不能冒充 opening。
+    assert summary is None
+    assert opening[0] == ("user", "真实提问一")
 
 
-def test_load_context_summary_anchor():
+def test_load_context_summary_hint_only_when_opening_is_missing():
     conv = [
         {"role": "user", "content": "[Session Arc Summary (d1, node 73)] # 当前焦点：X 项目开发"},
         {"role": "user", "content": "m1"},
@@ -137,37 +138,55 @@ def test_load_context_summary_anchor():
         {"role": "user", "content": "[Recent Summary (d0, node 5)] # 更早的历史"},
         {"role": "user", "content": "m2"},
     ]
-    db = FakeDB(conv)
-    recent, all_user, opening = load_context(
-        db, "s1", recent_turns=2, include_all_user=True, opening_turns=2
+    _, all_user, opening, summary = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
-    # 最早一条摘要作为锚点（最接近会话起点），后续正常轮次跟上
-    assert opening[0][1].startswith("[Session Arc Summary")
-    assert opening[1] == ("user", "m1")
+    # 摘要永远不进入 opening；最早摘要单独作为弱提示
+    assert opening[0] == ("user", "m1")
     assert ("assistant", "a1") in opening
-    # 摘要不进轨迹、不进 recent
+    assert summary.startswith("[Session Arc Summary")
     assert all_user == [("user", "m1"), ("user", "m2")]
-    assert all("Summary" not in t for _, t in recent)
-    # 无摘要会话：opening 行为不变
-    _, _, op_plain = load_context(
-        db, "s1", recent_turns=2, include_all_user=True, opening_turns=1
+
+    # 真实 opening 在摘要之前时，不提供 summary hint
+    real_opening = [
+        {"role": "user", "content": "真正的开头"},
+        {"role": "assistant", "content": "开头回复"},
+        {"role": "user", "content": "[Session Arc Summary (d1, node 2)] 压缩摘要"},
+        {"role": "user", "content": "后续消息"},
+    ]
+    _, _, op2, summary2 = load_context_with_summary(
+        FakeDB(real_opening), "s1", recent_turns=2, include_all_user=True, opening_turns=1
     )
-    assert op_plain[0] == ("user", "[Session Arc Summary (d1, node 73)] # 当前焦点：X 项目开发")
+    assert summary2 is None
+    assert op2 == [("user", "真正的开头"), ("assistant", "开头回复")]
 
 
-def test_load_context_summary_anchor_truncated():
+def test_load_context_summary_hint_truncated():
     conv = [
         {"role": "user", "content": "[Recent Summary (d0, node 1)] " + "y" * 500},
         {"role": "user", "content": "m1"},
     ]
-    db = FakeDB(conv)
-    _, _, opening = load_context(
-        db, "s1", recent_turns=2, include_all_user=True, opening_turns=1,
+    _, _, opening, summary = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
         preview_chars=200,
     )
-    # 超长摘要按 preview_chars 截断（与 opening 其他消息一致）
-    assert len(opening[0][1]) <= 201
-    assert opening[0][1].endswith("…")
+    assert opening == [("user", "m1")]
+    assert summary is not None and len(summary) <= 201
+    assert summary.endswith("…")
+
+
+def test_load_context_filters_cron_maintenance_marker():
+    conv = [
+        {"role": "user", "content": "真实任务"},
+        {"role": "assistant", "content": "MEMORY_MAINTENANCE_SUMMARY\\n\\n已完成记忆维护"},
+        {"role": "user", "content": "继续真实任务"},
+    ]
+    recent, all_user, opening = load_context(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
+    )
+    texts = [t for _, t in recent + opening + all_user]
+    assert all("MEMORY_MAINTENANCE_SUMMARY" not in t for t in texts)
+    assert all_user == [("user", "真实任务"), ("user", "继续真实任务")]
 
 
 def test_display_width_counts_columns():

@@ -22,7 +22,7 @@ from agent.title_generator import derive_title  # noqa: E402
 from hermes_state import SessionDB  # noqa: E402
 
 from hermes_auto_titler.config import load_config  # noqa: E402
-from hermes_auto_titler.messages import load_context, message_text  # noqa: E402
+from hermes_auto_titler.messages import load_context_with_summary, message_text  # noqa: E402
 from hermes_auto_titler.titler import AutoTitler  # noqa: E402
 
 N_SAMPLES = 20
@@ -51,13 +51,15 @@ def first_user_message(db, sid):
 
 def brief(db, sid):
     """评分用简报：开头 1 轮 + 最近 1 轮（≤150 字符/条），与插件输入同源。"""
-    recent, _, opening = load_context(
+    recent, _, opening, earlier_summary = load_context_with_summary(
         db, sid, recent_turns=1, include_all_user=False, opening_turns=1,
         preview_chars=150,
     )
     parts = []
     for role, text in opening:
         parts.append(f"{role}: {text}")
+    if earlier_summary:
+        parts.append(f"earlier summary: {earlier_summary}")
     if recent != opening:
         for role, text in recent:
             parts.append(f"{role}: {text}")
@@ -95,12 +97,15 @@ def main():
         # 关闭组：上游原生 derived（首条用户消息）
         off = derive_title(first_user_message(db, sid)) or "(无)"
         # 开启组：插件盲改（不写库）
-        recent, all_user, opening = load_context(
+        recent, all_user, opening, earlier_summary = load_context_with_summary(
             db, sid, recent_turns=2, include_all_user=True, opening_turns=2,
             preview_chars=200,
         )
         try:
-            action, title = titler._generate(None, recent, all_user, opening, blind=True)
+            action, title = titler._generate(
+                None, recent, all_user, opening,
+                blind=True, earlier_summary=earlier_summary,
+            )
         except Exception as e:
             action, title = "keep", f"(生成失败: {e})"
         on = title if action == "rename" and title else "(keep)"

@@ -13,4 +13,4 @@ title_style: concise
 strategy: conservative
 model: ""
 min_interval_minutes: 5
-max_title_length: 80
+max_title_length: 16

@@ -170,6 +170,37 @@ def test_load_context_summary_anchor_truncated():
     assert opening[0][1].endswith("…")
 
 
+def test_display_width_counts_columns():
+    from hermes_auto_titler.messages import char_cols, display_width
+
+    # 中文/全角 = 2 列，英文/数字/半角 = 1 列
+    assert char_cols("中") == 2
+    assert char_cols("a") == 1
+    assert char_cols("1") == 1
+    assert char_cols("：") == 2  # 全角冒号
+    assert char_cols(":") == 1  # 半角冒号
+    assert display_width("搜索方案对比") == 12
+    assert display_width("Codex OpenViking") == 16
+    # 中文 12 + 全角冒号 2 + Firecrawl 9 + 空格 1 + vs 2 + 空格 1 + AnySearch 9
+    assert display_width("搜索方案对比：Firecrawl vs AnySearch") == 36
+
+
+def test_truncate_to_width_breaks_at_boundary():
+    from hermes_auto_titler.messages import truncate_to_width
+
+    # 不超限原样
+    assert truncate_to_width("简短标题", 40) == "简短标题"
+    # 超限回退到最近分隔符（空格），不留尾随分隔符
+    assert truncate_to_width("Codex opencode-go 配置迁移", 20) == "Codex opencode-go"
+    # 超限回退到标点
+    assert truncate_to_width("搜索方案对比：Firecrawl vs AnySearch", 14) == "搜索方案对比"
+    # 纯长词（无分隔符）硬切，不产生半列：12 列 = 6 个中文字
+    assert truncate_to_width("这是一个非常非常长的中文标题测试用例", 12) == "这是一个非常"
+    # 宽度精确边界：恰好等于 max_cols 不截
+    assert truncate_to_width("中文标题", 8) == "中文标题"
+    assert truncate_to_width("中文标题啊", 8) == "中文标题"  # 第 9 列放不下第 5 个字
+
+
 def test_smart_preview_extracts_first_last_sentence():
     from hermes_auto_titler.messages import smart_preview
 

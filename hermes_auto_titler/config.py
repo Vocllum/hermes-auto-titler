@@ -22,7 +22,8 @@ DEFAULTS: dict[str, Any] = {
     "strategy": "conservative",
     "model": "",
     "min_interval_minutes": 5,
-    "max_title_length": 80,
+    "max_title_length": 16,
+    "max_display_width": 40,
 }
 
 VALID_STRATEGIES = {"conservative", "aggressive"}
@@ -50,6 +51,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     cfg["recent_turns"] = max(1, int(cfg.get("recent_turns", 2)))
     cfg["min_interval_minutes"] = max(0.0, float(cfg.get("min_interval_minutes", 5)))
     cfg["max_title_length"] = max(10, min(int(cfg.get("max_title_length", 80)), 100))
+    cfg["max_display_width"] = max(10, min(int(cfg.get("max_display_width", 40)), 100))
     return cfg
 
 

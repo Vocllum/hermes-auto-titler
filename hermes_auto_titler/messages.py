@@ -6,7 +6,45 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, List, Tuple
+
+
+def char_cols(ch: str) -> int:
+    """单字符显示列宽：East Asian Wide/Fullwidth = 2 列，其余 = 1 列。
+
+    中文/全角符号（：、（）等）= 2 列，拉丁字母/数字/半角符号 = 1 列，
+    emoji 在 Python 3.11 大多归入 W 也按 2 列。零依赖（unicodedata）。
+    """
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def display_width(text: str) -> int:
+    """标题显示宽度（列），与侧边栏实际渲染宽度同量纲。"""
+    return sum(char_cols(ch) for ch in text)
+
+
+# 截断回退用的分隔符（空格 + 中英文标点）
+_TRUNC_BREAKS = set(" 　,，。、；;:：()（）/-—…·`\"'《》【】")
+
+
+def truncate_to_width(text: str, max_cols: int) -> str:
+    """按显示列宽截断；截断点尽量回退到最近分隔符，避免中文词被拦腰切断。
+
+    max_cols <= 0 或宽度不超限时原样返回。回退失败（纯长词）才硬切。
+    """
+    if max_cols <= 0 or display_width(text) <= max_cols:
+        return text
+    cols = 0
+    for i, ch in enumerate(text):
+        c = char_cols(ch)
+        if cols + c > max_cols:
+            for j in range(i - 1, -1, -1):
+                if text[j] in _TRUNC_BREAKS:
+                    return text[:j]  # 截到分隔符前，不留尾部空格/标点
+            return text[:i]
+        cols += c
+    return text
 
 
 def _part_text(part: dict) -> str:

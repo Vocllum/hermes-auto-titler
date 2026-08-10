@@ -1,6 +1,6 @@
 # hermes-auto-titler 设计与实验文档
 
-> 状态：v0.1.0 已发布，真实环境验证通过；参数矩阵实验完成（2026-08-10）
+> 状态：v0.1.0 已发布，真实环境验证通过；参数矩阵实验完成（2026-08-10）；提示词 v13 定稿（四方案对比胜出，2026-08-10）
 > 关联：README.md（使用说明）· scripts/（实验与验证脚本）
 
 ---
@@ -89,71 +89,80 @@ include_all_user_messages: true  # 附加全部用户消息（意图轨迹，不
 user_message_threshold: 20       # 用户消息条数上限（0=不限）；超限保留开头 1 条 + 最近 N-1 条
 user_message_preview_chars: 200  # 单条用户消息触发线：超过则提取首尾句（各限一半预算）
 title_style: concise             # concise（3~5 词一眼看完）| complete（5~10 词完整脉络）
-strategy: conservative           # conservative（主线优先，明显不匹配才改）| aggressive（每次优化，优先最近主题）
+strategy: conservative           # conservative（明显不匹配才改，主线优先）| aggressive（每次优化，但开头主线仍优先于最新子任务）
 model: ""                        # 留空 = 宿主辅助模型；本地 deepseek-v4-flash
 min_interval_minutes: 5          # 同一会话两次评估最短间隔（防抖）
-max_title_length: 80             # 标题上限（SessionDB.MAX_TITLE_LENGTH=100 硬上限）
+max_title_length: 16             # 字符硬上限（中/英各算 1 字符；12 为目标、16 为上限，宁保关键实体用满 16）
+max_display_width: 40            # 列宽硬上限（全角 2 列/半角 1 列；写回时双重截断）
 ```
 
 配置注释写给使用者：config.example.yaml 只写默认值和可选值，解释进 README。
 
 ---
 
-## 4. 提示词设计
+## 4. 提示词设计（v13 定稿，2026-08-10 四方案对比胜出）
 
 ### 4.1 结构
 
 ```
 [system]
-You maintain concise, useful titles for Hermes conversations.
+You maintain concise titles for Hermes conversations.
 Return JSON only: {"action":"keep"|"rename","title":"..."}
 {rule}                     ← 策略段（英文：conservative / aggressive / blind）
-{style_req}                ← 风格段（英文：CONCISE STYLE / COMPLETE STYLE 全文）
-The title must: identify at a glance; preserve main task; specific & searchable;
-avoid generic words; match dominant user language; no quotation marks.
-The configured maximum title length is {max_title_length} characters.
-This is a hard safety limit, not a target length.
+{style_req}                ← 风格段（英文：CONCISE STYLE / COMPLETE STYLE）
+Rules:
+- Aim for at most 12 characters; never exceed {max_title_len}
+  (Chinese and Latin each count as 1 character).
+- Keep key product names and identifiers (e.g. Codex, OpenViking,
+  verify_on_stop) exact; use up to {max_title_len} rather than dropping them.
+- No trailing punctuation, no quotes.
+- Use the dominant language of the user's messages.
+Good: {"action":"rename","title":"Dia密码导入Apple密码"}
+Too narrow: {"action":"rename","title":"关闭验证注入"}
+Too vague: {"action":"rename","title":"Code changes"}
+Reply with JSON only.
 
 [user]
 Current title: xxx          ← 非 blind 模式才给（避免旧标题引导模型）
-Opening (the session's starting turns; the main through-line anchor):
+Opening (the session's starting turns; the main through-line anchor.
+  If a compressed history summary appears first, treat it as earlier
+  history of the same session):
                             ← opening 轮（每条 preview_chars 字符）——主线锚点
 Recent (the latest turns; shows whether the conversation has shifted):
                             ← recent 轮（每条 preview_chars 字符）——判断是否转题
-User-message trajectory (how the conversation evolved over time):
-  Use it to identify recurring or sustained intent, not to collect every
-  topic mentioned. A topic appearing in only a small portion of the
-  trajectory should not override the conversation's established main
-  subject unless the recent context shows a clear and sustained shift
-  to that topic.
+User-message trajectory (how the conversation evolved):
                             ← 意图轨迹（超长单条提取首尾句，超条数 head+tail 采样）
 ```
 
-提示词全文为英文（2026-08-10 定稿，用户提供草稿）：策略段是唯一随
-`strategy`/`blind` 变化的英文 rule；风格段 CONCISE/COMPLETE 原文照录。
+设计要点（v13 与 v12 的差异）：
+
+- **全局任务优先**：`{rule}` 与 `{style_req}` 都显式写「opening 确立的主线任务」是基调、「永远不要用最新子任务命名」。这是四方案对比后岚拍板的硬要求——GPT 逆向方案（extract key point）太倾向当前工作（产出「已修复」「已清理禁用」等完成态），v13 用「Name the MAIN TASK, not the latest subtask」对抗
+- **few-shot 三例**：Good（`Dia密码导入Apple密码`）、Too narrow（`关闭验证注入`——实际是子任务却被 GPT 方案选中）、Too vague（`Code changes`）。「Too narrow」示例直接来自四方案对比中 GPT 列 #9 的翻车案例
+- **实体优先于长度**：规则明确「宁可用满 16 字符也不丢关键产品名/标识符」——v11 曾因过度压缩丢掉 Codex/verify_on_stop/OpenViking
+- **清洗**：`_clean_title` 式规范化（去引号、去 `Title:` 前缀、尾部标点 rstrip）+ `_write` 双重硬截断（字符上限 + 列宽上限）
 
 ### 4.2 策略段（strategy）
 
 | 策略 | rule 内容 |
 |---|---|
-| conservative | 只有当前标题明显无法概括会话内容时才 rename，否则 keep。标题应概括会话的主要任务或主线，而不是最新的一条小任务：开头确立主题则优先主线命名；只有会话确实转向全新主题时才用最新主题命名 |
-| aggressive | 每次都给出最能概括当前会话的标题；只要与当前标题不同就 rename。优先反映最近对话的主题，其次才是开头主线 |
-| blind（retitle-all 专用） | 不提供原标题。直接根据会话内容给出最能概括的新标题，action 必须是 rename。+ 按策略保留主线/最近倾向 |
+| conservative | 只有当前标题无法概括会话整体时才 rename，否则 keep（不再内置长段主线规则——主线约束已收进风格段，避免两处打架） |
+| aggressive | 只要你的标题更好就 rename。**开头主线任务永远优先于最新子任务**（v13 变化：不再「优先最近主题」——岚四方案对比后确认全局任务优先） |
+| blind（retitle-all 专用） | 不提供原标题。直接根据会话内容给出最能概括的新标题，action 必须是 rename。+ 按策略保留主线倾向 |
 
-设计沿革：最初有 balanced 三档，岚拍板删除——「保守和激进不需要平衡、激进=更倾向于最近的消息」。
+设计沿革：最初有 balanced 三档，岚拍板删除——「保守和激进不需要平衡、激进=更倾向于最近的消息」（v10 前）；v13 四方案对比后又把 aggressive 的「优先最近主题」改为「主线优先」，与岚的全局任务偏好对齐。
 
 ### 4.3 风格段（title_style）
 
 | 风格 | 要求 |
 |---|---|
-| concise（默认） | 薇因 2026-08-10 定稿版：minimal sidebar label, not a summary——一个短短语、最少可识别概念；丢弃次要主题/结果/方法/平台设备限定词/实现细节；避免连词冒号逗号和多段标题；搜索性≠完整性；返回前再压缩一遍（remove every word that can be removed）+ 软词数锚点「Aim for at most five words. Use fewer whenever the conversation stays recognizable.」+ few-shot 示例（Good/Bad→Better，用岚侧边栏实测案例，见 5.3 结论 10） |
-| complete | 5~10 个词的短语；可以覆盖主要脉络，多主题用「A 与 B」结构保留 |
+| concise（默认） | 开头确立的主线任务就是基调；**永远不要用最新子任务命名**；一个短短语、最少可识别概念 |
+| complete | 保留开头主线任务 + 最重要的区分性上下文；双主题可用「A 与 B」（与/and 连接） |
 
 设计动机（岚 2026-08-10）：评分时「注重概括包含完整信息但没考虑标题太复杂」——用户应能自定义要更完整的脉络还是更简洁准确的概括，但完整也不能太长。
 
 ### 4.4 通用要求（两风格共有）
 
-具体、可检索（别人靠标题能找回这个会话）；避免「对话」「讨论」「问题」「查询」空泛词；语言跟随用户消息；不要引号。
+长度以字符计（中/英各 1 字符）：12 为目标、`max_title_length` 为硬上限（默认 16）；具体、可检索（别人靠标题能找回这个会话）；避免「对话」「讨论」「问题」「查询」空泛词；语言跟随用户消息；不要引号、无尾部标点。
 
 ---
 
@@ -250,7 +259,42 @@ User-message trajectory (how the conversation evolved over time):
    装 cua-driver」）、摘要标题较完整时会诱使模型复述（Polymate 21 字符
    一次）。34 测试通过
 
-### 5.4 推荐配置（实验后的最优值）
+### 5.4 提示词演进 v8→v13（2026-08-10 岚 0 分否决过度设计）
+
+| 版本 | 做法 | 平均字符 | 结果 |
+|---|---|---|---|
+| v8 | 精简无示例 | 14.9 | 模型滑向描述句（「根治闪白屏：MPO 冲突」） |
+| v9 | 列宽硬限 + 规范名 | 19.1 | 更长：删除示例后模型堆描述；40 列违反 1 次（45 列）；规范名规则造成冗余（「Hermes 记忆维护改为每周日」） |
+| v10 | +否定式规则（名词短语/禁动作动词开头/禁和并与） | 14.2 | 长度恢复但副作用：丢关键实体（「闪白屏问题」丢 MPO；「Hermes verify_on_stop 验证注入机制」丢 codex/opencode-go） |
+| v11 | **岚 0 分否决 v10**：「我们过度设计了」。砍到 3 句核心 + 12 目标/16 硬限 | 10.8 | 长度全达标（无超 16）但过度压缩：丢 Codex/verify_on_stop/OpenViking；「睡眠日志与分辨率排查」被 recent 带偏 |
+| v12 | 长度措辞改「实体优先」：宁用满 16 不丢关键实体 | 13.4 | 语义回归主线（Codex装OpenViking/关闭verify_on_stop），但岚指出「书写不规范 + 一股 AI 味」（「日志实锤」「值得用吗」口语化、中英混排无空格） |
+| v13 | 四方案对比定稿（见 5.5） | 6–12（10/10 达标） | 全局任务、名词短语、无 AI 味 |
+
+教训：长度约束从「目标」改「护栏」后质量回升；AI 味的根源是「让模型总结全文」而非「命名意图」。
+
+### 5.5 四方案对比（2026-08-10，同 10 会话 AB_SIDS 固定批次，conservative+blind）
+
+| # | v13 全局任务 | v14 提取管线 | GPT 逆向 | Hermes 原生 |
+|---|---|---|---|---|
+| 1 | 飞书群聊放行配置 (8) | Mac侧泠月飞书群聊放行 (11) | 补全飞书群聊放行配置 (9) | 给泠月 Mac 飞书群聊放行配置 (13) |
+| 2 | 合盖睡眠日志排查 (8) | 插电合盖睡眠排查 (8) | 实锤电池供电与4K (9) ⚠️口语 | 检查插电盒盖睡眠日志 (11) |
+| 3 | 闪白屏MPO冲突排查 (10) | MyDockFinder闪白屏 (9) | MPO未关已修复 (7) ⚠️结果态 | 根治 MyDockFinder 闪白屏 MPO 冲突 (16+) |
+| 4 | 搜索工具对比 (6) | Firecrawl评估 (8) | 搜索工具对比 (6) | 对比新搜索工具与现有方案 (13) |
+| 5 | 记忆维护改每周日0点 (10) | Hermes记忆维护改每周日 (11) | 记忆维护改为周日零点 (10) | MEMORY_MAINTENANCE_SUMMARY… 💥首条是 cron 注入 |
+| 6 | Dia密码导入Apple密码 (12) | 校友邦日志调整 (7) 💥幻觉 | Dia 全部密码导入 Apple (12) | 全部密码导入 Apple 密码 (12) |
+| 7 | 触摸屏校准误认YICO (11) | Win平板触摸校准 (8) ⚠️丢YICO | YICO 是集线器非触摸屏 (12) | 重新连接线后测试点击 (10) ⚠️只看到首条 |
+| 8 | OpenViking双端配置 (10) | Codex装OpenViking (8) | 两边Codex配置OpenViking (11) | 两边 codex 安装配置 open Viking (16+) |
+| 9 | Codex切换与验证注入 (11) | Codex切换与注入排查 (10) | 关闭多余验证 Codex 互不相干 ⚠️脑补 | 评估 opencode go 与 cc switch 切换管理 (17+) |
+| 10 | skill报错与清理OV (11) | skill排查与清理ov (10) | 插件致错已清理禁用 (9) ⚠️结果态 | 排查 skill 错误并清理 ov 服务器 (15+) |
+
+四方案定义与结论：
+
+- **v13（定稿）**：opening+recent+全量用户轨迹 → 全局任务 prompt。10/10 名词短语、无 AI 味、6–12 字符；#3 是「排查」（对应开头还在问根因）而非「已修复」——全局任务优于当前工作的直接体现
+- **v14 提取管线**（岚提议：不喂原文，先提取再命名）：先 LLM 提取 {main_task, opening_subject, key_entities, user_intentions} 再喂标题模型。输入压缩真实（#4 从 15,057 → 751 字符，20 倍），但 **提取幻觉**：#6 提取成「校友邦日志调整」完全跑偏（提取一步错标题全错）；#7 丢 YICO 实体；且每次评估多一次 LLM 调用。结论：不默认启用，记入 V2 候选（超长会话降级选项），正常规模用 preview_chars 截断已足够
+- **GPT 逆向**（社区逆向：`---BEGIN Conversation---` 包对话 + `Summarize the conversation in 5 words or fewer` + `Your goal is to extract the key point`）：简洁但**太倾向当前工作**——「已修复」「已清理禁用」都是完成态；「实锤」口语；「互不相干」脑补。确认岚的判断
+- **Hermes 原生**（上游 title_generator.py `_TITLE_PROMPT_TEMPLATE` 复刻：只喂首条用户消息 + 3-7 words + `Name what the user wants DONE` + few-shot）：只喂首条消息的脆弱性暴露——#5 首条是 cron 注入（MEMORY_MAINTENANCE_SUMMARY）直接跑飞输出整段；#7 只看到「重新连接线后测试点击」丢全局。我们插件的噪声过滤 + 全量轨迹更有价值
+
+### 5.6 推荐配置（实验后的最优值）
 
 ```yaml
 preview_chars: 100
@@ -261,6 +305,7 @@ user_message_threshold: 40
 user_message_preview_chars: 300
 title_style: concise        # 需要完整脉络时切 complete
 strategy: conservative
+max_title_length: 16        # v13 定稿：字符硬上限（中/英各 1 字符）
 ```
 
 ---
@@ -295,6 +340,10 @@ Hermes `_load_directory_module` 要求插件根目录直接有 `__init__.py`，�
 
 `derived` 来源 + 标题 >40 字符 = 首条消息截断产物，模型即使判定 keep 也要强制 rename（`force_rename` 追加「当前标题是自动截断的长文本，不合格」）。
 
+### 6.7 cron 注入消息会伪装成首条用户消息
+
+四方案对比 #5 暴露：cron 任务注入的会话以 `MEMORY_MAINTENANCE_SUMMARY …` 开头（role=user），Hermes 原生方案（只喂首条消息）直接把它当用户意图，标题跑飞成整段注入文本。我们插件的 `_SYSTEM_NOISE_PREFIXES` 目前覆盖 `[system:`/`[context compaction`/`[async delegation`/`[important:` 等，**不含** `MEMORY_MAINTENANCE_SUMMARY` 类前缀——遇到 cron 注入开头会话时轨迹会被污染（v13 对比用的是 opening+轨迹，首条消息只是 opening 之一，影响小于 Hermes 方案，但应补前缀）。
+
 ---
 
 ## 7. 命令速查
@@ -320,6 +369,9 @@ cd ~/Hermes/Home/Projects/hermes-auto-titler && .venv/bin/python -m pytest tests
 
 # A/B 对比（with vs without 模型消息，不写库）
 ~/.hermes/hermes-agent/venv/bin/python scripts/ab_compare.py
+
+# 四方案对比（v13 / v14 提取管线 / GPT 逆向 / Hermes 原生，不写库）
+AB_SIDS="前缀1,前缀2,..." ~/.hermes/hermes-agent/venv/bin/python scripts/compare_titler_schemes.py
 ```
 
 Git 提交身份：`git -c user.name="Vocllum" -c user.email="149675937+Vocllum@users.noreply.github.com" commit -m "..."`
@@ -331,3 +383,6 @@ Git 提交身份：`git -c user.name="Vocllum" -c user.email="149675937+Vocllum@
 - 桌面设置页（`ROUTES_AREA` + `plugin_api.py`）
 - retitle-all 跳过刚评估过的会话（`_last_eval` 时间戳过滤 ~5 分钟，一行实现，当前未加——显式操作重复评估场景少，保持轻量）
 - legacy NULL 标题的官方升级路径（需上游支持，当前尊重保护）
+- v14 提取管线作超长会话降级选项（输入 20 倍压缩但提取幻觉风险，#6 跑偏案例，见 §5.5；触发条件可定为「输入超阈值才启用」）
+- 噪声前缀补 `MEMORY_MAINTENANCE_SUMMARY` 类 cron 注入（见 §6.7）
+- 中英混排空格规范化（`Codex装OpenViking` → `Codex 装 OpenViking`，v12 暴露的书写规范缺口，v13 靠 prompt 示例缓解，未做代码层 normalize）

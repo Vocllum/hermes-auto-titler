@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_state import SessionDB
 
-from .messages import load_context
+from .messages import display_width, load_context, truncate_to_width
 
 log = logging.getLogger(__name__)
 
@@ -141,126 +141,61 @@ class AutoTitler:
         strategy = self.cfg.get("strategy", "conservative")
         if blind:
             # retitle-all 盲改：不提供原标题，直接按内容重新命名
-            if strategy == "aggressive":
-                rule = (
-                    "The current title is NOT provided. Generate the best title "
-                    "directly from the conversation content; action MUST be rename. "
-                    "Prioritize the most recent topic (what the user is doing now), "
-                    "then the opening through-line."
-                )
-            else:
-                rule = (
-                    "The current title is NOT provided. Generate the best title "
-                    "directly from the conversation content; action MUST be rename. "
-                    "Prefer the session's main task or through-line over the latest "
-                    "minor subtask: if the opening established a topic and later turns "
-                    "stayed on it, name the session by the through-line; only switch to "
-                    "the newest topic when the conversation genuinely changed direction."
-                )
+            rule = (
+                "Generate the best title directly from the conversation "
+                "content (the current title is NOT provided); action MUST "
+                "be rename."
+            )
         elif strategy == "aggressive":
             rule = (
-                "Always propose the title that best summarizes the current conversation; "
-                "rename whenever it differs from the current title. "
-                "Prioritize the most recent topic (what the user is doing now), "
-                "then the opening through-line."
+                "Rename whenever your title is better. "
+                "The opening main task always outranks the latest subtask."
             )
         else:
             rule = (
-                "Only rename when the current title clearly fails to summarize the "
-                "conversation; otherwise keep. Prefer the session's main task or "
-                "through-line over the latest minor subtask: if the opening established "
-                "a topic and later turns stayed on it (judge from the Opening and All "
-                "user messages sections), name the session by the through-line; only "
-                "switch to the newest topic when the conversation genuinely changed "
-                "direction."
+                "Rename only when the current title no longer summarizes "
+                "the conversation as a whole."
             )
         if force_rename and not blind:
             rule += (
-                " The current title is a truncated auto-generated string and is "
-                "unacceptable; you must provide a new concise title (action MUST be rename)."
+                " The current title is a truncated auto-generated string; "
+                "action MUST be rename."
             )
 
-        # 标题风格：concise（ChatGPT 式一眼看完）/ complete（保留完整脉络）
+        # 标题风格：concise（一眼看完，开头主体为基调）/ complete（可保留
+        # 双主题脉络）。长度以字符计：中文/英文各算 1 字符，12 为目标、
+        # max_title_length 为硬上限；代码 _write 双重硬截断。
+        max_title_len = int(self.cfg.get("max_title_length", 16))
         style = self.cfg.get("title_style", "concise")
         if style == "complete":
             style_req = (
-                "COMPLETE STYLE\n"
-                "Generate a compact, descriptive conversation title that captures the "
-                "main subject and the most important distinguishing context.\n"
-                "It may preserve an additional major topic, constraint, or outcome when "
-                "that information materially helps identify the conversation.\n"
-                "Keep it natural and easily readable in a sidebar. Do not turn the "
-                "title into a sentence or a miniature summary."
+                "COMPLETE STYLE: keep the opening main task plus its most "
+                "important distinguishing context; two parallel subjects "
+                "joined with 与/and are allowed."
             )
         else:
             style_req = (
-                "CONCISE STYLE\n"
-                "\n"
-                "Generate a minimal sidebar label, not a summary.\n"
-                "\n"
-                "Use one short phrase containing only the fewest distinctive "
-                "concepts needed to recognize the conversation.\n"
-                "\n"
-                "Rules:\n"
-                "- Keep only the primary subject or task.\n"
-                "- Prefer a compact noun phrase over a descriptive sentence.\n"
-                "- Drop secondary topics, outcomes, methods, platform/device "
-                "qualifiers, and implementation details unless essential for "
-                "identification.\n"
-                "- Do not preserve multiple topics just for completeness; that "
-                "is the purpose of COMPLETE style.\n"
-                "- Avoid conjunctions, colons, commas, and multi-part titles "
-                "unless they are genuinely necessary.\n"
-                "- Do not repeat information already implied by a distinctive "
-                "product, project, or feature name.\n"
-                "- Searchability does not require completeness. A few strong "
-                "identifying terms are better than a descriptive title.\n"
-                "- Aim for at most five words. Use fewer whenever the "
-                "conversation stays recognizable as a whole.\n"
-                "- The title must cover the conversation as a whole — its main "
-                "through-line — never just the latest subtopic. When in doubt, "
-                "prefer the broader subject over the most recent topic.\n"
-                "- More than one proper noun (product/service/platform name) "
-                "in one title is a sign of over-listing: keep only the single "
-                "most identifying name.\n"
-                "\n"
-                "Examples (apply to any language):\n"
-                "Good:\n"
-                "- Viking 插件功能审查\n"
-                "- 浏览器自动工作流\n"
-                "- Windhawk备份恢复搞定\n"
-                "Bad → Better:\n"
-                "- 搜索方案对比：Firecrawl、Tavily、AnySearch → 搜索方案对比\n"
-                "- TencentDB 替代 OpenViking 部署与数据迁移 → TencentDB 数据迁移\n"
-                "- Polymate QQ 机器人权限与限流设置 → Polymate 配置\n"
-                "- hermes-auto-titler 自动标题插件开发 → 自动标题插件开发\n"
-                "\n"
-                "Before returning the title, compress it once more:\n"
-                "remove every word or phrase that can be removed while the "
-                "conversation would still be recognizable as a whole. If the "
-                "compressed form no longer covers the main through-line, keep "
-                "the longer form.\n"
-                "\n"
-                "The result should feel like a label in a sidebar, not a "
-                "description of what happened."
+                "CONCISE STYLE: the main task established at the opening "
+                "is the base tone; never title after a latest subtask."
             )
         system = (
-            "You maintain concise, useful titles for Hermes conversations.\n"
+            "You maintain concise titles for Hermes conversations.\n"
             "Return JSON only:\n"
             '{"action":"keep"|"rename","title":"..."}\n'
             f"\n{rule}\n"
             f"\n{style_req}\n"
-            "\nThe title must:\n"
-            "- identify the conversation at a glance;\n"
-            "- preserve the main task or subject, not incidental details;\n"
-            "- use specific, searchable wording;\n"
-            '- avoid generic words such as "conversation", "discussion", "question", '
-            'or "query";\n'
-            '- match the dominant language of the user\'s messages;\n'
-            '- contain no quotation marks.\n'
-            f"\nThe configured maximum title length is "
-            f"{int(self.cfg.get('max_title_length', 80))} characters.\n"
-            "This is a hard safety limit, not a target length."
+            "\nRules:\n"
+            f"- Aim for at most 12 characters; never exceed {max_title_len} "
+            "(Chinese and Latin each count as 1 character).\n"
+            "- Keep key product names and identifiers (e.g. Codex, "
+            "OpenViking, verify_on_stop) exact; use up to "
+            f"{max_title_len} rather than dropping them.\n"
+            "- No trailing punctuation, no quotes.\n"
+            "- Use the dominant language of the user's messages.\n"
+            'Good: {"action":"rename","title":"Dia密码导入Apple密码"}\n'
+            'Too narrow: {"action":"rename","title":"关闭验证注入"}\n'
+            'Too vague: {"action":"rename","title":"Code changes"}\n'
+            'Reply with JSON only.'
         )
 
         lines = []
@@ -282,16 +217,7 @@ class AutoTitler:
             lines.append(f"{role}: {text}")
         if all_user:
             lines.append("")
-            lines.append(
-                "User-message trajectory (how the conversation evolved over time):"
-            )
-            lines.append(
-                "Use it to identify recurring or sustained intent, not to collect "
-                "every topic mentioned. A topic appearing in only a small portion "
-                "of the trajectory should not override the conversation's "
-                "established main subject unless the recent context shows a clear "
-                "and sustained shift to that topic."
-            )
+            lines.append("User-message trajectory (how the conversation evolved):")
             for _, text in all_user:
                 lines.append(f"user: {text}")
         user_prompt = "\n".join(lines)
@@ -322,7 +248,11 @@ class AutoTitler:
 
     def _write(self, db: SessionDB, session_id: str, title: str) -> Optional[str]:
         max_len = min(int(self.cfg.get("max_title_length", 80)), SessionDB.MAX_TITLE_LENGTH)
-        title = title.strip()
+        # 显示列宽硬限（中文=2 列）：complete 风格放宽 12 列
+        max_cols = int(self.cfg.get("max_display_width", 40))
+        if self.cfg.get("title_style", "concise") == "complete":
+            max_cols += 12
+        title = truncate_to_width(title.strip(), max_cols)
         if len(title) > max_len:
             title = title[:max_len].rstrip()
         if not title:
@@ -360,7 +290,7 @@ class AutoTitler:
 
         for i in range(2, 20):
             cand = f"{title} ({i})"
-            if len(cand) > max_len:
+            if display_width(cand) > max_cols or len(cand) > max_len:
                 break
             try:
                 if apply(cand):

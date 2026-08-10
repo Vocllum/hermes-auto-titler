@@ -260,6 +260,28 @@ def test_title_truncated_to_max_length():
     assert len(r["title"]) <= 20
 
 
+def test_write_truncates_by_display_width():
+    from hermes_auto_titler.messages import display_width
+
+    db = FakeDB(messages=MSGS, title=None)
+    # 默认 max_title_length=16 字符：21 个「一」→ 截到 16 字
+    t, _ = make_titler(db, text=_dec("rename", "一" * 21))
+    r = t.evaluate("s1", force=True)
+    assert r["action"] == "renamed"
+    assert len(r["title"]) == 16
+    assert display_width(r["title"]) <= 40  # 列宽上限也不超
+
+
+def test_write_complete_style_wider_budget():
+    from hermes_auto_titler.messages import display_width
+
+    db = FakeDB(messages=MSGS, title=None)
+    # complete 风格列宽 +12：40+12 = 52 列 → 26 个中文字
+    t, _ = make_titler(db, text=_dec("rename", "一" * 30), cfg={"title_style": "complete"})
+    r = t.evaluate("s1", force=True)
+    assert display_width(r["title"]) <= 52
+
+
 def test_derived_long_title_forces_rename_even_when_model_keeps():
     long_title = "开发个小插件，让 Hermes 每次对话结束都会思考需不需要重命名会话标题。有别的类似项目吗，别…"
     db = FakeDB(messages=MSGS, title=long_title, source="derived")

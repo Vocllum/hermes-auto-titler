@@ -39,16 +39,27 @@ _SYSTEM_NOISE_PREFIXES = (
     "[system note:",
     "[context compaction",
     "[async delegation",
+    "[important:",
+)
+
+# 压缩摘要（混在 user 角色）：同样不是用户意图，不进轨迹；但它是压缩续接
+# 会话唯一的历史浓缩（原始消息已被替换），作为 opening 的「历史锚点」——
+# 否则模型只能看到压缩点之后的助手干活消息，主线锚点丢失（标题漂移根因）。
+_SUMMARY_PREFIXES = (
     "[recent summary",
     "[session arc summary",
     "[session summary",
-    "[important:",
 )
 
 
 def is_system_noise(text: str) -> bool:
     t = (text or "").lstrip().lower()
     return any(t.startswith(p) for p in _SYSTEM_NOISE_PREFIXES)
+
+
+def is_summary(text: str) -> bool:
+    t = (text or "").lstrip().lower()
+    return any(t.startswith(p) for p in _SUMMARY_PREFIXES)
 
 
 # 句子边界：中文/通用标点 + 换行 + 英文句点后跟空白
@@ -115,6 +126,7 @@ def load_context(
     """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
+    summaries: List[str] = []
     for m in conv:
         role = m.get("role")
         if role not in ("user", "assistant"):
@@ -122,7 +134,12 @@ def load_context(
         if ignore_model_messages and role == "assistant":
             continue
         text = message_text(m.get("content")).strip()
-        if not text or is_system_noise(text):
+        if not text:
+            continue
+        if is_summary(text):
+            summaries.append(text)
+            continue
+        if is_system_noise(text):
             continue
         pairs.append((role, text))
 
@@ -152,6 +169,10 @@ def load_context(
     if cur:
         rounds.append(cur)
     opening = [item for r in rounds[:opening_turns] for item in r]
+    # 压缩摘要作历史锚点：放在 opening 最前（时间上早于所有可见消息）。
+    # 取最早一条（最接近会话起点，主线线索最原始）；截断与 opening 一致。
+    if summaries:
+        opening.insert(0, ("user", preview(summaries[0])))
 
     # 用户消息 = 意图轨迹；超长单条提取首尾句，超条数首尾采样
     users = [(r, t) for r, t in pairs if r == "user"]

@@ -268,7 +268,9 @@ class AutoTitler:
             lines.append(f"Current title: {current or '(none)'}")
             lines.append("")
         lines.append(
-            "Opening (the session's starting turns; the main through-line anchor):"
+            "Opening (the session's starting turns; the main through-line anchor. "
+            "If a compressed history summary appears first, treat it as earlier "
+            "history of the same session):"
         )
         for role, text in opening:
             lines.append(f"{role}: {text}")

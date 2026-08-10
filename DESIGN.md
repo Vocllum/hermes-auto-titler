@@ -236,6 +236,19 @@ User-message trajectory (how the conversation evolved over time):
    （opening 是 [Session Arc Summary] 被噪声过滤）主线锚点丢失，模型仍
    偏向当前方向（如当前会话 →「自动标题提示词迭代」）——第 6 组同款
    根因，候选修法：从压缩摘要提取主线标题作弱 opening
+12. **摘要锚点（v7，2026-08-10 岚拍板）**：压缩续接会话的原始消息被摘要
+   替换，会话起点不存在于库中——「过滤掉往下取」取到的是压缩点之后的
+   助手干活消息，主线锚点丢失。修法：摘要类噪声（[Recent Summary]/
+   [Session Arc Summary]/[Session Summary]）从「整条过滤」改为收集，取
+   最早一条、按 preview_chars 截断后插到 opening 第一条（历史锚点）；
+   仍不进用户轨迹（轨迹保持纯净）；纯系统通知类（[System:]/[CONTEXT
+   COMPACTION]/[ASYNC]）保持过滤；prompt Opening 段加说明。效果：压缩
+   续接会话组 15.25 → 14.75（Dia「Dia密码导入Apple密码」14→「Dia 密码
+   导入」8、Tailscale 17→14、当前会话回到「自动标题插件优化」）；
+   非压缩组波动（如搜索方案 6→29）为模型随机性（输入相同输出不同），
+   非锚点影响。副作用：个别会话被摘要里的具体任务词带偏（#15「Windows
+   装 cua-driver」）、摘要标题较完整时会诱使模型复述（Polymate 21 字符
+   一次）。34 测试通过
 
 ### 5.4 推荐配置（实验后的最优值）
 

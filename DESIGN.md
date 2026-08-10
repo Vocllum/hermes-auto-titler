@@ -146,7 +146,7 @@ User-message trajectory (how the conversation evolved over time):
 
 | 风格 | 要求 |
 |---|---|
-| concise（默认） | 3~5 个词的短语；聚焦最主要的一个主题；像 ChatGPT 会话标题一样一眼能看完；「When several descriptions would identify the conversation equally well, always choose the shortest one.」（2026-08-10 薇因评审加入：比规定字数更自然，随语言自适应） |
+| concise（默认） | 薇因 2026-08-10 定稿版：minimal sidebar label, not a summary——一个短短语、最少可识别概念；丢弃次要主题/结果/方法/平台设备限定词/实现细节；避免连词冒号逗号和多段标题；搜索性≠完整性；返回前再压缩一遍（remove every word that can be removed）。全文照录见 4.1 |
 | complete | 5~10 个词的短语；可以覆盖主要脉络，多主题用「A 与 B」结构保留 |
 
 设计动机（岚 2026-08-10）：评分时「注重概括包含完整信息但没考虑标题太复杂」——用户应能自定义要更完整的脉络还是更简洁准确的概括，但完整也不能太长。
@@ -201,13 +201,18 @@ User-message trajectory (how the conversation evolved over time):
    轨迹段附英文说明（recurring/sustained intent；小比例主题不得覆盖已确立
    主线，除非 recent 显示持续转向）。这是「20 组抽样发现少数跑主线」后的
    修正——不是继续加上下文，而是把现有上下文的角色说精确
-9. **改版前后 20 组抽样对比**（同 20 会话，SEED=7）：加角色说明 + 最短句 +
-   head+tail 采样后，平均标题长度 23.55 → 21.05 字符（-11%），≤20 字符
-   7 → 10 个，≥30 字符 5 → 2 个；多数标题更短更准（「Mac 通过 cua-driver
-   控制 Windows 桌面」→「Mac 远程控制 Windows」），个别反变长（#9 Codex
-   验证注入、#16 ChatGPT 恢复官方账号——concise 最短句未压住）；第 6 组
-   「Dia 密码导入」依旧跑题，根因查明为压缩摘要被噪声过滤 + 该会话唯一
-   非噪声 user 消息就是「导入密码」——信息不足而非轨迹污染
+9. **改版前后 20 组抽样对比**（同 20 会话，SEED=7）：三版对比——
+   v1 初版平均 23.55 字符（≤20: 7，≥30: 5）；v2 加角色说明 + 最短句 +
+   head+tail 采样后 21.05（≤20: 10，≥30: 2）；v3 换薇因 concise 原版
+   （minimal label + compress once more）后 19.65（≤20: 11，≥30: 3）。
+   多数标题更短更准（「闪白屏问题排查：MPO与MyDockFinder」→「闪白屏 MPO
+   排查」24→10；「Codex 换用 opencode-go 与 Hermes 验证注入排查」36→31；
+   「ChatGPT 恢复官方账号，Codex 子代理走 deepseek」34→22），但 v3 仍有个
+   别反例：#4 搜索选型把三个服务名全堆上（28→35）、#15 加括号限定词
+   （16→29）、#20 平台限定词没丢（28→31）——模型倾向保留实体与限定词，
+   规则「Drop platform/device qualifiers」未完全生效；第 6 组「Dia 密码
+   导入」依旧，根因查明为压缩摘要被噪声过滤 + 该会话唯一非噪声 user
+   消息就是「导入密码」——信息不足而非轨迹污染
 
 ### 5.4 推荐配置（实验后的最优值）
 

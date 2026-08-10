@@ -175,6 +175,26 @@ def test_load_context_summary_hint_truncated():
     assert summary.endswith("…")
 
 
+def test_load_context_summary_hint_summary_chars_override():
+    conv = [
+        {"role": "user", "content": "[Recent Summary (d0, node 1)] " + "y" * 500},
+        {"role": "user", "content": "m1"},
+    ]
+    # summary_chars>0 时摘要按它截断，而不是 preview_chars
+    _, _, _, summary = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
+        preview_chars=200, summary_chars=400,
+    )
+    assert summary is not None and len(summary) <= 401
+    assert summary.endswith("…")
+    # summary_chars=0（默认）沿用 preview_chars
+    _, _, _, summary2 = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
+        preview_chars=200,
+    )
+    assert len(summary2) <= 201
+
+
 def test_load_context_filters_cron_maintenance_marker():
     conv = [
         {"role": "user", "content": "真实任务"},

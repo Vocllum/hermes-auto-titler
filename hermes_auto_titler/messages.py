@@ -154,6 +154,7 @@ def load_context_with_summary(
     preview_chars: int = 200,
     user_message_threshold: int = 0,
     user_message_preview_chars: int = 0,
+    summary_chars: int = 0,
 ) -> Tuple[
     List[Tuple[str, str]],
     List[Tuple[str, str]],
@@ -163,7 +164,9 @@ def load_context_with_summary(
     """返回 (recent, all_user, opening, earlier_summary)。
 
     earlier_summary 只在可见消息中没有真实 opening、且存在压缩摘要时提供；
-    它永远不进入 opening、recent 或用户意图轨迹。
+    它永远不进入 opening、recent 或用户意图轨迹。summary_chars>0 时用它
+    截断摘要（retitle 盲改场景：模型没有当前标题锚点，需要更长摘要来恢复
+    Subject）；0 = 沿用 preview_chars。
     """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
@@ -216,7 +219,11 @@ def load_context_with_summary(
         rounds.append(cur)
     opening = [item for r in rounds[:opening_turns] for item in r]
     # 摘要永远不进入 opening；只有它先于所有可见真实消息时，才作为独立弱提示。
-    earlier_summary = preview(summaries[0]) if summaries and not saw_visible_opening else None
+    earlier_summary = None
+    if summaries and not saw_visible_opening:
+        s = summaries[0]
+        n = summary_chars or preview_chars
+        earlier_summary = (s[:n] + "…") if n > 0 and len(s) > n else s
 
     # 用户消息 = 意图轨迹；超长单条提取首尾句，超条数首尾采样
     users = [(r, t) for r, t in pairs if r == "user"]

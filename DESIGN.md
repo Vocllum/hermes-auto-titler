@@ -88,12 +88,13 @@ preview_chars: 200               # 开头/结尾消息只保留前 N 字符（�
 include_all_user_messages: true  # 附加全部用户消息（意图轨迹，不截断、不含附件内容）
 user_message_threshold: 20       # 用户消息条数上限（0=不限）；超限保留开头 1 条 + 最近 N-1 条
 user_message_preview_chars: 200  # 单条用户消息触发线：超过则提取首尾句（各限一半预算）
-title_style: concise             # concise（3~5 词一眼看完）| complete（5~10 词完整脉络）
+title_style: concise             # concise = LABEL 主体标签 | complete = SUMMARY 事件梗概（信息类型优先，长度只是护栏）
 strategy: conservative           # conservative（明显不匹配才改，主线优先）| aggressive（每次优化，但开头主线仍优先于最新子任务）
 model: ""                        # 留空 = 宿主辅助模型；本地 deepseek-v4-flash
 min_interval_minutes: 5          # 同一会话两次评估最短间隔（防抖）
 max_title_length: 16             # 字符硬上限（中/英各算 1 字符；12 为目标、16 为上限，宁保关键实体用满 16）
 max_display_width: 40            # 列宽硬上限（全角 2 列/半角 1 列；写回时双重截断）
+retitle_summary_chars: 1600      # 仅 retitle-all 盲改：压缩摘要截断长度（0=沿用 preview_chars）。盲改没有当前标题锚点，需要更长摘要恢复 Subject（§6.8）
 ```
 
 配置注释写给使用者：config.example.yaml 只写默认值和可选值，解释进 README。
@@ -122,8 +123,8 @@ Rules:
 - Length is a guardrail, not the goal: aim for at most 12 characters;
   never exceed {max_title_len} (Chinese and Latin each count as 1 char).
 - Keep key product names and identifiers exact and correctly cased;
-  expand informal abbreviations from the user's messages instead of
-  copying them: ov -> OpenViking, skill -> Skill, Codex, Hermes, DeepSeek.
+  expand informal abbreviations from the user's messages to their full
+  canonical names instead of copying them.
 - When the conversation has two distinct tasks, name both entities
   even if it uses the full length budget.
 - No trailing punctuation, no quotes.
@@ -152,7 +153,7 @@ User-message trajectory (how the conversation evolved; the main intent source):
 
 - **全局任务优先**：`{rule}` 与 `{style_req}` 都显式写「opening 确立的主线任务」是基调、「永远不要用最新子任务命名」。这是四方案对比后岚拍板的硬要求——GPT 逆向方案（extract key point）太倾向当前工作（产出「已修复」「已清理禁用」等完成态），v13 用「Name the MAIN TASK, not the latest subtask」对抗
 - **few-shot 三例**：Good（`Dia密码导入Apple密码`）、Too narrow（`关闭验证注入`——实际是子任务却被 GPT 方案选中）、Too vague（`Code changes`）。「Too narrow」示例直接来自四方案对比中 GPT 列 #9 的翻车案例
-- **实体优先于长度**：规则明确「宁可用满 16 字符也不丢关键产品名/标识符」——v11 曾因过度压缩丢掉 Codex/verify_on_stop/OpenViking；2026-08-11 再强化为「规范大小写 + 展开缩写」（ov → OpenViking、skill → Skill），因为实测模型会照抄用户消息里的小写/缩写写法（#10 会话「skill报错排查与ov清理」）
+- **实体优先于长度**：规则明确「宁可用满 16 字符也不丢关键产品名/标识符」——v11 曾因过度压缩丢掉 Codex/verify_on_stop/OpenViking；2026-08-11 再强化为「规范大小写 + 缩写展开为规范全称」（通用规则，不硬编码映射表——项目公开，个人私域缩写不进提示词）。触发案例：模型曾照抄用户消息里的小写/缩写写法（#10 会话「skill报错排查与ov清理」）
 - **信息层级（2026-08-11 新增）**：Subject 只来自 Opening/history；Intent 来自用户轨迹；Recent 只是事件/转题信号、永远不能单独定义 Subject。这是 #7 会话（YICO 主线跑偏）教训的 prompt 层落地——压缩会话里 Recent 常被结尾 AI 复盘占满，没有层级约束时模型会拿结尾事件当主题
 - **清洗**：`_clean_title` 式规范化（去引号、去 `Title:` 前缀、尾部标点 rstrip）+ `_write` 双重硬截断（字符上限 + 列宽上限）
 
@@ -359,11 +360,13 @@ Hermes `_load_directory_module` 要求插件根目录直接有 `__init__.py`，�
 - Recent 最后 7 条里 6 条是 assistant 的 YICO 复盘；轨迹最后一条也是用户问 YICO；摘要前 200 字符内 YICO 出现 3 次（活动任务就叫「YICO 触摸屏校准」）——信息分布上 YICO 完全主导
 - 温度对比实验（/tmp 临时脚本）没同步 `earlier_summary` 4 元组改动，模型连摘要锚点都没有
 
-结论：不是单一原因，是「压缩后 opening 无 user 锚点 + Recent 被结尾 AI 复盘占满 + YICO 高频」叠加。prompt 层修复 = Information hierarchy（Subject 只来自 Opening/history、Recent 永远不能单独定义 Subject、结尾才出现的设备/实体不是 Subject）；结构层修复 = 摘要作为独立 weak hint 提供（已在前一版落地）。实测：非盲改路径（真实运行）下该会话 keep 现标题「触摸屏校准误认 YICO 集线器」，不再被 YICO 抢跑；盲改（retitle-all）模式下对 YICO 偏好仍不稳定，属模型能力边界，未继续堆 prompt。
+结论：不是单一原因，是「压缩后 opening 无 user 锚点 + Recent 被结尾 AI 复盘占满 + YICO 高频」叠加。prompt 层修复 = Information hierarchy（Subject 只来自 Opening/history、Recent 永远不能单独定义 Subject、结尾才出现的设备/实体不是 Subject）；结构层修复 = 摘要作为独立 weak hint 提供（已在前一版落地）。实测：非盲改路径（真实运行）下该会话 keep 现标题「触摸屏校准误认 YICO 集线器」，不再被 YICO 抢跑。
+
+**盲改（retitle-all）专项修复（2026-08-11）**：盲改没有当前标题锚点，200 字符摘要截断下模型稳定输出「YICO实为sRGB集线器」（纯结尾纠偏事件）。实验：摘要截断 200→400→800→1600 字符，Subject 逐步回到「触摸屏校准」（1600 时输出「触摸屏校准错认YICO」，多次运行语义稳定）。落地为 `retitle_summary_chars`（默认 1600，0=沿用 preview_chars），仅 blind=True 时生效，非盲改路径不变（§3）。
 
 ### 6.9 模型照抄用户消息的小写/缩写实体（调查：skill/ov 案例）
 
-会话 `20260810_015334_f41e41` 只有 1 条用户消息（原文即小写「skill」「ov」），模型生成「skill报错排查与ov清理」——照抄而非规范。修复 = Rules 直白映射（`ov -> OpenViking, skill -> Skill`）+ 双任务双实体规则。实测：盲改输出「Skill报错排查与清理」、非盲改输出「Skill排错与OV清理」，规范大小写生效；OV 缩写仍在 12 字符护栏内可接受（岚确认）。
+会话 `20260810_015334_f41e41` 只有 1 条用户消息（原文即小写「skill」「ov」），模型生成「skill报错排查与ov清理」——照抄而非规范。修复 = 通用规则（缩写展开为规范全称、实体保持规范大小写，不硬编码映射表）+ 双任务双实体规则。实测：盲改输出「Skill报错排查与清理」、非盲改输出「Skill排错与OV清理」，规范大小写生效；OV 缩写仍在 12 字符护栏内可接受（岚确认）。
 
 ---
 

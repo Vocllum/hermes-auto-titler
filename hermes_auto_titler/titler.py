@@ -106,6 +106,9 @@ class AutoTitler:
             int(self.cfg.get("preview_chars", 200)),
             int(self.cfg.get("user_message_threshold", 20)),
             int(self.cfg.get("user_message_preview_chars", 200)),
+            summary_chars=(
+                int(self.cfg.get("retitle_summary_chars", 1600)) if blind else 0
+            ),
         )
         if not recent:
             return {"action": "skipped", "reason": "no messages"}
@@ -203,8 +206,7 @@ class AutoTitler:
             "each count as 1 character).\n"
             "- Keep key product names and identifiers exact and correctly "
             "cased; expand informal abbreviations from the user's messages "
-            "instead of copying them: ov -> OpenViking, skill -> Skill, "
-            "Codex, Hermes, DeepSeek.\n"
+            "to their full canonical names instead of copying them.\n"
             "- When the conversation has two distinct tasks, name both "
             "entities even if it uses the full length budget.\n"
             "- No trailing punctuation, no quotes.\n"

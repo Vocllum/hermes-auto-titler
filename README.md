@@ -48,6 +48,7 @@ plugins:
 | `user_message_threshold` | `20` | 用户消息条数上限（0=不限）；超限保留开头 1/4 + 最近 3/4，防超长对话 |
 | `user_message_preview_chars` | `200` | 单条用户消息超过该长度时提取首尾句（各限一半预算，保留意图与结论） |
 | `title_style` | `concise` | `concise` = LABEL 主体标签（Subject + 最小区分意图，不重述经过）/ `complete` = SUMMARY 简短事件梗概（Subject + 主要意图/事件）。信息类型是第一约束，长度只是护栏（12 目标 / `max_title_length` 硬限） |
+| `retitle_summary_chars` | `1600` | 仅 `retitle_all --dry-run`/全量重命名（盲改）生效：压缩摘要截断长度（0=沿用 `preview_chars`）。盲改没有当前标题锚点，需要更长摘要恢复 Subject |
 | `strategy` | `conservative` | `conservative` 明显不匹配才改（优先开头主线）/ `aggressive` 每次优化（开头主线仍优先于最新子任务） |
 | `model` | `""` | 留空 = 宿主默认模型；本地示例 `deepseek-v4-flash` |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔 |

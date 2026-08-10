@@ -81,13 +81,13 @@ TITLE_SOURCE_USER    = "user"     (rank 2，权威)
 enabled: true                    # 插件开关；plugins.enabled 移除 = 完全不加载
 every_n_turns: 3                 # 每 N 轮评估一次（1 = 每轮）
 on_close: true                   # 会话关闭时再评估一次
-recent_turns: 2                  # 携带最近 N 轮消息（实验结论见 §5）
-opening_turns: 2                 # 携带会话开头 N 轮消息（主线锚点）
+recent_turns: 2                  # 携带最近 N 轮消息（实验结论见 §5；重验证后维持 2，见 §5.7）
+opening_turns: 2                 # 携带会话开头 N 轮消息（主线锚点；同上）
 ignore_model_messages: false     # true = 过滤 assistant 消息（A/B 实验用）
-preview_chars: 200               # 开头/结尾消息只保留前 N 字符（≈前几句话）
+preview_chars: 100               # 开头/结尾消息只保留前 N 字符（≈前几句话；100 与 200 质量持平、输入省一半）
 include_all_user_messages: true  # 附加全部用户消息（意图轨迹，不截断、不含附件内容）
-user_message_threshold: 20       # 用户消息条数上限（0=不限）；超限保留开头 1 条 + 最近 N-1 条
-user_message_preview_chars: 200  # 单条用户消息触发线：超过则提取首尾句（各限一半预算）
+user_message_threshold: 40       # 用户消息条数上限（0=不限）；超限保留开头 1 条 + 最近 N-1 条（普通会话不触发）
+user_message_preview_chars: 300  # 单条用户消息触发线：超过则提取首尾句（各限一半预算）（普通会话不触发）
 title_style: concise             # concise = LABEL 主体标签 | complete = SUMMARY 事件梗概（信息类型优先，长度只是护栏）
 strategy: conservative           # conservative（明显不匹配才改，主线优先）| aggressive（每次优化，但开头主线仍优先于最新子任务）
 model: ""                        # 留空 = 宿主辅助模型；本地 deepseek-v4-flash
@@ -214,13 +214,15 @@ User-message trajectory (how the conversation evolved; the main intent source):
 5. **梗概模式输入规模砍半**（37,680→20,286 字符），判定基本一致
 6. **系统噪声必须过滤**：`[System: model changed]`、`[CONTEXT COMPACTION]`、`[ASYNC DELEGATION]`、`[System note: interrupted]`、`MEMORY_MAINTENANCE_SUMMARY` 等 Hermes/cron 注入消息混在 user/assistant 角色里，会污染意图轨迹；`[Recent Summary]`/`[Session Arc Summary]` 属于另一类，按第 12 条单独处理
 7. **用户消息上限（防超长对话）**：两个维度独立限制——条数超
-   `user_message_threshold`（默认 20）时 head+tail 采样：保留开头 1 条
+   `user_message_threshold`（默认 40）时 head+tail 采样：保留开头 1 条
    （起点锚点）+ 最近 N-1 条（当前意图），中间旧主题（含压缩续接会话
    的祖先内容）对标题价值最低直接丢弃；单条超 `user_message_preview_chars`
-   （默认 200）时用 `smart_preview` 提取首句 + 尾句（各限一半预算），无句子
+   （默认 300）时用 `smart_preview` 提取首句 + 尾句（各限一半预算），无句子
    边界的长串（日志/代码）退化为前 2/3 + 后 1/3 硬切——替代 ChatGPT 的
    2/3+1/3 硬切方案（切断句子破坏语义）。preview_chars 只是触发线，
-   提取策略固定为「首尾句」，短消息（≤触发线）永远原样保留
+   提取策略固定为「首尾句」，短消息（≤触发线）永远原样保留。真实会话
+   用户消息通常只有 1~3 条、单条远低于触发线，这两维度几乎不生效——
+   只是超长会话防线（§5.7 重验证确认）
 8. **上下文角色必须告诉模型**（2026-08-10 薇因评审）：Opening = 主线锚点、
    trajectory = 判断长期走势（不是关键词合集）、Recent = 判断是否已转题。
    轨迹段附英文说明（recurring/sustained intent；小比例主题不得覆盖已确立
@@ -297,19 +299,33 @@ User-message trajectory (how the conversation evolved; the main intent source):
 - **GPT 逆向**（社区逆向：`---BEGIN Conversation---` 包对话 + `Summarize the conversation in 5 words or fewer` + `Your goal is to extract the key point`）：简洁但**太倾向当前工作**——「已修复」「已清理禁用」都是完成态；「实锤」口语；「互不相干」脑补。确认岚的判断
 - **Hermes 原生**（上游 title_generator.py `_TITLE_PROMPT_TEMPLATE` 复刻：只喂首条用户消息 + 3-7 words + `Name what the user wants DONE` + few-shot）：只喂首条消息的脆弱性暴露——#5 首条是 cron 注入（MEMORY_MAINTENANCE_SUMMARY）直接跑飞输出整段；#7 只看到「重新连接线后测试点击」丢全局。我们插件的噪声过滤 + 全量轨迹更有价值
 
-### 5.6 推荐配置（实验后的最优值）
+### 5.6 推荐配置（实验后的最优值；2026-08-11 当前提示词下重验证修正，见 §5.7）
 
 ```yaml
-preview_chars: 100
-opening_turns: 1
-recent_turns: 1
+preview_chars: 100          # 100 与 200 质量持平、输入省一半（§5.7 重验证确认）
+opening_turns: 2            # 维持 2/2：1/1 无优势证据，#9 反例显示 1/1 被结尾带偏（§5.7）
+recent_turns: 2
 include_all_user_messages: true
-user_message_threshold: 40
+user_message_threshold: 40  # 超长会话才触发（普通会话用户消息 1~3 条不触发）；更晚采样 = 更久全量轨迹
 user_message_preview_chars: 300
 title_style: concise        # 需要完整脉络时切 complete
 strategy: conservative
 max_title_length: 16        # v13 定稿：字符硬上限（中/英各 1 字符）
 ```
+
+> 原推荐 100/1/1/40/300（2026-08-10 矩阵实验）中轮数部分已被重验证推翻：1/1 vs 2/2 的实验差距（17.3 vs 17.0）在噪声内，且当前提示词（信息层级 + 全局任务优先）下 #9 两轮采样一致显示 2/2 更准。其余维度维持推荐值。
+
+### 5.7 参数重验证（2026-08-11，当前提示词 v13+信息层级+弱摘要+temp=0）
+
+提示词在矩阵实验后大改（LABEL/SUMMARY 语义化、信息层级、全局任务优先、实体规范），旧结论需复核。方法：10 固定会话（AB_SIDS 前 10）× 4 组（A 默认 200/2/2/20/200 / B 推荐 100/1/1/40/300 / C 强证据 100/1/1/20/200 / D 交叉 200/2/2/40/300），非盲改 conservative，temperature=0，不写库。
+
+**关键发现：threshold 与 user_preview 在真实会话上几乎不触发**——10 个会话用户消息 1~3 条（远低于 20/40），单条也远低于 200/300 字符。补充隔离实验（#2/#6/#9 各跑 20/200、20/300、40/200、40/300）确认输入规模完全相同、输出差异为采样噪声（temp=0 非 provider 绝对确定，同一输入多次运行可见波动）。因此这两个维度在正常规模无实验差异，按「用户轨迹全量最值钱」原则取更宽松值（40/300），仅作为超长会话防线。
+
+**preview_chars 100 vs 200**：输入显著缩小（#4 740 vs 1693、#8 1669 vs 4067、#5 899 vs 1883 字符），质量无系统差异（#2 A=B 同输出、#4 A=C 同输出）。确认 100。
+
+**轮数 1/1 vs 2/2**：唯一有差异的会话是 #9（70 条消息）：2/2 组（A/D）生成「Codex换opencode-go」「Codex provider切换与验证注入」，锚定主线；1/1 组（B/C）生成「Hermes验证注入关闭」「Hermes注入与Codex规则」，被结尾验证注入子任务带偏。其余会话两轮数无差异（4 个会话四组全 keep）。旧实验 1/1 优势仅 0.3 分（噪声内），本次反例支持 2/2 → **维持 2/2**（与 config.py DEFAULTS 一致）。
+
+**盲改摘要截断 token 实测**（#7 会话 8387 字符摘要）：800→1,865 prompt token；1200→2,071；1600→2,240（增量仅 +375 token/次，中文 token 效率 ~0.4-0.5 token/字，固定骨架 ~1.5K token 占大头）。质量：800 已锚定「触摸屏」Subject（「触摸屏误查YICO集线器」12 字符），1600 措辞更稳（「触摸屏校准错认YICO」多次运行语义稳定）。`retitle_summary_chars` 默认 1600 成本可忽略，无需下调。
 
 ---
 

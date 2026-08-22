@@ -44,6 +44,8 @@ def main():
         include_children=False,
     )
     user_cnt = 0
+    legacy_cnt = 0
+    empty_cnt = 0
     pending = []
     for row in rows:
         sid = row.get("id")
@@ -53,12 +55,22 @@ def main():
             src = db.get_session_title_source(sid)
         except Exception:
             src = None
+        title = row.get("title") or ""
         if src == SessionDB.TITLE_SOURCE_USER:
             user_cnt += 1
             continue
-        pending.append((sid, src, (row.get("title") or "")[:50]))
+        if src is None and title:
+            legacy_cnt += 1
+            continue
+        if int(row.get("message_count") or 0) <= 0:
+            empty_cnt += 1
+            continue
+        pending.append((sid, src, title[:50]))
 
-    print(f"总会话: {len(rows)} | user 来源跳过: {user_cnt} | 待评估: {len(pending)}")
+    print(
+        f"总会话: {len(rows)} | user 跳过: {user_cnt} | legacy 跳过: {legacy_cnt} "
+        f"| 空会话跳过: {empty_cnt} | 模型候选: {len(pending)}"
+    )
     if args.dry_run:
         for sid, src, title in pending:
             print(f"  {sid[:16]} [{src}] {title}")

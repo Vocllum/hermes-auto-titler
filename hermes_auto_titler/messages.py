@@ -78,17 +78,20 @@ _SYSTEM_NOISE_PREFIXES = (
     "[context compaction",
     "[async delegation",
     "[important:",
+    "[your active task list was preserved",
     # cron-memory-maintenance 的最终标记（通常以 assistant 角色写回消息流）
     "memory_maintenance_summary",
 )
 
 # 压缩摘要（混在 user 角色）：不是用户意图，也不进轨迹；只有在原始 opening
-# 已被压缩替换时，作为单独的「Earlier history summary」弱提示返回。这样它不再
-# 冒充 Opening，也不会把摘要中的过时子任务误当成真实开头。
+# 已被压缩替换时，作为单独的「Earlier history summary」返回。这样它不再
+# 冒充 Opening；调用方可在日常评估中视为弱提示，在 blind 重生成中视为
+# 原始 opening 缺失后的主要历史证据。
 _SUMMARY_PREFIXES = (
     "[recent summary",
     "[session arc summary",
     "[session summary",
+    "[durable summary",
 )
 
 
@@ -144,6 +147,34 @@ def sample_user_messages(users: List[Tuple[str, str]], threshold: int) -> List[T
     return users[:head] + users[-tail:]
 
 
+def _sample_turns(
+    pairs: List[Tuple[str, str]],
+    preview,
+) -> List[List[Tuple[str, str]]]:
+    """按真实用户消息切轮，每轮只保留用户消息和最后一条模型回复。"""
+    turns: List[List[Tuple[str, str]]] = []
+    user_text: Optional[str] = None
+    assistant_text: Optional[str] = None
+
+    def flush() -> None:
+        if user_text is None:
+            return
+        turn = [("user", preview(user_text))]
+        if assistant_text is not None:
+            turn.append(("assistant", preview(assistant_text)))
+        turns.append(turn)
+
+    for role, text in pairs:
+        if role == "user":
+            flush()
+            user_text = text
+            assistant_text = None
+        elif user_text is not None:
+            assistant_text = text
+    flush()
+    return turns
+
+
 def load_context_with_summary(
     db,
     session_id: str,
@@ -166,7 +197,7 @@ def load_context_with_summary(
     earlier_summary 只在可见消息中没有真实 opening、且存在压缩摘要时提供；
     它永远不进入 opening、recent 或用户意图轨迹。summary_chars>0 时用它
     截断摘要（retitle 盲改场景：模型没有当前标题锚点，需要更长摘要来恢复
-    Subject）；0 = 沿用 preview_chars。
+    Subject）；0 = 沿用 preview_chars。提示强度由调用方决定。
     """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
@@ -197,27 +228,12 @@ def load_context_with_summary(
             return text[:preview_chars] + "…"
         return text
 
-    recent: List[Tuple[str, str]] = []
-    seen_user = 0
-    for role, text in reversed(pairs):
-        recent.append((role, preview(text)))
-        if role == "user":
-            seen_user += 1
-            if seen_user >= recent_turns:
-                break
-    recent.reverse()
-
-    # 按轮切分（user 消息开头，含其后的 assistant 回应），取前 opening_turns 轮
-    rounds: List[List[Tuple[str, str]]] = []
-    cur: List[Tuple[str, str]] = []
-    for role, text in pairs:
-        if role == "user" and cur:
-            rounds.append(cur)
-            cur = []
-        cur.append((role, preview(text)))
-    if cur:
-        rounds.append(cur)
-    opening = [item for r in rounds[:opening_turns] for item in r]
+    # 角色配额：每个选中的真实用户轮次只保留用户消息和最后一条模型文本
+    # 回复。工具过程已经被过滤；压缩后残留在首条 user 之前的 assistant
+    # 片段也不属于任何真实用户轮次，不能冒充 Opening。
+    turns = _sample_turns(pairs, preview)
+    recent = [item for turn in turns[-recent_turns:] for item in turn]
+    opening = [item for turn in turns[:opening_turns] for item in turn]
     # 摘要永远不进入 opening；只有它先于所有可见真实消息时，才作为独立弱提示。
     earlier_summary = None
     if summaries and not saw_visible_opening:

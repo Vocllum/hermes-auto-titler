@@ -7,23 +7,23 @@ from typing import Any, Callable
 
 def _set_config(titler, key: str, value: str) -> str:
     cfg = titler.cfg
+    from .config import coerce_value, save_config
+
     if key not in cfg:
         return f"未知配置键: {key}"
     try:
-        if isinstance(cfg[key], bool):
-            v = value.lower() in ("true", "1", "yes", "on")
-        elif isinstance(cfg[key], int):
-            v = int(value)
-        elif isinstance(cfg[key], float):
-            v = float(value)
-        else:
-            v = value
-    except ValueError:
-        return f"值无效: {value}"
+        v = coerce_value(key, value)
+    except ValueError as e:
+        return f"值无效: {value}（{e}）"
     cfg[key] = v
-    from .config import save_config
-
     save_config(cfg)
+    if key == "enabled":
+        # hook 注册在插件加载（register）时按初始 enabled 决定；运行期
+        # false→true 只写配置，hook 要等重启才注册。
+        return (
+            f"{key} = {v}（已写入 config.yaml；hook 注册在插件加载时决定，"
+            "初始 false→true 需重启 Hermes 生效）"
+        )
     return f"{key} = {v}（已写入 config.yaml，立即生效）"
 
 
@@ -42,7 +42,8 @@ def make_handler(titler) -> Callable[[str], str]:
             c = titler.cfg
             return (
                 f"autotitler: {'enabled' if c['enabled'] else 'disabled'}"
-                f" | every {c['every_n_turns']} turns | on_close={c['on_close']}"
+                f" | every {c['every_n_turns']} turns | early_turn_eval={c['early_turn_eval']}"
+                f" | on_close={c['on_close']}"
                 f" | recent {c['recent_turns']} turns | all_user_msgs={c['include_all_user_messages']}"
                 f" | strategy={c['strategy']} | model={c['model'] or '(host default)'}"
                 f" | interval={c['min_interval_minutes']}m | max_len={c['max_title_length']}"

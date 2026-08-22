@@ -1,427 +1,227 @@
-# hermes-auto-titler 设计与实验文档
+# hermes-auto-titler 设计
 
-> 状态：v0.1.0 已发布，真实环境验证通过；参数矩阵实验完成（2026-08-10）；提示词 v13 定稿（四方案对比胜出，2026-08-10）
-> 关联：README.md（使用说明）· scripts/（实验与验证脚本）
+`hermes-auto-titler` 是一个 Hermes standalone 插件，在会话主线发生变化或当前标题不足以概括整体任务时，用独立辅助模型维护标题。
 
----
+本文只记录公开实现所需的架构、约束和验收方法。历史提示词实验、私人会话样本与表格结果不属于仓库内容。
 
-## 1. 项目背景与目标
+## 1. 目标
 
-Hermes 的会话标题体系只有 `derived`（首条消息截断）和手动 `/title`。长会话的 derived 标题是首条消息的截断产物，毫无概括力；而手动命名需要用户自己动手。竞品调研（2026-08-09）：
+- 保留 Hermes 原生首轮确定性标题，由插件负责后续语义升级。
+- 优先保护用户手改标题，自动化不得降低标题来源优先级。
+- 普通回合结束不能被辅助模型调用阻塞。
+- 减少重复、内部和无意义调用，成本优化优先发生在触发层。
+- 模型、数据库或 hook 异常时 fail-safe，不影响主会话。
+- 标题短、稳定、可检索，并满足字符数和显示列宽限制。
 
-- Claude Code：仅手动 `/rename`，无自动 rename hook（上游 #29355 仍在请求）
-- Codex CLI：标题 = 首条消息截断，不可改名（#15533 请求中）
-- ChatGPT / Claude 网页：异步独立小模型生成标题（历史 gpt-3.5-turbo）
+非目标：
 
-**结论：「对话结束后自动评估要不要改名」是空白点**——hermes-auto-titler 填的就是这个空。
+- 不接管 Hermes 首轮标题生成。
+- 不引入 embeddings、标题缓存数据库或多阶段评分管线。
+- 不自动升级旧的非空 `NULL provenance` 标题。
+- 不修改 Hermes 核心代码或新增桌面设置页。
 
-核心价值主张：
+## 2. 生命周期
 
-1. **零上下文占用**：注册 hook 回调（本地 Python 代码），不注入工具 schema，每轮对话上下文零开销
-2. **独立模型调用**：旁路小模型（默认 deepseek-v4-flash），不唤醒主 agent loop
-3. **provenance 正确**：尊重 Hermes 标题来源体系，用户手改标题永不覆盖
-4. **可配置策略**：conservative / aggressive 策略 + concise / complete 标题风格
+插件注册三个入口：
 
----
+1. `on_session_end`
+   - 过滤 `bg-review`、`cron`、`subagent`、失败、打断和未完成回合。
+   - 只为真实完成的前台回合增加进程内计数。
+   - 命中周期或 early 条件时启动 daemon worker，hook 立即返回。
+2. `on_session_finalize`
+   - 处理真实关闭/终局。
+   - 使用正常时间节流与 in-flight 去重。
+   - 刻意同步等待评估，以换取关闭返回前标题已完成写回。
+3. `/autotitler`
+   - 提供状态、配置、单会话立即评估和批量重命名命令。
 
-## 2. 架构决策（已定稿，不再变更）
+普通周期流程：
 
-### 2.1 独立插件，不并入 hermes-lcm
-
-| 候选 | 否决原因 |
-|---|---|
-| 并入 hermes-lcm | LCM 无会话级概念（只注册 subagent_start/subagent_stop/pre_llm_call，无 title 字段）；LCM 是本地 fork 背着补丁包袱（LCM_DISABLED_TOOLS 裁剪 + OpenAICompatibleProvider 补丁），加功能每次更新冲突面扩大 |
-| 并入 Hermes 核心 | 核心 SessionDB 自带完整消息，但标题维护是纯旁路职责，不值得进核心 |
-| **独立插件 hermes-auto-titler** ✅ | 标题归宿是 Hermes session DB（sessions.title），核心逻辑 ~200 行，与 LCM 更新节奏解耦 |
-
-### 2.2 独立模型调用而非主模型
-
-`on_session_end` hook 是 fire-and-forget：触发时主 agent loop 已退出，用主模型要重新唤醒整个 loop（阻塞且贵）。业界标准做法（ChatGPT 标题、OpenViking query_planner、LCM 摘要）都是旁路独立小模型。单次评估 ~1.5K 输入 + 300 输出 token，成本可忽略。
-
-### 2.3 触发链
-
-```
-用户对话 N 轮
-  → turn_finalizer.finalize_turn（每轮末尾）触发 on_session_end
-  → 计数器 +1，every_n_turns 达标 or 会话关闭(on_close)
-  → evaluate(session_id)
-      → SessionDB.get_messages_as_conversation 读全文
-      → load_context 提取（开头轮 / 最近轮 / 用户意图轨迹）
-      → ctx.llm.complete() 独立模型判定 keep/rename
-      → 写回（user 权威写 + 恢复 llm 来源）
+```text
+on_session_end
+  → 校验事件与平台
+  → 计算周期 / early 资格
+  → in-flight 去重
+  → 携带当前 Hermes profile Context 启动 daemon worker
+  → 读取会话内容
+  → 辅助模型返回 keep/rename JSON
+  → 记录辅助模型 usage
+  → 重新检查标题来源并写回
 ```
 
-- CLI 退出 / Ctrl+C 有 safety net（cli.py:18062、cli.py:1318、tui_gateway/server.py:716）
-- payload 不带消息历史，插件从 SessionDB 读
+线程启动或 worker 内任一步骤失败，都会清理 in-flight 标记；异常只记录日志，不向主会话传播。
 
-### 2.4 标题来源体系与写回技巧（关键坑）
+## 3. 触发策略
 
-Hermes 标题来源（hermes_state.py:5904-6121）：
+### 周期评估
 
-```
-TITLE_SOURCE_DERIVED = "derived"  (rank 0)
-TITLE_SOURCE_LLM     = "llm"      (rank 1)
-TITLE_SOURCE_USER    = "user"     (rank 2，权威)
-```
+`every_n_turns=N` 表示每 N 个真实完成的前台回合评估一次。计数仅存在于当前进程，重启后从零开始；它不是业务状态，不需要持久化。
 
-- `set_auto_title`（llm/derived）只在更高权威或空标题时落盘
-- **llm 来源永远无法更新自身**（官方注释 "stops a session renaming itself"）——对持续维护标题致命
+### Early 评估
 
-**绕过方案（已实现）**：自动标题更新走 `set_session_title`（user 权威写）+ 立即恢复 `set_session_title_source(llm)`。这是 Hermes 自己压缩时同款技巧（conversation_compression.py:3420-3438）。用户手改标题（source=user）永不碰。
+`early_turn_eval=true` 只让无标题或 `derived` 来源的会话在周期边界前获得一次升级机会：
 
-**legacy NULL 保护**：provenance 列出现前的老行 `_title_rank(None)` 按 user 权威对待（与当年手动 /title 无法区分），llm 永远写不进去——官方保守设计，插件显式跳过并标注 `skipped`，不报 failed。
+- `user`、`llm` 和非空 legacy `NULL provenance` 不触发 early 调用；
+- 正常周期边界仍按 `every_n_turns` 工作；
+- 仍受 `min_interval_minutes` 和 in-flight 去重约束；
+- `every_n_turns=1` 时没有额外效果。
 
-**标题冲突**：唯一性检查在来源优先级之后；`set_session_title` 冲突抛 ValueError，插件捕获后自动加后缀 ` (2)` 重试（i 从 2 到 19）。
+默认关闭，避免把一次显式 opt-in 偷换成 `every_n_turns=1` 的隐式语义。
 
----
+### 关闭评估
 
-## 3. 配置项设计
+`on_close=true` 时，真实 finalize 或带关闭原因的 end 事件可以评估。普通中断不等于关闭。关闭评估使用 `force=false`，因此不会绕过时间节流，也不会在周期 worker 正在运行时重复调用。
 
-```yaml
-enabled: true                    # 插件开关；plugins.enabled 移除 = 完全不加载
-every_n_turns: 3                 # 每 N 轮评估一次（1 = 每轮）
-on_close: true                   # 会话关闭时再评估一次
-recent_turns: 2                  # 携带最近 N 轮消息（实验结论见 §5；重验证后维持 2，见 §5.7）
-opening_turns: 2                 # 携带会话开头 N 轮消息（主线锚点；同上）
-ignore_model_messages: false     # true = 过滤 assistant 消息（A/B 实验用）
-preview_chars: 100               # 开头/结尾消息只保留前 N 字符（≈前几句话；100 与 200 质量持平、输入省一半）
-include_all_user_messages: true  # 附加全部用户消息（意图轨迹，不截断、不含附件内容）
-user_message_threshold: 40       # 用户消息条数上限（0=不限）；超限保留开头 1 条 + 最近 N-1 条（普通会话不触发）
-user_message_preview_chars: 300  # 单条用户消息触发线：超过则提取首尾句（各限一半预算）（普通会话不触发）
-title_style: concise             # concise = LABEL 主体标签 | complete = SUMMARY 事件梗概（信息类型优先，长度只是护栏）
-strategy: conservative           # conservative（明显不匹配才改，主线优先）| aggressive（每次优化，但开头主线仍优先于最新子任务）
-model: ""                        # 留空 = 宿主辅助模型；本地 deepseek-v4-flash
-min_interval_minutes: 5          # 同一会话两次评估最短间隔（防抖）
-max_title_length: 16             # 字符硬上限（中/英各算 1 字符；12 为目标、16 为上限，宁保关键实体用满 16）
-max_display_width: 40            # 列宽硬上限（全角 2 列/半角 1 列；写回时双重截断）
-retitle_summary_chars: 1600      # 仅 retitle-all 盲改：压缩摘要截断长度（0=沿用 preview_chars）。盲改没有当前标题锚点，需要更长摘要恢复 Subject（§6.8）
-```
+`rename-now` 是唯一明确使用 `force=true` 的人工命令；批量 `retitle-all` 仍遵守正常节流。
 
-配置注释写给使用者：config.example.yaml 只写默认值和可选值，解释进 README。
+## 4. 输入构造
 
----
+模型输入由四部分组成：
 
-## 4. 提示词设计（v13 定稿；2026-08-11 语义化重构 LABEL/SUMMARY + 信息层级）
+- 当前标题及来源；
+- 会话 opening turns；
+- recent turns；
+- 可选的全部用户意图轨迹。
 
-### 4.1 结构
+Opening 和 Recent 按真实用户消息切轮。每个选中的轮次只保留该用户消息与轮内最后一条模型文本回复；首条用户消息之前的 assistant 残片不属于任何轮次，直接排除。这个固定角色配额防止工具过程、连续模型复盘或压缩残片按文本体量压过用户意图，同时不增加配置维度。
 
-```
-[system]
-You maintain concise titles for Hermes conversations.
-Return JSON only: {"action":"keep"|"rename","title":"..."}
-{rule}                     ← 策略段（英文：conservative / aggressive / blind）
-{style_req}                ← 风格段（英文：LABEL STYLE / SUMMARY STYLE）
-Information hierarchy:
-- Subject comes from the session opening (or the earlier history
-  summary when the original opening was compacted away); it is the
-  main topic the session started about. A device or entity that
-  appears only in the final turns is detail, not the subject.
-- Main intent comes from the user-message trajectory.
-- Recent turns show the latest event, current state, or a genuine
-  topic shift; they must never define the subject by themselves.
-Rules:
-- Length is a guardrail, not the goal: aim for at most 12 characters;
-  never exceed {max_title_len} (Chinese and Latin each count as 1 char).
-- Keep key product names and identifiers exact and correctly cased;
-  expand informal abbreviations from the user's messages to their full
-  canonical names instead of copying them.
-- When the conversation has two distinct tasks, name both entities
-  even if it uses the full length budget.
-- No trailing punctuation, no quotes.
-- Use the dominant language of the user's messages.
-Good: {"action":"rename","title":"Dia密码导入Apple密码"}
-Too narrow: {"action":"rename","title":"关闭验证注入"}
-Too vague: {"action":"rename","title":"Code changes"}
-Reply with JSON only.
+只提取文本；图片、文件等附件保留占位信息，不把二进制内容送入模型。系统维护注入、cron 包装、task-list 压缩续接标记和 `MEMORY_MAINTENANCE_SUMMARY` 等噪声在进入模型前过滤。
 
-[user]
-Current title: xxx          ← 非 blind 模式才给（避免旧标题引导模型）
-Opening (the session's starting turns; the main through-line anchor;
-primary subject source):
-                            ← 有真实 opening 时只放开头轮；摘要永远不混入
-Earlier history summary (weak hint; may contain stale subtask details.
-Use it only to recover the broad earlier topic when the original opening is unavailable):
-                            ← 仅当原始 opening 因压缩不可见时提供；否则整段省略
-Recent (the latest turns; the current event, state, or a genuine topic
-shift — never the subject by itself):
-                            ← recent 轮（每条 preview_chars 字符）——判断是否转题
-User-message trajectory (how the conversation evolved; the main intent source):
-                            ← 意图轨迹（超长单条提取首尾句，超条数 head+tail 采样）
+当原始 opening 已不可见时，压缩摘要必须作为独立主题锚点，不能伪装成原始用户消息；摘要后的可见 Opening 只是局部续段。`retitle-all` 的盲改模式没有当前标题锚点，因此把更长的摘要作为历史基线，同时保留摘要后的真实用户续段，但清空该续段的伪 Opening、assistant/recent 细节。模型只有在多条实质请求形成持续转向时才允许续段取代或扩展旧主线；单次收尾验证、当前 blocker 或参数微调不能抢走标题。
+
+超长用户轨迹使用“首条 + 最近若干条”采样；单条长消息保留首尾，以兼顾最初意图和最终约束。
+
+## 5. 模型协议
+
+模型只允许返回：
+
+```json
+{"action":"keep"}
 ```
 
-设计要点（v13 与 v12 的差异）：
+或：
 
-- **全局任务优先**：`{rule}` 与 `{style_req}` 都显式写「opening 确立的主线任务」是基调、「永远不要用最新子任务命名」。这是四方案对比后岚拍板的硬要求——GPT 逆向方案（extract key point）太倾向当前工作（产出「已修复」「已清理禁用」等完成态），v13 用「Name the MAIN TASK, not the latest subtask」对抗
-- **few-shot 三例**：Good（`Dia密码导入Apple密码`）、Too narrow（`关闭验证注入`——实际是子任务却被 GPT 方案选中）、Too vague（`Code changes`）。「Too narrow」示例直接来自四方案对比中 GPT 列 #9 的翻车案例
-- **实体优先于长度**：规则明确「宁可用满 16 字符也不丢关键产品名/标识符」——v11 曾因过度压缩丢掉 Codex/verify_on_stop/OpenViking；2026-08-11 再强化为「规范大小写 + 缩写展开为规范全称」（通用规则，不硬编码映射表——项目公开，个人私域缩写不进提示词）。触发案例：模型曾照抄用户消息里的小写/缩写写法（#10 会话「skill报错排查与ov清理」）
-- **信息层级（2026-08-11 新增）**：Subject 只来自 Opening/history；Intent 来自用户轨迹；Recent 只是事件/转题信号、永远不能单独定义 Subject。这是 #7 会话（YICO 主线跑偏）教训的 prompt 层落地——压缩会话里 Recent 常被结尾 AI 复盘占满，没有层级约束时模型会拿结尾事件当主题
-- **清洗**：`_clean_title` 式规范化（去引号、去 `Title:` 前缀、尾部标点 rstrip）+ `_write` 双重硬截断（字符上限 + 列宽上限）
-
-### 4.2 策略段（strategy）
-
-| 策略 | rule 内容 |
-|---|---|
-| conservative | 只有当前标题无法概括会话整体时才 rename，否则 keep（不再内置长段主线规则——主线约束已收进风格段，避免两处打架） |
-| aggressive | 只要你的标题更好就 rename。**开头主线任务永远优先于最新子任务**（v13 变化：不再「优先最近主题」——岚四方案对比后确认全局任务优先） |
-| blind（retitle-all 专用） | 不提供原标题。直接根据会话内容给出最能概括的新标题，action 必须是 rename。+ 按策略保留主线倾向 |
-
-设计沿革：最初有 balanced 三档，岚拍板删除——「保守和激进不需要平衡、激进=更倾向于最近的消息」（v10 前）；v13 四方案对比后又把 aggressive 的「优先最近主题」改为「主线优先」，与岚的全局任务偏好对齐。
-
-### 4.3 风格段（title_style）：信息类型是第一约束，长度只是护栏
-
-| 风格 | 语义 | prompt 原文 |
-|---|---|---|
-| concise（默认） | **LABEL 主体标签**：Subject + 最小区分意图，不重述经过 | `LABEL STYLE: name the conversation. Identify its main subject and only the minimum intent needed to distinguish it. Do not retell what happened.` |
-| complete | **SUMMARY 简短事件梗概**：Subject + 主要意图/事件/纠偏 | `SUMMARY STYLE: briefly describe what the conversation is mainly about. Preserve the main subject and the most important intent, event, or correction.` |
-
-设计动机（岚 2026-08-11）：不用「3~5 词 / 5~10 词」这类长度语言定义风格——长度应降级成护栏（12 目标 / `max_title_length` 硬限仍保留在 Rules），信息类型才是第一约束。取用优先级：concise = Subject > Intent >>> Event；complete = Subject + Intent/Event；Recent 永远不能单独定义 Subject。
-
-### 4.4 通用要求（两风格共有）
-
-长度以字符计（中/英各 1 字符）：12 为目标、`max_title_length` 为硬上限（默认 16）；具体、可检索（别人靠标题能找回这个会话）；避免「对话」「讨论」「问题」「查询」空泛词；语言跟随用户消息；不要引号、无尾部标点。
-
----
-
-## 5. 实验经验（参数矩阵，2026-08-10）
-
-### 5.1 实验一：6 组配置 × 5 长会话（preview/轮数/AI/用户维度）
-
-| 配置 | 平均分（20 分制） |
-|---|---|
-| C 少轮数（200/1/1/带AI/用户全量） | **8.8** |
-| D 多轮数（200/3/3/带AI/用户全量） | 8.6 |
-| B 完整消息（0/2/2） | 8.2 |
-| A 基线（200/2/2） | 8.0 |
-| E 过滤AI（200/2/2） | 7.6 |
-| F 无用户全量（200/2/2） | **7.0** |
-
-### 5.2 实验二：7 组配置 × 10 长会话（preview 梯度 + 轮数 + 风格）
-
-| 配置 | 平均分（20 分制） |
-|---|---|
-| Scomp complete（100/1/1/complete） | **18.1** |
-| P100 / P200 / P400（concise） | 17.3 |
-| R22（100/2/2） | 17.0 |
-| P50（50/1/1） | 16.4 |
-| P0 完整消息（0/1/1） | **15.5**（含一次空输出） |
-
-### 5.3 结论（已坐实）
-
-1. **include_all_user_messages 是最高价值维度**——去掉用户轨迹后模型只能靠首尾猜，F 组垫底且出现跑偏（把「模型路由+晨报修复」写成「Codex 多代理验证」）
-2. **complete 风格全面胜出**——双主题会话（消息平台+Raft、更新+SSH+sudo）concise 只能选一个主题，complete 用「A 与 B」全保住；最长的标题 27 字符，仍在「一眼看完」范围
-3. **preview 100≈200≈400，0（完整）最差**——完整消息有噪声且可能超时空输出；50 信息不足。100 是最优性价比
-4. **轮数 1/1 优于 2/2**——2/2 更容易被尾部话题带偏（「消息平台配置」被带成「修复 Raft 侧边栏」）。首尾各 1 轮 + 用户全量轨迹是最稳组合
-5. **梗概模式输入规模砍半**（37,680→20,286 字符），判定基本一致
-6. **系统噪声必须过滤**：`[System: model changed]`、`[CONTEXT COMPACTION]`、`[ASYNC DELEGATION]`、`[System note: interrupted]`、`MEMORY_MAINTENANCE_SUMMARY` 等 Hermes/cron 注入消息混在 user/assistant 角色里，会污染意图轨迹；`[Recent Summary]`/`[Session Arc Summary]` 属于另一类，按第 12 条单独处理
-7. **用户消息上限（防超长对话）**：两个维度独立限制——条数超
-   `user_message_threshold`（默认 40）时 head+tail 采样：保留开头 1 条
-   （起点锚点）+ 最近 N-1 条（当前意图），中间旧主题（含压缩续接会话
-   的祖先内容）对标题价值最低直接丢弃；单条超 `user_message_preview_chars`
-   （默认 300）时用 `smart_preview` 提取首句 + 尾句（各限一半预算），无句子
-   边界的长串（日志/代码）退化为前 2/3 + 后 1/3 硬切——替代 ChatGPT 的
-   2/3+1/3 硬切方案（切断句子破坏语义）。preview_chars 只是触发线，
-   提取策略固定为「首尾句」，短消息（≤触发线）永远原样保留。真实会话
-   用户消息通常只有 1~3 条、单条远低于触发线，这两维度几乎不生效——
-   只是超长会话防线（§5.7 重验证确认）
-8. **上下文角色必须告诉模型**（2026-08-10 薇因评审）：Opening = 主线锚点、
-   trajectory = 判断长期走势（不是关键词合集）、Recent = 判断是否已转题。
-   轨迹段附英文说明（recurring/sustained intent；小比例主题不得覆盖已确立
-   主线，除非 recent 显示持续转向）。这是「20 组抽样发现少数跑主线」后的
-   修正——不是继续加上下文，而是把现有上下文的角色说精确
-9. **改版前后 20 组抽样对比**（同 20 会话，SEED=7）：四版对比——
-   v1 初版平均 23.55 字符（≤20: 7，≥30: 5）；v2 加角色说明 + 最短句 +
-   head+tail 采样后 21.05（≤20: 10，≥30: 2）；v3 换薇因 concise 原版
-   （minimal label + compress once more）后 19.65（≤20: 11，≥30: 3）；
-   v4 在 v3 上加 5 词软锚点后 **16.6（≤20: 15，≥30: 0，最长 27）**，
-   同配置第二轮 v4b 17.0（≤20: 14，≥30: 0）——方差小，稳定。v3 的三
-   个反例全部收敛：#4 搜索选型 35→21→8（三服务名不再全堆）、#15
-   29→17（括号限定词消失）、#20 31→24→23（平台词压缩）。词数锚点比
-   规则描述更能压住模型「保留实体与限定词」的惯性；模型自然收敛到
-   2-3 词/8-17 字符，多数在锚点内仍有余量
-10. **few-shot 示例（v5，2026-08-10 岚侧边栏实测点名）**：岚看真实侧边栏
-   指出仍太长，给出「行/不行」示例（行：Viking 插件功能审查、浏览器
-   自动工作流、Windhawk备份恢复搞定；不行：搜索方案对比：Firecrawl、
-   Tavily、AnySearch、TencentDB 替代 OpenViking 部署与数据迁移、Polymate
-   QQ 机器人权限与限流设置、hermes-auto-titler 自动标题插件开发）。
-   → 提示词加 Good/Bad→Better 示例 + 单专有名词规则（多于一个实体名=
-   over-listing，只留最能识别的那个）。效果：v4b 17.0 → v5 15.7 平均，
-   ≤10 从 3 → 6，≤15 从 6 → 9；「搜索方案对比」6 字符直接命中示例。
-   剩余「长」分两类：可压缩的（Polymate 权限与限流设置 16，模型未完全
-   跟示例）与实体本身长的（verify_on_stop/OpenCode Go/Desktop SSH——
-   压缩即失去可检索性，属合理长度）。**要点：旧侧边栏标题是旧版代码
-   生成的，新提示词需插件重载 + 重跑才可见**
-11. **主线压缩约束（v6，2026-08-10 岚反馈「精简过头」）**：岚看 v5 结果
-   指出「不够概括」——「自动标题 prompt 精简」反映的是当前子任务而非
-   大主题；原版虽长但至少概括完整大意。教训：v3-v5 全在教「删」，没教
-   「删完仍概括大主题」，模型为最短从 recent 取材。v6 修正：5 词锚点
-   改为「recognizable as a whole」+ 新增「title 必须覆盖整个会话的主线，
-   不能只是最近子主题；不确定时选更宽的主题」+ compress 段限定「压缩后
-   不再覆盖主线就保留长版」。效果：平均 15.7 → 15.05（长度让步于概括
-   性），但质量明显回归主线（codex 接入 opencode-go、Hermes symlink
-   目录修复、Skill Viking 审查修复、闪白屏MPO修复 7 字符）；点名会话
-   Polymate →「Polymate 配置」11 字符命中岚期望。残余：压缩续接会话的原始
-   opening 被摘要替换时，不能把压缩后的助手干活消息当作全局主线；这一
-   语义问题由第 12 条的独立 weak summary 段修正。
-12. **压缩摘要是独立 weak hint（v7 重构，2026-08-10）**：压缩续接会话的原始消息被摘要替换，会话起点可能不存在于库中。摘要类前缀（`[Recent Summary]`/`[Session Arc Summary]`/`[Session Summary]`）先收集，但**永远不进入 Opening、Recent 或用户轨迹**：有真实 opening 时完全不提供摘要；只有摘要先于所有可见真实消息、说明原始 opening 可能已丢失时，才单独增加 `Earlier history summary (weak hint; may contain stale subtask details...)` 段。这样把摘要明确降级为恢复 broad topic 的弱线索，避免模型把摘要中的陈旧子任务当作当前 opening。摘要仍按 `preview_chars` 截断，取最早一条。对应回归测试覆盖「摘要在开头」「真实 opening 在摘要前」「摘要不进三类上下文」三种路径
-
-### 5.4 提示词演进 v8→v13（2026-08-10 岚 0 分否决过度设计）
-
-| 版本 | 做法 | 平均字符 | 结果 |
-|---|---|---|---|
-| v8 | 精简无示例 | 14.9 | 模型滑向描述句（「根治闪白屏：MPO 冲突」） |
-| v9 | 列宽硬限 + 规范名 | 19.1 | 更长：删除示例后模型堆描述；40 列违反 1 次（45 列）；规范名规则造成冗余（「Hermes 记忆维护改为每周日」） |
-| v10 | +否定式规则（名词短语/禁动作动词开头/禁和并与） | 14.2 | 长度恢复但副作用：丢关键实体（「闪白屏问题」丢 MPO；「Hermes verify_on_stop 验证注入机制」丢 codex/opencode-go） |
-| v11 | **岚 0 分否决 v10**：「我们过度设计了」。砍到 3 句核心 + 12 目标/16 硬限 | 10.8 | 长度全达标（无超 16）但过度压缩：丢 Codex/verify_on_stop/OpenViking；「睡眠日志与分辨率排查」被 recent 带偏 |
-| v12 | 长度措辞改「实体优先」：宁用满 16 不丢关键实体 | 13.4 | 语义回归主线（Codex装OpenViking/关闭verify_on_stop），但岚指出「书写不规范 + 一股 AI 味」（「日志实锤」「值得用吗」口语化、中英混排无空格） |
-| v13 | 四方案对比定稿（见 5.5） | 6–12（10/10 达标） | 全局任务、名词短语、无 AI 味 |
-
-教训：长度约束从「目标」改「护栏」后质量回升；AI 味的根源是「让模型总结全文」而非「命名意图」。
-
-### 5.5 四方案对比（2026-08-10，同 10 会话 AB_SIDS 固定批次，conservative+blind）
-
-| # | v13 全局任务 | v14 提取管线 | GPT 逆向 | Hermes 原生 |
-|---|---|---|---|---|
-| 1 | 飞书群聊放行配置 (8) | Mac侧泠月飞书群聊放行 (11) | 补全飞书群聊放行配置 (9) | 给泠月 Mac 飞书群聊放行配置 (13) |
-| 2 | 合盖睡眠日志排查 (8) | 插电合盖睡眠排查 (8) | 实锤电池供电与4K (9) ⚠️口语 | 检查插电盒盖睡眠日志 (11) |
-| 3 | 闪白屏MPO冲突排查 (10) | MyDockFinder闪白屏 (9) | MPO未关已修复 (7) ⚠️结果态 | 根治 MyDockFinder 闪白屏 MPO 冲突 (16+) |
-| 4 | 搜索工具对比 (6) | Firecrawl评估 (8) | 搜索工具对比 (6) | 对比新搜索工具与现有方案 (13) |
-| 5 | 记忆维护改每周日0点 (10) | Hermes记忆维护改每周日 (11) | 记忆维护改为周日零点 (10) | MEMORY_MAINTENANCE_SUMMARY… 💥首条是 cron 注入 |
-| 6 | Dia密码导入Apple密码 (12) | 校友邦日志调整 (7) 💥幻觉 | Dia 全部密码导入 Apple (12) | 全部密码导入 Apple 密码 (12) |
-| 7 | 触摸屏校准误认YICO (11) | Win平板触摸校准 (8) ⚠️丢YICO | YICO 是集线器非触摸屏 (12) | 重新连接线后测试点击 (10) ⚠️只看到首条 |
-| 8 | OpenViking双端配置 (10) | Codex装OpenViking (8) | 两边Codex配置OpenViking (11) | 两边 codex 安装配置 open Viking (16+) |
-| 9 | Codex切换与验证注入 (11) | Codex切换与注入排查 (10) | 关闭多余验证 Codex 互不相干 ⚠️脑补 | 评估 opencode go 与 cc switch 切换管理 (17+) |
-| 10 | skill报错与清理OV (11) | skill排查与清理ov (10) | 插件致错已清理禁用 (9) ⚠️结果态 | 排查 skill 错误并清理 ov 服务器 (15+) |
-
-四方案定义与结论：
-
-- **v13（定稿）**：opening+recent+全量用户轨迹 → 全局任务 prompt。10/10 名词短语、无 AI 味、6–12 字符；#3 是「排查」（对应开头还在问根因）而非「已修复」——全局任务优于当前工作的直接体现
-- **v14 提取管线**（岚提议：不喂原文，先提取再命名）：先 LLM 提取 {main_task, opening_subject, key_entities, user_intentions} 再喂标题模型。输入压缩真实（#4 从 15,057 → 751 字符，20 倍），但 **提取幻觉**：#6 提取成「校友邦日志调整」完全跑偏（提取一步错标题全错）；#7 丢 YICO 实体；且每次评估多一次 LLM 调用。结论：不默认启用，记入 V2 候选（超长会话降级选项），正常规模用 preview_chars 截断已足够
-- **GPT 逆向**（社区逆向：`---BEGIN Conversation---` 包对话 + `Summarize the conversation in 5 words or fewer` + `Your goal is to extract the key point`）：简洁但**太倾向当前工作**——「已修复」「已清理禁用」都是完成态；「实锤」口语；「互不相干」脑补。确认岚的判断
-- **Hermes 原生**（上游 title_generator.py `_TITLE_PROMPT_TEMPLATE` 复刻：只喂首条用户消息 + 3-7 words + `Name what the user wants DONE` + few-shot）：只喂首条消息的脆弱性暴露——#5 首条是 cron 注入（MEMORY_MAINTENANCE_SUMMARY）直接跑飞输出整段；#7 只看到「重新连接线后测试点击」丢全局。我们插件的噪声过滤 + 全量轨迹更有价值
-
-### 5.6 推荐配置（实验后的最优值；2026-08-11 当前提示词下重验证修正，见 §5.7）
-
-```yaml
-preview_chars: 100          # 100 与 200 质量持平、输入省一半（§5.7 重验证确认）
-opening_turns: 2            # 维持 2/2：1/1 无优势证据，#9 反例显示 1/1 被结尾带偏（§5.7）
-recent_turns: 2
-include_all_user_messages: true
-user_message_threshold: 40  # 超长会话才触发（普通会话用户消息 1~3 条不触发）；更晚采样 = 更久全量轨迹
-user_message_preview_chars: 300
-title_style: concise        # 需要完整脉络时切 complete
-strategy: conservative
-max_title_length: 16        # v13 定稿：字符硬上限（中/英各 1 字符）
+```json
+{"action":"rename","title":"..."}
 ```
 
-> 原推荐 100/1/1/40/300（2026-08-10 矩阵实验）中轮数部分已被重验证推翻：1/1 vs 2/2 的实验差距（17.3 vs 17.0）在噪声内，且当前提示词（信息层级 + 全局任务优先）下 #9 两轮采样一致显示 2/2 更准。其余维度维持推荐值。
+解析器先尝试完整 JSON，再尝试提取包含 `action` 的内嵌 JSON 对象。不从自由文本猜标题；解析失败直接 `keep`。
 
-### 5.7 参数重验证（2026-08-11，当前提示词 v13+信息层级+弱摘要+temp=0）
+调用固定 `temperature=0`，插件请求 `max_tokens=64`。这个值是 PluginLlm API 参数，不保证成为 provider 的 wire 级硬上限：Hermes 当前会为部分 OpenAI-compatible 路由省略显式 cap。因此成本结论不能建立在“输出最多 64 token”上。
 
-提示词在矩阵实验后大改（LABEL/SUMMARY 语义化、信息层级、全局任务优先、实体规范），旧结论需复核。方法：10 固定会话（AB_SIDS 前 10）× 4 组（A 默认 200/2/2/20/200 / B 推荐 100/1/1/40/300 / C 强证据 100/1/1/20/200 / D 交叉 200/2/2/40/300），非盲改 conservative，temperature=0，不写库。
+## 6. 标题规范
 
-**关键发现：threshold 与 user_preview 在真实会话上几乎不触发**——10 个会话用户消息 1~3 条（远低于 20/40），单条也远低于 200/300 字符。补充隔离实验（#2/#6/#9 各跑 20/200、20/300、40/200、40/300）确认输入规模完全相同、输出差异为采样噪声（temp=0 非 provider 绝对确定，同一输入多次运行可见波动）。因此这两个维度在正常规模无实验差异，按「用户轨迹全量最值钱」原则取更宽松值（40/300），仅作为超长会话防线。
+标题清洗包含：
 
-**preview_chars 100 vs 200**：输入显著缩小（#4 740 vs 1693、#8 1669 vs 4067、#5 899 vs 1883 字符），质量无系统差异（#2 A=B 同输出、#4 A=C 同输出）。确认 100。
+- 提示模型在最终输出前规范 plain-language 专名的大小写与标准空格，明确的仓库、包、文件和命令标识符保持原拼写；标题使用会话主导语言，`ingest` / `deploy` / `config` 等通用技术词在主导语言非英语时用该语言表达；
+- 12 字符是软目标，不得为凑短而缩写、截残词组；必要时使用完整硬上限；
+- 去除代码围栏、引号、`Title:` / `标题：` 前缀和尾部标点；
+- 同时限制 `max_title_length` 字符数与 `max_display_width` 显示列宽；
+- 截断后再次清理边界标点；
+- 候选标题与当前标题相同则视为 `keep`；
+- 唯一性冲突时添加递增后缀，并重新满足字符与列宽双上限。
 
-**轮数 1/1 vs 2/2**：唯一有差异的会话是 #9（70 条消息）：2/2 组（A/D）生成「Codex换opencode-go」「Codex provider切换与验证注入」，锚定主线；1/1 组（B/C）生成「Hermes验证注入关闭」「Hermes注入与Codex规则」，被结尾验证注入子任务带偏。其余会话两轮数无差异（4 个会话四组全 keep）。旧实验 1/1 优势仅 0.3 分（噪声内），本次反例支持 2/2 → **维持 2/2**（与 config.py DEFAULTS 一致）。
+`title_style=concise` 生成主体标签；`complete` 生成简短事件梗概。两者都以会话开头建立的主线为基调，recent 只能补充当前状态，不能单独替换 Subject。
 
-**盲改摘要截断 token 实测**（#7 会话 8387 字符摘要）：800→1,865 prompt token；1200→2,071；1600→2,240（增量仅 +375 token/次，中文 token 效率 ~0.4-0.5 token/字，固定骨架 ~1.5K token 占大头）。质量：800 已锚定「触摸屏」Subject（「触摸屏误查YICO集线器」12 字符），1600 措辞更稳（「触摸屏校准错认YICO」多次运行语义稳定）。`retitle_summary_chars` 默认 1600 成本可忽略，无需下调。
+## 7. 滞后机制（防标题震荡）
 
----
+单次 LLM 判断天然偏向最近消息；真实运行中出现过同一会话 33 分钟内被连改三次的震荡链。滞后机制在结构上拦截这类抖动：
 
-## 6. 验证过的坑（排障记录）
+- `rename_confirmations=N`（默认 1 = 关闭）：llm→llm 改名需连续 N 次评估给出**相同候选**才写库。候选变化即重新计数；中途 `keep` 清空 pending。
+- 旁路：derived/无标题升级是补漏、blind 是 close/retitle-all 终局评估（全貌已知），均立即提交，不要求二次确认。
+- `renames_per_hour`（默认 0 = 不限）：滑动 60 分钟窗口内的实际改名硬顶。触顶返回 `capped` 并**保留已确认候选**，窗口滑过后无需重新攒确认即可写入。
+- pending/频次状态仅存于进程内存：重启清零，与轮数计数同级，不持久化。
+- 用户权威在等待确认期间落地时清空 pending。
 
-### 6.1 opencode-go 不支持 json_schema
+配套提示词规范（日常评估注入，盲改不注入）：
 
-`complete_structured` 在 opencode-go provider 每次返回 400 `invalid_request_error: This response_format type is unavailable now`，异常被 catch 后静默返回 keep——hook 跑了但从不改名，标题无任何变化。
+- 主题只随「多条后续用户请求证实的持续转向」改变，单条最新消息只是子任务；
+- 多主体各有实质覆盖时应合并概括，把准确宽标题改成更窄标题视为漂移；
+- 当前标题中的标识符仍是主题一部分时必须保留；
+- 两个选项都站得住时倾向 keep。
 
-**修复**：`ctx.llm.complete(messages=[...], temperature=0, max_tokens=150, timeout=30, purpose="auto-title")` + `_parse_decision` 容错解析（JSON → 提取含 action 的内嵌 JSON → 关键词正则启发式兜底）。`temperature=0` 固定标题生成，减少同一输入仅因采样产生的漂移；任何 provider 兼容。
+## 8. 来源与并发安全
 
-**temperature 对比（2026-08-10）**：固定 10 个真实会话各调用一次 `0.2` 与 `0`，仅 2/10 次输出相同。`0.2` 平均 12.2 字符、最长 18；`0` 平均 12.6 字符、最长 16。`0` 的结果在「AnySearch 值不值得用」「opencode-go 切换与验证」等会话里保留了更明确的任务/结果边界，未观察到质量退化；因此正式调用和比较脚本统一使用 `temperature=0`。这是一组质量抽样，不把一次调用当成 provider 的绝对确定性保证。
+标题来源优先级保持为：
 
-### 6.2 目录插件必须根目录有 `__init__.py`
+```text
+derived < llm < user
+```
 
-Hermes `_load_directory_module` 要求插件根目录直接有 `__init__.py`，否则 `plugins list` 显示 enabled 但 `register()` 静默不执行（agent.log 报 No __init__.py）。子包结构（hermes_auto_titler/）不会被自动发现。
+写回规则：
 
-**修复**：`plugin_entry/__init__.py` 薄入口 re-export 子包 register，symlink 到安装目录。
+- 无标题或 `derived` 使用 Hermes 原生 `set_auto_title(..., source=llm)`；`derived` 是首句确定性兜底，无论长短都要求本次模型生成正式标题；
+- `user` 永远拒绝自动写入；
+- 非空 legacy `NULL provenance` 默认保护；
+- `llm → llm` 在每次写尝试前重新读取标题和来源；
+- 写入后只有候选标题仍然匹配时才恢复 `source=llm`。
 
-### 6.3 无热重载
+宿主公开 API 目前没有“同级来源 + 旧标题”的原子 CAS。`llm → llm` 因此仍有一个极小的跨步骤竞态窗口；实现负责缩小和检测该窗口，但不宣称绝对原子或绝对零覆盖。
 
-改代码后必须重启 Hermes 后端进程（Desktop Cmd+Q 彻底退出，或杀 serve 进程自动拉起）。曾经「修复落地了但进程还是旧代码」导致白排查一轮。
+同一进程内使用锁保护的 session in-flight 集合，防止周期、early 和关闭路径重复评估。SessionDB 的 lazy 初始化同样在锁内完成，避免并发首次访问创建多个实例。
 
-### 6.4 `hermes config set` 列表键陷阱
+## 9. Profile Context 与用量记账
 
-`hermes config set plugins.enabled '["a","b"]'` 把列表存成字符串，需 Python + yaml.safe_dump 修正为真 YAML 列表。"not a recognized config key" 提示是正常的（插件自定义键）。
+后台 worker 必须继承当前 Hermes profile Context，否则可能读写错误 profile 的 SessionDB。优先使用宿主 `tools.thread_context.propagate_context_to_thread`；老宿主回退标准库 `contextvars.copy_context()`。
 
-### 6.5 模型 override 门控
+每次真实 LLM 调用通过 `SessionDB.record_auxiliary_usage(...)` 记入：
 
-`plugins.entries.<id>.llm.allow_model_override` 默认 fail-closed，必须显式 `hermes config set plugins.entries.hermes-auto-titler.llm.allow_model_override true` 才能用 config 里的 model。
+- `task=hermes_auto_titler`
+- session ID
+- provider / model
+- input / output / total tokens
+- cache、reasoning 和 estimated cost（provider 返回时）
 
-### 6.6 derived 长标题强制重生成
+记账失败不能阻断标题写回；旧宿主或测试 fake 没有该 API 时安全跳过。
 
-`derived` 来源 + 标题 >40 字符 = 首条消息截断产物，模型即使判定 keep 也要强制 rename（`force_rename` 追加「当前标题是自动截断的长文本，不合格」）。
+## 10. 配置边界
 
-### 6.7 cron 注入消息会伪装成首条用户消息（已修复）
+配置加载对布尔、整数、有限浮点、枚举和字符串分别做严格归一化：
 
-四方案对比 #5 暴露：cron 任务注入的会话会写入 `MEMORY_MAINTENANCE_SUMMARY …` 标记（消息角色可能是 user 或 assistant）。Hermes 原生方案只喂首条消息，直接把它当用户意图，标题跑飞成整段注入文本。
+- `true/false` 不接受任意 truthy 数值；
+- 整数项拒绝小数、NaN、Infinity 和错误容器类型；
+- `recent_turns`、`opening_turns` 至少为 1；
+- 长度与阈值项不允许负数；
+- `strategy`、`title_style` 只接受已声明枚举；
+- 无效 YAML 或无效字段回退默认值。
 
-**修复已落地**：`_SYSTEM_NOISE_PREFIXES` 加入大小写不敏感的 `memory_maintenance_summary` 前缀，和 `[system:]`、`[context compaction]`、`[async delegation]`、`[important:]` 一样在进入 recent/opening/用户轨迹前过滤；回归测试覆盖 marker 不出现在三类上下文中。该项不再属于 V2 候选。
+`enabled=false` 时插件加载阶段不注册 hook，做到零运行开销。运行中从 false 改回 true 需要重启 Hermes 才能重新注册。
 
-### 6.8 压缩会话的「结尾实体」会抢走 Subject（调查：YICO 案例）
+## 11. 成本原则
 
-2026-08-11 岚问：会话 `20260810_005212_f9e167` 主体明明是「副屏触摸屏校准」，为什么生成「YICO实为sRGB集线器」？取证（59 条消息）：
+成本主要由是否调用模型决定，不由 prompt 中某个小参数决定。触发层依次使用：
 
-- 真实用户消息只有 3 条（重连线 / 关机 / 「为什么是 yico」），首条是 8387 字符压缩摘要，assistant 28 条 + tool 27 条——**AI 消息占绝对多数**
-- 轮切分按 user 开头：压缩后第一个真实 user 在 #32，前 31 条 assistant 残骸全挤进第一个 opening 轮，无用户提问锚点
-- Recent 最后 7 条里 6 条是 assistant 的 YICO 复盘；轨迹最后一条也是用户问 YICO；摘要前 200 字符内 YICO 出现 3 次（活动任务就叫「YICO 触摸屏校准」）——信息分布上 YICO 完全主导
-- 温度对比实验（/tmp 临时脚本）没同步 `earlier_summary` 4 元组改动，模型连摘要锚点都没有
+- 前台完成回合过滤；
+- 周期节流；
+- 时间节流；
+- 来源门控；
+- 同会话 in-flight 去重；
+- bg-review / cron / subagent 排除。
 
-结论：不是单一原因，是「压缩后 opening 无 user 锚点 + Recent 被结尾 AI 复盘占满 + YICO 高频」叠加。prompt 层修复 = Information hierarchy（Subject 只来自 Opening/history、Recent 永远不能单独定义 Subject、结尾才出现的设备/实体不是 Subject）；结构层修复 = 摘要作为独立 weak hint 提供（已在前一版落地）。实测：非盲改路径（真实运行）下该会话 keep 现标题「触摸屏校准误认 YICO 集线器」，不再被 YICO 抢跑。
+输入侧再用 opening/recent preview、用户轨迹阈值和摘要预算限制规模。项目不把 provider 未兑现的 `max_tokens` 请求当作成本收益。
 
-**盲改（retitle-all）专项修复（2026-08-11）**：盲改没有当前标题锚点，200 字符摘要截断下模型稳定输出「YICO实为sRGB集线器」（纯结尾纠偏事件）。实验：摘要截断 200→400→800→1600 字符，Subject 逐步回到「触摸屏校准」（1600 时输出「触摸屏校准错认YICO」，多次运行语义稳定）。落地为 `retitle_summary_chars`（默认 1600，0=沿用 preview_chars），仅 blind=True 时生效，非盲改路径不变（§3）。
-
-### 6.9 模型照抄用户消息的小写/缩写实体（调查：skill/ov 案例）
-
-会话 `20260810_015334_f41e41` 只有 1 条用户消息（原文即小写「skill」「ov」），模型生成「skill报错排查与ov清理」——照抄而非规范。修复 = 通用规则（缩写展开为规范全称、实体保持规范大小写，不硬编码映射表）+ 双任务双实体规则。实测：盲改输出「Skill报错排查与清理」、非盲改输出「Skill排错与OV清理」，规范大小写生效；OV 缩写仍在 12 字符护栏内可接受（岚确认）。
-
----
-
-## 7. 命令速查
+## 12. 验证
 
 ```bash
-# 单测（项目 .venv）
-cd ~/Hermes/Home/Projects/hermes-auto-titler && .venv/bin/python -m pytest tests/ -q
+# 单元与边界测试
+.venv/bin/python -m pytest tests/ -q
 
-# 真库集成验证（hermes venv，能 import hermes_state）
+# 临时 SessionDB 的真实来源/冲突集成验证
 ~/.hermes/hermes-agent/venv/bin/python scripts/integration_check.py
 
-# 真实端到端（PluginLlm + dsv4 + 真实会话，写库）
-~/.hermes/hermes-agent/venv/bin/python scripts/e2e_check.py [session_id]
+# 指定安全会话的真实模型、写回与 usage 验证
+~/.hermes/hermes-agent/venv/bin/python scripts/e2e_check.py <session_id>
 
-# 批量重命名（dry-run 先看范围；--limit/--min-messages 防手滑）
+# 批量范围预览，不调用模型、不写标题
 ~/.hermes/hermes-agent/venv/bin/python scripts/retitle_all.py --dry-run
-
-# 抽样审查（--blind 预览盲改模式；默认跳过 user 手改标题）
-~/.hermes/hermes-agent/venv/bin/python scripts/review_sample.py [--blind] [--n 10]
-
-# 参数矩阵实验（不写库）
-~/.hermes/hermes-agent/venv/bin/python scripts/eval_matrix.py
-
-# A/B 对比（with vs without 模型消息，不写库）
-~/.hermes/hermes-agent/venv/bin/python scripts/ab_compare.py
-
-# 四方案对比（v13 / v14 提取管线 / GPT 逆向 / Hermes 原生，不写库）
-AB_SIDS="前缀1,前缀2,..." ~/.hermes/hermes-agent/venv/bin/python scripts/compare_titler_schemes.py
 ```
 
-Git 提交身份：`git -c user.name="Vocllum" -c user.email="149675937+Vocllum@users.noreply.github.com" commit -m "..."`
+验收时除测试结果外，还要核对：插件可被 Hermes 发现、部署 symlink 指向当前仓库、真实 usage 行存在、临时验证数据已清理、运行进程启动时间晚于最终源码修改时间。
 
----
+## 13. 已知边界
 
-## 8. V2 候选（未排期）
-
-- 桌面设置页（`ROUTES_AREA` + `plugin_api.py`）
-- retitle-all 跳过刚评估过的会话（`_last_eval` 时间戳过滤 ~5 分钟，一行实现，当前未加——显式操作重复评估场景少，保持轻量）
-- legacy NULL 标题的官方升级路径（需上游支持，当前尊重保护）
-- v14 提取管线作超长会话降级选项（输入 20 倍压缩但提取幻觉风险，#6 跑偏案例，见 §5.5；触发条件可定为「输入超阈值才启用」）
-- 中英混排空格规范化（`Codex装OpenViking` → `Codex 装 OpenViking`，v12 暴露的书写规范缺口，v13 靠 prompt 示例缓解，未做代码层 normalize）
+- `llm → llm` 没有宿主级原子 CAS。
+- 关闭评估可能同步等待到 provider timeout；普通轮次不受影响。
+- `max_tokens=64` 对部分 provider 只是请求提示。
+- 进程内轮数、in-flight、滞后 pending 与频次窗口状态在重启后清零。
+- legacy 非空 `NULL provenance` 标题默认不自动升级。

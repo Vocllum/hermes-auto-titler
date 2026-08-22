@@ -3,7 +3,7 @@
 不写库。输出每个会话：
 - id / 消息数 / 用户消息数 / 标题来源（平台来源不算标题来源！）
 - 原标题
-- 模型建议标题（当前配置 preview_chars=200；--blind 走 retitle-all 盲改模式）
+- 模型建议标题（脚本固定 preview_chars=200；--blind 走 retitle-all 盲改模式）
 - 用户消息意图轨迹（截断）
 
 用法:

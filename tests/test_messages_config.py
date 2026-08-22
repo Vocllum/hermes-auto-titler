@@ -57,6 +57,34 @@ def test_load_context_recent_turns_and_all_user():
     assert op1 == [("user", "m1"), ("assistant", "a1")]
 
 
+def test_load_context_applies_per_turn_role_quota():
+    conv = [
+        {"role": "assistant", "content": "orphan-before-user"},
+        {"role": "user", "content": "m1"},
+        {"role": "assistant", "content": "a1-step"},
+        {"role": "assistant", "content": "a1-final"},
+        {"role": "user", "content": "m2"},
+        {"role": "assistant", "content": "a2-step"},
+        {"role": "assistant", "content": "a2-final"},
+        {"role": "user", "content": "m3"},
+        {"role": "assistant", "content": "a3-step"},
+        {"role": "assistant", "content": "a3-final"},
+    ]
+    recent, all_user, opening = load_context(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
+    )
+    assert opening == [
+        ("user", "m1"), ("assistant", "a1-final"),
+        ("user", "m2"), ("assistant", "a2-final"),
+    ]
+    assert recent == [
+        ("user", "m2"), ("assistant", "a2-final"),
+        ("user", "m3"), ("assistant", "a3-final"),
+    ]
+    assert all_user == [("user", "m1"), ("user", "m2"), ("user", "m3")]
+    assert all("orphan" not in text and "-step" not in text for _, text in opening + recent)
+
+
 def test_load_context_ignore_model_messages():
     conv = [
         {"role": "user", "content": "m1"},
@@ -104,6 +132,7 @@ def test_load_context_filters_system_noise():
     conv = [
         {"role": "user", "content": "[System: The active model has changed to deepseek-v4-flash]"},
         {"role": "user", "content": "MEMORY_MAINTENANCE_SUMMARY\n\n定时记忆维护完成"},
+        {"role": "user", "content": "[Your active task list was preserved across context compression]\n- [>] verify"},
         {"role": "user", "content": "真实提问一"},
         {"role": "assistant", "content": "[ASYNC DELEGATION BATCH COMPLETE — deleg_abc] 一堆子代理结果"},
         {"role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted..."},
@@ -122,6 +151,7 @@ def test_load_context_filters_system_noise():
     assert "正常回复" in roles_texts
     # 纯系统通知噪声全部被过滤；摘要不混入 opening
     assert all("[System" not in t and "[ASYNC" not in t and "[CONTEXT" not in t
+               and "[Your active task list" not in t
                for _, t in recent + opening + all_user)
     assert all_user == [("user", "真实提问一"), ("user", "真实提问二")]
     assert all("[Recent" not in t for _, t in recent + opening + all_user)
@@ -159,6 +189,22 @@ def test_load_context_summary_hint_only_when_opening_is_missing():
     )
     assert summary2 is None
     assert op2 == [("user", "真正的开头"), ("assistant", "开头回复")]
+
+
+def test_load_context_recognizes_durable_summary_prefix():
+    """Hermes 0.20+ 的 Durable Summary 压缩标记必须被识别为摘要（2026-08-12）。"""
+    conv = [
+        {"role": "user", "content": "[Durable Summary (d2, node 137)] # 当前重点：标题插件审查"},
+        {"role": "user", "content": "m1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "m2"},
+    ]
+    _, all_user, opening, summary = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
+    )
+    assert opening[0] == ("user", "m1")
+    assert summary.startswith("[Durable Summary")
+    assert all_user == [("user", "m1"), ("user", "m2")]
 
 
 def test_load_context_summary_hint_truncated():
@@ -219,7 +265,7 @@ def test_display_width_counts_columns():
     assert char_cols("：") == 2  # 全角冒号
     assert char_cols(":") == 1  # 半角冒号
     assert display_width("搜索方案对比") == 12
-    assert display_width("Codex OpenViking") == 16
+    assert display_width("Alpha Instrument") == 16
     # 中文 12 + 全角冒号 2 + Firecrawl 9 + 空格 1 + vs 2 + 空格 1 + AnySearch 9
     assert display_width("搜索方案对比：Firecrawl vs AnySearch") == 36
 
@@ -296,15 +342,18 @@ def test_load_context_user_message_limits():
 def test_config_load_defaults_and_override(tmp_path):
     cfg = load_config(path=tmp_path / "missing.yaml")
     assert cfg["enabled"] is True
-    assert cfg["every_n_turns"] == 3
+    assert cfg["every_n_turns"] == 4
     assert cfg["strategy"] == "conservative"
+    # 18 字符的显式仓库名 hermes-auto-titler 必须能原样存活，
+    # 另留少量中文意图空间；12 字符仍只是软目标。
+    assert cfg["max_title_length"] == 24
 
     p = tmp_path / "config.yaml"
     p.write_text("strategy: aggressive\nmax_title_length: 30\n", encoding="utf-8")
     cfg2 = load_config(path=p)
     assert cfg2["strategy"] == "aggressive"
     assert cfg2["max_title_length"] == 30
-    assert cfg2["every_n_turns"] == 3  # 未覆盖的键保持默认
+    assert cfg2["every_n_turns"] == 4  # 未覆盖的键保持默认
 
     save_config(cfg2, path=p)
     cfg3 = load_config(path=p)
@@ -320,3 +369,194 @@ def test_config_sanitizes_bad_values(tmp_path):
     assert cfg["strategy"] == "conservative"
     assert cfg["max_title_length"] == 100  # 上限 100
     assert cfg["every_n_turns"] == 1  # 下限 1
+
+
+def test_config_has_new_keys(tmp_path):
+    cfg = load_config(path=tmp_path / "missing.yaml")
+    assert cfg["early_turn_eval"] is False
+    assert cfg["retitle_summary_chars"] == 12000
+
+
+def test_config_coerces_bool_and_int_strings(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "enabled: \"true\"\nevery_n_turns: \"4\"\nearly_turn_eval: \"false\"\non_close: \"on\"\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(path=p)
+    assert cfg["enabled"] is True
+    assert cfg["every_n_turns"] == 4
+    assert cfg["early_turn_eval"] is False
+    assert cfg["on_close"] is True
+
+
+def test_config_invalid_values_fall_back_to_defaults(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "every_n_turns: abc\nenabled: maybe\nstrategy: bogus\ntitle_style: weird\n"
+        "opening_turns: 0\nrecent_turns: 0\nmin_interval_minutes: -1\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(path=p)
+    assert cfg["every_n_turns"] == 4  # 非法整数回退默认，不崩溃
+    assert cfg["enabled"] is True  # 非法 bool 回退默认，不静默变 False
+    assert cfg["strategy"] == "conservative"  # 非法枚举回退默认
+    assert cfg["title_style"] == "concise"
+    assert cfg["opening_turns"] == 1  # 钳制下限
+    assert cfg["recent_turns"] == 1
+    assert cfg["min_interval_minutes"] == 0.0
+
+
+def test_config_yaml_list_does_not_crash(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("- just\n- a\n- list\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["enabled"] is True
+    assert cfg["every_n_turns"] == 4
+
+
+# -- 滞后机制配置：rename_confirmations / renames_per_hour ----------------------
+
+def test_rename_confirmations_defaults_and_clamps(tmp_path):
+    p = tmp_path / "config.yaml"
+
+    # 缺省：1（现行为，单次确认即写）
+    p.write_text("enabled: true\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["rename_confirmations"] == 1
+
+    # 合法值 2/3
+    p.write_text("rename_confirmations: 2\n", encoding="utf-8")
+    assert load_config(path=p)["rename_confirmations"] == 2
+    p.write_text("rename_confirmations: 3\n", encoding="utf-8")
+    assert load_config(path=p)["rename_confirmations"] == 3
+
+    # 下限钳到 1；上限钳到 5
+    p.write_text("rename_confirmations: 0\n", encoding="utf-8")
+    assert load_config(path=p)["rename_confirmations"] == 1
+    p.write_text("rename_confirmations: -2\n", encoding="utf-8")
+    assert load_config(path=p)["rename_confirmations"] == 1
+    p.write_text("rename_confirmations: 99\n", encoding="utf-8")
+    assert load_config(path=p)["rename_confirmations"] == 5
+
+    # 非法浮点回退默认
+    p.write_text("rename_confirmations: 1.5\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["rename_confirmations"] == DEFAULTS["rename_confirmations"]
+
+
+def test_renames_per_hour_zero_disables_cap(tmp_path):
+    p = tmp_path / "config.yaml"
+    # 缺省 0 = 不设频次上限
+    p.write_text("enabled: true\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["renames_per_hour"] == 0
+    # 负值钳到 0
+    p.write_text("renames_per_hour: -3\n", encoding="utf-8")
+    assert load_config(path=p)["renames_per_hour"] == 0
+    p.write_text("renames_per_hour: 6\n", encoding="utf-8")
+    assert load_config(path=p)["renames_per_hour"] == 6
+
+
+
+# -- 配置加固：数值布尔 / NaN / inf / 非字符串 model / 负长度 -------------------
+
+def test_config_rejects_numeric_bool_outside_01(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("enabled: 2\non_close: -1\nearly_turn_eval: 0.5\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["enabled"] is True  # 回退默认，不静默按 truthy/falsy 解释
+    assert cfg["on_close"] is True
+    assert cfg["early_turn_eval"] is False
+
+
+def test_config_accepts_numeric_bool_01(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("enabled: 0\non_close: 1\nearly_turn_eval: 0\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["enabled"] is False
+    assert cfg["on_close"] is True
+    assert cfg["early_turn_eval"] is False
+
+
+def test_config_rejects_fractional_integer_values(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("every_n_turns: 2.5\nopening_turns: 1.5\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["every_n_turns"] == DEFAULTS["every_n_turns"]
+    assert cfg["opening_turns"] == DEFAULTS["opening_turns"]
+
+
+def test_config_rejects_non_finite_interval(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("min_interval_minutes: .nan\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["min_interval_minutes"] == 5.0  # 非有限值回退默认
+    p.write_text("min_interval_minutes: .inf\n", encoding="utf-8")
+    cfg2 = load_config(path=p)
+    assert cfg2["min_interval_minutes"] == 5.0
+
+
+def test_config_rejects_nonstring_model(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("model: 42\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["model"] == ""
+    p.write_text("model: [a, b]\n", encoding="utf-8")
+    cfg2 = load_config(path=p)
+    assert cfg2["model"] == ""
+    p.write_text("model: true\n", encoding="utf-8")
+    cfg3 = load_config(path=p)
+    assert cfg3["model"] == ""
+
+
+def test_config_clamps_negative_lengths_to_zero(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "preview_chars: -5\nuser_message_threshold: -3\n"
+        "user_message_preview_chars: -100\nretitle_summary_chars: -1\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(path=p)
+    assert cfg["preview_chars"] == 0
+    assert cfg["user_message_threshold"] == 0
+    assert cfg["user_message_preview_chars"] == 0
+    assert cfg["retitle_summary_chars"] == 0
+
+
+def test_config_command_rejects_nan_inf_and_bad_numeric_bool(monkeypatch, tmp_path):
+    from hermes_auto_titler.commands import make_handler
+    from hermes_auto_titler.config import load_config
+    from hermes_auto_titler.titler import AutoTitler
+
+    saved = []
+    monkeypatch.setattr(
+        "hermes_auto_titler.config.save_config",
+        lambda cfg, path=None: saved.append(dict(cfg)),
+    )
+    db = type("DB", (), {})()
+    t = AutoTitler(
+        type("Ctx", (), {"llm": None})(),
+        load_config(path=tmp_path / "missing.yaml"),
+        db=db,
+    )
+    h = make_handler(t)
+    # NaN / inf（YAML 与命令两条入口共用 coerce_value 校验）
+    for bad in ("nan", "inf", "-inf"):
+        assert "值无效" in h(f"config min_interval_minutes {bad}")
+        assert t.cfg["min_interval_minutes"] == 5.0
+    # 数值布尔只接受 0/1
+    for bad in ("2", "-1", "0.5"):
+        assert "值无效" in h(f"config enabled {bad}")
+        assert t.cfg["enabled"] is True
+    h("config enabled 0")
+    assert t.cfg["enabled"] is False
+    h("config enabled 1")
+    assert t.cfg["enabled"] is True
+    # 负长度钳到 0（命令入口与 YAML 一致）
+    h("config preview_chars -5")
+    assert t.cfg["preview_chars"] == 0
+    h("config retitle_summary_chars -1")
+    assert t.cfg["retitle_summary_chars"] == 0
+    h("config user_message_threshold -3")
+    assert t.cfg["user_message_threshold"] == 0

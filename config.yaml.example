@@ -1,0 +1,23 @@
+# Hermes auto-titler 配置
+enabled: true
+every_n_turns: 4
+on_close: true
+early_turn_eval: false  # true 时未达 every_n_turns 的已完成前台轮次仅对无标题/derived 来源会话提前评估（llm/user/legacy 不提前；正常轮数边界不受影响；受 min_interval_minutes 节流；every_n_turns=1 无额外效果）
+recent_turns: 2
+opening_turns: 2
+ignore_model_messages: false
+preview_chars: 100
+include_all_user_messages: true
+user_message_threshold: 40
+user_message_preview_chars: 300
+summary_preview_chars: 1200      # 压缩摘要进标题评估的截断长度（日常评估；盲改用 retitle_summary_chars）
+retitle_summary_chars: 12000     # 仅 retitle-all 盲改：压缩摘要截断长度（0=沿用 preview_chars）
+title_style: concise  # concise = LABEL：主体标签（Subject + 最小区分意图）；complete = SUMMARY：简短事件梗概（Subject + 主要意图/事件）。信息类型是第一约束，长度只是护栏
+strategy: conservative
+provider: "nous"          # 显式固定模型通道；留空则宿主按 auto 路由（可能静默回退到别的模型）
+model: "tencent/hy3:free" # 标题评估模型（nous portal 免费档）
+min_interval_minutes: 5
+max_title_length: 24
+max_display_width: 40
+rename_confirmations: 1  # 滞后机制：llm→llm 改名需连续 N 次评估给出相同候选才写库（1=关闭；derived/无标题升级与 close 盲改旁路；上限 5）
+renames_per_hour: 0      # 单会话每小时实际改名上限（滑动窗口）；0=不限

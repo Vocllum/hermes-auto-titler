@@ -761,12 +761,12 @@ def test_generate_forwards_provider_from_config():
     """配置了 provider 时，complete 调用必须显式传 provider（防宿主 auto 静默回退）。"""
     db = FakeDB(messages=MSGS, title=None)
     t, ctx = make_titler(db, text=_dec("keep"))
-    t.cfg["provider"] = "nous"
-    t.cfg["model"] = "tencent/hy3:free"
+    t.cfg["provider"] = "example-provider"
+    t.cfg["model"] = "example/model:free"
     t.evaluate("s1", force=True)
     call = ctx.llm.calls[0]
-    assert call["provider"] == "nous"
-    assert call["model"] == "tencent/hy3:free"
+    assert call["provider"] == "example-provider"
+    assert call["model"] == "example/model:free"
 
 
 def test_evaluate_blind_with_summary_keeps_user_continuation_but_omits_assistant_tail():

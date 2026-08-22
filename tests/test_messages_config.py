@@ -1,8 +1,9 @@
 """消息提取与配置加载测试。"""
 
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "..")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hermes_auto_titler.config import DEFAULTS, load_config, save_config
 from hermes_auto_titler.messages import load_context, load_context_with_summary, message_text

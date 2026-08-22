@@ -5,12 +5,13 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-sys.path.insert(0, "..")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hermes_auto_titler.config import DEFAULTS
 from hermes_auto_titler.messages import display_width, load_context, load_context_with_summary

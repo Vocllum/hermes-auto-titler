@@ -91,6 +91,10 @@ def coerce_value(key: str, raw: Any) -> Any:
             if not isinstance(raw, str):
                 raise ValueError(f"not a string: {raw!r}")
             v = raw
+        elif key == "provider":
+            if not isinstance(raw, str):
+                raise ValueError(f"not a string: {raw!r}")
+            v = raw
         elif isinstance(default, int):
             if isinstance(raw, bool):  # YAML true/false 不是合法整数
                 raise ValueError(f"not an integer: {raw!r}")
@@ -125,6 +129,7 @@ def coerce_value(key: str, raw: Any) -> Any:
         "user_message_threshold",
         "user_message_preview_chars",
         "retitle_summary_chars",
+        "summary_preview_chars",
     ):
         v = max(0, int(v))
     elif key == "max_title_length":

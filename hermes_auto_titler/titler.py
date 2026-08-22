@@ -343,7 +343,8 @@ class AutoTitler:
             # 达到确认数：暂不 pop——频次上限拦截后保留已确认态，
             # 窗口滑过即可直接写入；写库出确定结果后才清。
 
-        # 频次上限：滑动 60 分钟窗口内的实际改名次数
+        # 频次上限：滑动 60 分钟窗口内的实际改名次数。
+        # 时间戳在写库成功后才记账——被保护/写失败的尝试不消耗名额。
         cap = int(self.cfg.get("renames_per_hour", 0))
         if cap > 0:
             now = time.time()
@@ -354,12 +355,14 @@ class AutoTitler:
                     session_id[:12], len(times),
                 )
                 return {"action": "capped", "reason": "renames_per_hour limit"}
-            times.append(now)
             self._rename_times[session_id] = times
 
         written = self._write(db, session_id, candidate)
         if written:
             self._pending.pop(session_id, None)
+            # 记账：仅实际写入成功的改名消耗频次名额
+            if cap > 0:
+                self._rename_times.setdefault(session_id, []).append(time.time())
             log.info("auto-titler %s: renamed -> %r", session_id[:12], written)
             return {"action": "renamed", "title": written}
         self._pending.pop(session_id, None)

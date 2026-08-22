@@ -7,7 +7,7 @@
 - 用户消息意图轨迹（截断）
 
 用法:
-  ~/.hermes/hermes-agent/venv/bin/python scripts/review_sample.py [--blind] [--n 10]
+  <your-hermes-venv>/bin/python scripts/review_sample.py [--blind] [--n 10]
 """
 
 import sys

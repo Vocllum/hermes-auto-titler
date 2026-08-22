@@ -1,6 +1,7 @@
-"""真实端到端验证：PluginLlm（dsv4）+ 真实 SessionDB + 最近活跃会话。
+"""真实端到端验证：PluginLlm（宿主配置的模型）+ 真实 SessionDB + 指定会话。
 
-用法: ~/.hermes/hermes-agent/venv/bin/python scripts/e2e_check.py [session_id]
+用法: <your-hermes-venv>/bin/python scripts/e2e_check.py [session_id]
+（不传 session_id 时取最近活跃会话）
 """
 
 import sys

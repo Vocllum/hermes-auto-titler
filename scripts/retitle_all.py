@@ -1,8 +1,8 @@
 """批量重命名历史会话：dry-run 预览 → 实际执行。
 
 用法:
-  ~/.hermes/hermes-agent/venv/bin/python scripts/retitle_all.py --dry-run
-  ~/.hermes/hermes-agent/venv/bin/python scripts/retitle_all.py [--limit N] [--min-messages M]
+  <your-hermes-venv>/bin/python scripts/retitle_all.py --dry-run
+  <your-hermes-venv>/bin/python scripts/retitle_all.py [--limit N] [--min-messages M]
 """
 
 import argparse

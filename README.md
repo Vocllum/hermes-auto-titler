@@ -45,7 +45,7 @@ plugins:
   entries:
     hermes-auto-titler:
       llm:
-        allow_model_override: true   # 允许插件指定模型（本地配 dsv4 时需要）
+        allow_model_override: true   # 允许插件指定非宿主模型时需要
 ```
 
 重启 Hermes 生效。验证：`/autotitler status`。
@@ -68,7 +68,7 @@ plugins:
 | `title_style` | `concise` | `concise` = LABEL 主体标签（Subject + 最小区分意图，不重述经过）/ `complete` = SUMMARY 简短事件梗概（Subject + 主要意图/事件）。信息类型是第一约束，长度只是护栏（12 目标 / `max_title_length` 硬限） |
 | `retitle_summary_chars` | `12000` | 仅 retitle-all 全量重命名（盲改）生效：压缩摘要截断长度（0=沿用 `preview_chars`）。dry-run 不做模型调用，此项不适用。压缩会话以该摘要为历史基线，同时携带摘要后的真实用户续段；只有多条实质请求形成持续转向时，续段才可改写主线，单次收尾/验证/参数调整仍视为细节 |
 | `strategy` | `conservative` | `conservative` 明显不匹配才改（优先开头主线）/ `aggressive` 每次优化（开头主线仍优先于最新子任务） |
-| `model` | `""` | 留空 = 宿主默认模型；本地示例 `deepseek-v4-flash` |
+| `model` | `""` | 留空 = 宿主默认模型；也可指定任意你的 Hermes 配置里可用的模型 |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔 |
 | `max_title_length` | `24` | 标题最大字符数（12 为软目标；24 的硬上限用于完整保留较长的仓库/包/命令标识符；Hermes 上限 100） |
 | `max_display_width` | `40` | 侧边栏显示列宽硬上限（中/全角 2 列，半角 1 列） |
@@ -86,7 +86,7 @@ plugins:
 
 ## 成本
 
-单次评估的输入规模随会话而定（开头/最近轮 + 用户轨迹，各 preview 上限截断；正常会话约 1~3K 字符，压缩摘要盲改可能更长）。插件请求 `max_tokens=64`，但当前 Hermes `auxiliary_client` 会对多数普通 OpenAI-compatible 路由省略显式上限；一次 opencode-go + deepseek-v4-flash 真实验收调用记到 `597 input / 1639 output`，因此不把 64 宣称为 provider 硬上限或成本收益。主要节省来自触发抑制：轮数节流（every_n_turns）+ 时间节流（min_interval_minutes）+ 同会话 in-flight 去重 + 内部执行排除（bg-review/cron/subagent 与打断轮次不触发调用）。每次真实调用经 `SessionDB.record_auxiliary_usage` 记入用量统计（task=hermes_auto_titler）。
+单次评估的输入规模随会话而定（开头/最近轮 + 用户轨迹，各 preview 上限截断；正常会话约 1~3K 字符，压缩摘要盲改可能更长）。插件请求 `max_tokens=64`，但当前 Hermes auxiliary client 会对多数 OpenAI-compatible 路由省略显式上限；一次真实验收调用记到 `597 input / 1639 output`，因此不把 64 宣称为 provider 硬上限或成本收益。主要节省来自触发抑制：轮数节流（every_n_turns）+ 时间节流（min_interval_minutes）+ 同会话 in-flight 去重 + 内部执行排除（bg-review/cron/subagent 与打断轮次不触发调用）。每次真实调用经 `SessionDB.record_auxiliary_usage` 记入用量统计（task=hermes_auto_titler）。
 
 ## 开发
 

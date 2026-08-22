@@ -614,7 +614,7 @@ class AutoTitler:
                 provider=self.cfg.get("provider") or None,
                 temperature=0,
                 # 插件侧请求上限；当前 Hermes auxiliary_client 会对多数普通
-                # OpenAI-compatible 路由（含 opencode-go）省略该 wire 参数，
+                # OpenAI-compatible 路由省略该 wire 参数，
                 # 因此不能把 64 宣称为 provider 实际输出硬上限。
                 max_tokens=64,
                 timeout=30,

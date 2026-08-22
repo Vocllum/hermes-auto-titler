@@ -3,7 +3,7 @@
 on_session_end hook 按配置的轮数间隔评估当前会话标题是否需要更新，
 评估在后台 daemon 线程执行（hook 立即返回，同一会话 in-flight 去重）；
 真实会话关闭/终局走 on_session_finalize（正常节流）。判断模型独立于
-主对话（默认宿主辅助模型，本地可配 deepseek-v4-flash），写回 Hermes
+主对话（默认宿主辅助模型，可配置任意可用模型），写回 Hermes
 session DB，遵守标题来源优先级（用户手改的永不覆盖）。
 """
 

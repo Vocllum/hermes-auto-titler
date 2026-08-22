@@ -139,8 +139,11 @@ def coerce_value(key: str, raw: Any) -> Any:
 
 
 def _default_config_path() -> Path:
-    # 安装后 config.yaml 与包同级（symlink 或真实文件）
-    return Path(__file__).resolve().parent.parent / "config.yaml"
+    # 安装后 config.yaml 与包同级（symlink 或真实文件）。
+    # 注意用 absolute() 而非 resolve()：resolve 会穿透包目录的符号链接，
+    # 使 symlink 手动安装时配置路径漂移到 git clone 根，插件目录里的
+    # config.yaml 被忽略。absolute() 保留 symlink 视角，两种安装布局一致。
+    return Path(__file__).absolute().parent.parent / "config.yaml"
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:

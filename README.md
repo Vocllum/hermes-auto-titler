@@ -29,14 +29,22 @@ Hermes 插件：会话标题自动维护。每次对话结束后按配置的轮�
 
 ## 安装
 
+推荐用 Hermes 插件安装器（自动克隆、生成 config.yaml、启用）：
+
+```bash
+hermes plugins install <repo-url> --enable    # 本地路径用 file://<path>
+```
+
+或手动安装：
+
 ```bash
 cd ~/.hermes/plugins
-mkdir -p hermes-auto-titler
-ln -s <repo>/plugin_entry/__init__.py hermes-auto-titler/__init__.py   # Hermes 要求插件根目录有 __init__.py
-ln -s <repo>/hermes_auto_titler hermes-auto-titler/hermes_auto_titler
-ln -s <repo>/plugin.yaml hermes-auto-titler/plugin.yaml
-cp <repo>/config.yaml.example hermes-auto-titler/config.yaml             # Hermes 插件安装器也会自动复制 *.example 为真实文件
+git clone <repo-url> hermes-auto-titler       # 直接 clone 为插件目录（不要嵌套子目录）
+# 安装器方式会自动从 config.yaml.example 生成 config.yaml；手动 clone 时：
+cp hermes-auto-titler/config.yaml.example hermes-auto-titler/config.yaml
 ```
+
+> 注意：请把插件直接放在 `~/.hermes/plugins/hermes-auto-titler/`。如果用 symlink 把包目录链进插件目录，`config.yaml` 必须放在包目录真实所在的位置（配置按包目录定位）。
 
 启用插件（修改 ~/.hermes/config.yaml）：
 

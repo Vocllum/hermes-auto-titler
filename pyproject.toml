@@ -3,6 +3,7 @@ name = "hermes-auto-titler"
 version = "0.1.0"
 description = "Hermes plugin for provenance-aware session title maintenance"
 requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
 dependencies = ["PyYAML"]
 
 [build-system]

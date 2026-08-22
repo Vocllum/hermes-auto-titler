@@ -98,3 +98,7 @@ uv venv .venv && uv pip install --python .venv/bin/python pytest PyYAML
 ```
 
 > `review_sample.py` 会读取真实 SessionDB，并把会话片段发送给当前配置的模型；只在信任该 provider 且接受调用成本时运行。`retitle_all.py --dry-run` 不调用模型、不写标题，去掉 `--dry-run` 后会真实批量写库。
+
+## 许可证
+
+[Apache-2.0](LICENSE)

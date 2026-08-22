@@ -11,11 +11,11 @@ include_all_user_messages: true
 user_message_threshold: 40
 user_message_preview_chars: 300
 summary_preview_chars: 1200      # 压缩摘要进标题评估的截断长度（日常评估；盲改用 retitle_summary_chars）
-retitle_summary_chars: 12000     # 仅 retitle-all 盲改：压缩摘要截断长度（0=沿用 preview_chars）
+retitle_summary_chars: 12000     # 仅 retitle-all 全量重命名（盲改）：压缩摘要截断长度（0=沿用 preview_chars）
 title_style: concise  # concise = LABEL：主体标签（Subject + 最小区分意图）；complete = SUMMARY：简短事件梗概（Subject + 主要意图/事件）。信息类型是第一约束，长度只是护栏
 strategy: conservative
-provider: "nous"          # 显式固定模型通道；留空则宿主按 auto 路由（可能静默回退到别的模型）
-model: "tencent/hy3:free" # 标题评估模型（nous portal 免费档）
+provider: ""              # 留空 = 宿主按 auto 路由；要固定通道时填你的 provider 名（示例：nous、custom:xxx）
+model: ""                 # 留空 = 宿主默认模型；也可指定具体模型名（示例：tencent/hy3:free 是 nous portal 免费档）
 min_interval_minutes: 5
 max_title_length: 24
 max_display_width: 40

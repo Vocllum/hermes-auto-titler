@@ -1218,7 +1218,7 @@ def test_get_db_singleton_under_concurrent_first_access(monkeypatch):
             FakeSessionDB.instances += 1
 
     monkeypatch.setattr(titler_mod, "SessionDB", FakeSessionDB)
-    monkeypatch.setattr(titler_mod, "_db", None)
+    monkeypatch.setattr(titler_mod, "_dbs", {})
     results = []
 
     def worker():
@@ -1231,6 +1231,31 @@ def test_get_db_singleton_under_concurrent_first_access(monkeypatch):
         th.join()
     assert len({id(r) for r in results}) == 1  # 全部拿到同一个实例
     assert FakeSessionDB.instances == 1  # 并发首次构造只建一个 DB
+
+
+def test_get_db_isolates_profiles_by_hermes_home(monkeypatch):
+    # 双 profile 隔离：HERMES_HOME 变化后 get_db 必须返回指向不同库的实例；
+    # 同一 profile 内重复调用复用同一句柄。发布门禁回归（模块级单例曾串库）。
+    import hermes_auto_titler.titler as titler_mod
+
+    class FakeSessionDB:
+        homes = []
+
+        def __init__(self):
+            import os
+            self.home = os.environ.get("HERMES_HOME", "default")
+            FakeSessionDB.homes.append(self.home)
+
+    monkeypatch.setattr(titler_mod, "SessionDB", FakeSessionDB)
+    monkeypatch.setattr(titler_mod, "_dbs", {})
+    monkeypatch.setenv("HERMES_HOME", "/tmp/profile-A")
+    db_a1 = titler_mod.get_db()
+    db_a2 = titler_mod.get_db()
+    monkeypatch.setenv("HERMES_HOME", "/tmp/profile-B")
+    db_b = titler_mod.get_db()
+    assert db_a1 is db_a2  # 同 profile 复用
+    assert db_a1 is not db_b  # 跨 profile 新建
+    assert db_b.home == "/tmp/profile-B"  # B 用的是 B 的路径，不是 A 的
 
 
 # -- 写回竞态：每次 apply 前刷新来源 ------------------------------------------

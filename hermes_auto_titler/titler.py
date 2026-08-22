@@ -31,12 +31,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_state import SessionDB
 
+try:
+    # 宿主提供 profile home 解析；极老宿主没有时退回 HERMES_HOME 环境变量
+    from hermes_state import get_hermes_home
+except ImportError:  # pragma: no cover
+    def get_hermes_home():  # type: ignore[misc]
+        import os
+        from pathlib import Path
+        return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+
 from .messages import display_width, load_context_with_summary, truncate_to_width
 
 log = logging.getLogger(__name__)
 
-_db: Optional[SessionDB] = None
-# 模块级 SessionDB 惰性构造的双重检查锁：多个 worker 首次并发取库时只建一个
+# 按 hermes home 路径缓存 SessionDB：同一 profile 复用句柄（含双重检查锁），
+# 不同 profile 各建各的，避免模块级单例把首个 profile 的 DB 泄露给后续 profile。
+_dbs: Dict[str, SessionDB] = {}
 _db_lock = threading.Lock()
 
 # Hermes 内部平台：cron（定时任务）与 subagent（子代理）的轮次不参与标题评估
@@ -44,12 +54,16 @@ _INTERNAL_PLATFORMS = frozenset({"cron", "subagent"})
 
 
 def get_db() -> SessionDB:
-    global _db
-    if _db is None:
-        with _db_lock:
-            if _db is None:
-                _db = SessionDB()
-    return _db
+    key = str(get_hermes_home())
+    db = _dbs.get(key)
+    if db is not None:
+        return db
+    with _db_lock:
+        db = _dbs.get(key)
+        if db is None:
+            db = SessionDB()
+            _dbs[key] = db
+    return db
 
 
 def _wrap_with_context(target):

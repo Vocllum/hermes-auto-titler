@@ -1,0 +1,91 @@
+<svg width="1200" height="320" viewBox="0 0 1200 320" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="hermes-auto-titler — session titles that follow the conversation">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1200" y2="320" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fdfcfa"/>
+      <stop offset="1" stop-color="#f6f4ef"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0.16" cy="0.05" r="0.75">
+      <stop offset="0" stop-color="#d8b4fe" stop-opacity="0.55"/>
+      <stop offset="0.5" stop-color="#e9d5ff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#e9d5ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0.55" cy="1.1" r="0.8">
+      <stop offset="0" stop-color="#93c5fd" stop-opacity="0.45"/>
+      <stop offset="0.55" stop-color="#bfdbfe" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#bfdbfe" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowC" cx="1.02" cy="-0.1" r="0.65">
+      <stop offset="0" stop-color="#fda4af" stop-opacity="0.35"/>
+      <stop offset="0.6" stop-color="#fecdd3" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#fecdd3" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="cardshadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#3b3554" flood-opacity="0.07"/>
+    </filter>
+    <filter id="cardshadow2" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="22" stdDeviation="34" flood-color="#3b3554" flood-opacity="0.13"/>
+    </filter>
+    <filter id="pillshadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#3b3554" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="320" fill="url(#bg2)"/>
+  <rect width="1200" height="320" fill="url(#glowA)"/>
+  <rect width="1200" height="320" fill="url(#glowB)"/>
+  <rect width="1200" height="320" fill="url(#glowC)"/>
+
+  <!-- left: wordmark -->
+  <g filter="url(#pillshadow)">
+    <rect x="64" y="80" width="204" height="30" rx="15" fill="#ffffff" stroke="#e7e2d9"/>
+  </g>
+  <circle cx="82" cy="95" r="4" fill="#7c5cff"/>
+  <text x="94" y="100" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" letter-spacing="1.5" fill="#6b6470">HERMES AGENT PLUGIN</text>
+
+  <text x="62" y="164" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="50" font-weight="700" letter-spacing="-1.5" fill="#1d1d1f">hermes-auto-titler</text>
+  <text x="65" y="200" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="19" font-weight="500" fill="#57534e">Session titles that follow the conversation —</text>
+  <text x="65" y="228" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="19" font-weight="700" fill="#1d1d1f">not the last message.</text>
+
+  <!-- right: sessions card -->
+  <g filter="url(#cardshadow)">
+    <g filter="url(#cardshadow2)">
+      <rect x="704" y="44" width="432" height="244" rx="20" fill="#ffffff" stroke="#eceae4"/>
+    </g>
+  </g>
+
+  <!-- header -->
+  <circle cx="736" cy="72" r="5.5" fill="#ff5f57"/>
+  <circle cx="756" cy="72" r="5.5" fill="#febc2e"/>
+  <circle cx="776" cy="72" r="5.5" fill="#28c840"/>
+  <text x="1104" y="76" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="2" fill="#78716c">SESSIONS</text>
+  <line x1="726" y1="90" x2="1114" y2="90" stroke="#f0eee8"/>
+
+  <!-- row 1 (band 90-144): renamed, before/after pair -->
+  <path d="M748 106.5 C749 110.8 750.7 112.5 755 114 C750.7 115.5 749 117.2 748 121.5 C747 117.2 745.3 115.5 741 114 C745.3 112.5 747 110.8 748 106.5 Z" fill="#7c5cff"/>
+  <circle cx="754.5" cy="108.5" r="1.4" fill="#c4b5fd"/>
+  <text x="766" y="119" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', sans-serif" font-size="14.5" font-weight="600" fill="#1d1d1f">Redis worker leak</text>
+  <rect x="1048" y="103" width="56" height="21" rx="10.5" fill="#7c5cff" fill-opacity="0.12"/>
+  <text x="1076" y="117" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1" fill="#7c5cff" font-weight="600">AUTO</text>
+  <text x="766" y="138" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#6b7280" text-decoration="line-through">was: how do i fix the thi&#8230;</text>
+  <line x1="726" y1="144" x2="1114" y2="144" stroke="#f4f2ec"/>
+
+  <!-- row 2 (band 144-198): kept, latest chatter ignored -->
+  <path d="M742.5 168.5 L747 173 L754.5 163.5" stroke="#059669" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="766" y="173" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', sans-serif" font-size="14.5" font-weight="500" fill="#44403c">vLLM quant benchmarks</text>
+  <rect x="1048" y="157" width="56" height="21" rx="10.5" fill="#10b981" fill-opacity="0.12"/>
+  <text x="1076" y="171" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1" fill="#059669" font-weight="600">KEPT</text>
+  <text x="766" y="192" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#6b7280">newest: &#8220;ok thanks!&#8221;</text>
+  <line x1="726" y1="198" x2="1114" y2="198" stroke="#f4f2ec"/>
+
+  <!-- row 3 (band 198-252): user locked -->
+  <rect x="742.5" y="221" width="11" height="8.5" rx="2" fill="#f59e0b"/>
+  <path d="M745.2 221 v-2.8 a2.9 2.9 0 0 1 5.8 0 v2.8" stroke="#f59e0b" stroke-width="1.8" fill="none"/>
+  <text x="766" y="227" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', sans-serif" font-size="14.5" font-weight="500" fill="#44403c">my research notes</text>
+  <rect x="1048" y="211" width="56" height="21" rx="10.5" fill="#f59e0b" fill-opacity="0.14"/>
+  <text x="1076" y="225" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1" fill="#b45309" font-weight="600">USER</text>
+  <text x="766" y="246" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#6b7280">never overwritten</text>
+  <line x1="726" y1="252" x2="1114" y2="252" stroke="#f0eee8"/>
+
+  <!-- footer: provenance chain -->
+  <text x="736" y="274" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#78716c">derived &lt; llm &lt; user</text>
+</svg>

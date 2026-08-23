@@ -1,0 +1,67 @@
+<svg width="1200" height="300" viewBox="0 0 1200 300" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="hermes-auto-titler — session titles that follow the conversation">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="300" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="0.55" stop-color="#0d1420"/>
+      <stop offset="1" stop-color="#0a1626"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.78" cy="0.1" r="0.9">
+      <stop offset="0" stop-color="#1f6feb" stop-opacity="0.16"/>
+      <stop offset="0.55" stop-color="#1f6feb" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#1f6feb" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accentline" x1="64" y1="0" x2="560" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#58a6ff"/>
+      <stop offset="1" stop-color="#58a6ff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="panelshadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="300" fill="url(#bg)"/>
+  <rect width="1200" height="300" fill="url(#glow)"/>
+
+  <!-- left: wordmark -->
+  <text x="64" y="92" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" letter-spacing="4" fill="#58a6ff">HERMES AGENT · PLUGIN</text>
+  <text x="61" y="156" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="48" font-weight="700" fill="#f0f6fc">hermes-auto-titler</text>
+  <rect x="64" y="176" width="496" height="2" fill="url(#accentline)"/>
+  <text x="64" y="216" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" fill="#8b949e">Session titles that follow the conversation —</text>
+  <text x="64" y="243" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" fill="#e6edf3">not the last message.</text>
+
+  <!-- right: sessions panel -->
+  <g filter="url(#panelshadow)">
+    <rect x="726" y="42" width="410" height="216" rx="10" fill="#161b22" stroke="#30363d"/>
+  </g>
+  <circle cx="752" cy="68" r="5" fill="#ff5f57"/>
+  <circle cx="770" cy="68" r="5" fill="#febc2e"/>
+  <circle cx="788" cy="68" r="5" fill="#28c840"/>
+  <text x="1108" y="72" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="2" fill="#8b949e">SESSIONS</text>
+  <line x1="727" y1="86" x2="1135" y2="86" stroke="#30363d"/>
+
+  <!-- row 1: renamed -->
+  <text x="752" y="119" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#6e7681" text-decoration="line-through">new chat 3</text>
+  <text x="852" y="119" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#6e7681">→</text>
+  <text x="874" y="119" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#e6edf3">Redis connection leak</text>
+  <rect x="1074" y="104" width="48" height="19" rx="9.5" fill="#1f6feb" fill-opacity="0.15"/>
+  <text x="1098" y="117" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1" fill="#58a6ff">AUTO</text>
+
+  <!-- row 2: kept -->
+  <text x="752" y="158" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#e6edf3">vLLM deploy &amp; tuning</text>
+  <rect x="1074" y="143" width="48" height="19" rx="9.5" fill="#3fb950" fill-opacity="0.15"/>
+  <text x="1098" y="156" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1" fill="#3fb950">KEPT</text>
+
+  <!-- row 3: user protected -->
+  <rect x="752" y="180" width="9" height="8" rx="1.5" fill="#d29922"/>
+  <path d="M754 180 v-3 a2.5 2.5 0 0 1 5 0 v3" stroke="#d29922" stroke-width="1.6" fill="none"/>
+  <text x="770" y="188" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#e6edf3">my own title</text>
+  <rect x="1074" y="173" width="48" height="19" rx="9.5" fill="#d29922" fill-opacity="0.15"/>
+  <text x="1098" y="186" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1" fill="#d29922">USER</text>
+
+  <!-- uniform row separators -->
+  <line x1="727" y1="133" x2="1135" y2="133" stroke="#21262d"/>
+  <line x1="727" y1="172" x2="1135" y2="172" stroke="#21262d"/>
+
+  <line x1="727" y1="210" x2="1135" y2="210" stroke="#21262d"/>
+  <text x="752" y="238" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#6e7681">derived &lt; llm &lt; user · user titles are never overwritten</text>
+</svg>

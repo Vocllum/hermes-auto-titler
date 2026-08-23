@@ -37,14 +37,14 @@
 
   <!-- left: wordmark -->
   <g filter="url(#pillshadow)">
-    <rect x="64" y="64" width="204" height="30" rx="15" fill="#ffffff" stroke="#e7e2d9"/>
+    <rect x="64" y="80" width="204" height="30" rx="15" fill="#ffffff" stroke="#e7e2d9"/>
   </g>
-  <circle cx="82" cy="79" r="4" fill="#7c5cff"/>
-  <text x="94" y="84" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" letter-spacing="1.5" fill="#6b6470">HERMES AGENT PLUGIN</text>
+  <circle cx="82" cy="95" r="4" fill="#7c5cff"/>
+  <text x="94" y="100" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" letter-spacing="1.5" fill="#6b6470">HERMES AGENT PLUGIN</text>
 
-  <text x="62" y="148" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="50" font-weight="700" letter-spacing="-1.5" fill="#1d1d1f">hermes-auto-titler</text>
-  <text x="65" y="184" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="19" font-weight="500" fill="#57534e">Session titles that follow the conversation —</text>
-  <text x="65" y="212" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="19" font-weight="700" fill="#1d1d1f">not the last message.</text>
+  <text x="62" y="164" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="50" font-weight="700" letter-spacing="-1.5" fill="#1d1d1f">hermes-auto-titler</text>
+  <text x="65" y="200" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="19" font-weight="500" fill="#57534e">Session titles that follow the conversation —</text>
+  <text x="65" y="228" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="19" font-weight="700" fill="#1d1d1f">not the last message.</text>
 
   <!-- right: sessions card -->
   <g filter="url(#cardshadow)">
@@ -61,8 +61,8 @@
   <line x1="726" y1="90" x2="1114" y2="90" stroke="#f0eee8"/>
 
   <!-- row 1 (band 90-144): renamed, before/after pair -->
-  <path d="M741 110 l2.6 6.4 6.4 2.6 -6.4 2.6 -2.6 6.4 -2.6 -6.4 -6.4 -2.6 6.4 -2.6 z" fill="#7c5cff"/>
-  <circle cx="752.5" cy="106.5" r="1.4" fill="#c4b5fd"/>
+  <path d="M748 106.5 C749 110.8 750.7 112.5 755 114 C750.7 115.5 749 117.2 748 121.5 C747 117.2 745.3 115.5 741 114 C745.3 112.5 747 110.8 748 106.5 Z" fill="#7c5cff"/>
+  <circle cx="754.5" cy="108.5" r="1.4" fill="#c4b5fd"/>
   <text x="766" y="119" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', sans-serif" font-size="14.5" font-weight="600" fill="#1d1d1f">Redis worker leak</text>
   <rect x="1048" y="103" width="56" height="21" rx="10.5" fill="#7c5cff" fill-opacity="0.12"/>
   <text x="1076" y="117" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1" fill="#7c5cff" font-weight="600">AUTO</text>
@@ -70,7 +70,7 @@
   <line x1="726" y1="144" x2="1114" y2="144" stroke="#f4f2ec"/>
 
   <!-- row 2 (band 144-198): kept, latest chatter ignored -->
-  <path d="M746 166 l4 4 8 -8" stroke="#10b981" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M742.5 168.5 L747 173 L754.5 163.5" stroke="#059669" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
   <text x="766" y="173" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', sans-serif" font-size="14.5" font-weight="500" fill="#44403c">vLLM quant benchmarks</text>
   <rect x="1048" y="157" width="56" height="21" rx="10.5" fill="#10b981" fill-opacity="0.12"/>
   <text x="1076" y="171" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1" fill="#059669" font-weight="600">KEPT</text>
@@ -78,8 +78,8 @@
   <line x1="726" y1="198" x2="1114" y2="198" stroke="#f4f2ec"/>
 
   <!-- row 3 (band 198-252): user locked -->
-  <rect x="743" y="214" width="11" height="9.5" rx="2" fill="#f59e0b"/>
-  <path d="M745.5 214 v-3.5 a3 3 0 0 1 6 0 v3.5" stroke="#f59e0b" stroke-width="1.8" fill="none"/>
+  <rect x="742.5" y="221" width="11" height="8.5" rx="2" fill="#f59e0b"/>
+  <path d="M745.2 221 v-2.8 a2.9 2.9 0 0 1 5.8 0 v2.8" stroke="#f59e0b" stroke-width="1.8" fill="none"/>
   <text x="766" y="227" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', sans-serif" font-size="14.5" font-weight="500" fill="#44403c">my research notes</text>
   <rect x="1048" y="211" width="56" height="21" rx="10.5" fill="#f59e0b" fill-opacity="0.14"/>
   <text x="1076" y="225" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1" fill="#b45309" font-weight="600">USER</text>

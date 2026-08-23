@@ -6,11 +6,7 @@
 
 **Session titles that follow the conversation — not the last message.**
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-plugin-1f6feb)](https://github.com/NousResearch/hermes-agent)
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org)
-[![Release](https://img.shields.io/github/v/release/Vocllum/hermes-auto-titler)](https://github.com/Vocllum/hermes-auto-titler/releases)
-[![Tests](https://img.shields.io/badge/tests-125%20passing-3fb950)](#development)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-plugin-1f6feb)![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)
 
 *Provenance-aware, conservative session title maintenance for [Hermes Agent](https://github.com/NousResearch/hermes-agent).*
 

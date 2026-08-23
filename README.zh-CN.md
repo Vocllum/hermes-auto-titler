@@ -6,10 +6,7 @@
 
 **会话标题跟随对话主线——不是最后一条消息。**
 
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-plugin-1f6feb)](https://github.com/NousResearch/hermes-agent)
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org)
-[![Release](https://img.shields.io/github/v/release/Vocllum/hermes-auto-titler)](https://github.com/Vocllum/hermes-auto-titler/releases)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-plugin-1f6feb)![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)
 
 *为 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 打造的来源安全、保守增量的会话标题自动维护插件。*
 

@@ -102,6 +102,23 @@ plugins:
 /autotitler status
 ```
 
+### 用哪个模型？
+
+**默认零配置**——插件走 Hermes 宿主的正常模型路由，装完即用。
+
+想把标题评估固定到更便宜（或免费）的模型，在 `~/.hermes/plugins/hermes-auto-titler/config.yaml` 里设两个键：
+
+```yaml
+# ~/.hermes/plugins/hermes-auto-titler/config.yaml
+provider: "你的-provider"   # 你 ~/.hermes 配置里已有的 provider 名（留空 = 宿主自动路由）
+model: "你的模型名"         # 你的 Hermes 能访问到的任意模型
+```
+
+- `provider` / `model` 指的是**你在 Hermes 里已经配好的条目**——插件自己不收 API key，认证始终留在宿主配置里。
+- 固定通道只用于标题评估；主对话用你自己的模型，互不影响。
+- 上面的 `allow_model_override: true` 就是允许插件使用与宿主不同模型的开关；不开的话插件静默回退宿主模型。
+- 不确定名字对不对？重启后 `/autotitler status` 会显示当前生效的 provider/model。
+
 **要求：** Python ≥ 3.11 · 较新的 Hermes Agent（老宿主缺 API 时按能力探测降级）。
 
 > 注意：请把插件直接放在 `~/.hermes/plugins/hermes-auto-titler/`。如果用 symlink 把包目录链进来，`config.yaml` 必须放在包目录真实所在的位置（配置按包目录定位）。
@@ -150,7 +167,13 @@ plugins:
 
 ## 💰 成本
 
-单次评估约携带 1–3K 字符上下文（压缩会话批量盲改更长）。插件请求 `max_tokens=64`，但多数 OpenAI-compatible 路由会省略显式上限，64 只是请求值——实测一次验收调用记到 597 input / 1639 output tokens。真正的节省在于「什么没被触发」：轮数/时间/来源门控、in-flight 去重和内部回合排除。每次真实调用以 `task=hermes_auto_titler` 记入 Hermes 用量统计。
+**单次评估花多少。** 每次评估发给模型的上下文很小——当前标题 + 短摘录（开头/最近消息、用户轨迹），通常 **1–3K 字符输入**；预期输出只有一行 JSON（`{"action":"keep"}` 或新标题）。
+
+插件请求 `max_tokens=64`，但多数 OpenAI-compatible 路由不执行显式上限。一次实测验收调用记到 **597 input / 1639 output tokens**——模型自顾自查到了我们让它停的地方之后。公开这个数字是为了让你能如实做预算：除非你的 provider 尊重 `max_tokens`，请按单次最多 ~2K output tokens 估算。
+
+**真正省钱的不是小 prompt，而是大部分轮次根本不触发调用**：轮数节流（`every_n_turns`）、时间节流（`min_interval_minutes`）、in-flight 去重、排除 cron/subagent/被打断回合。每次真实调用以 `task=hermes_auto_titler` 记入 Hermes 用量统计，可用 `/usage` 或 provider 后台核对实际开销。
+
+**最省方案**：把 `model` 指到免费/廉价模型（见上文「用哪个模型？」）。
 
 ## 🧪 开发
 

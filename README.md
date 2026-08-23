@@ -102,6 +102,25 @@ Restart Hermes, then verify:
 /autotitler status
 ```
 
+### Which model does it use?
+
+**Zero config needed.** By default the plugin rides Hermes' normal model routing — whatever your host already uses.
+
+To pin a specific (e.g. free or cheaper) model for title evaluation, set two keys in `~/.hermes/plugins/hermes-auto-titler/config.yaml`:
+
+```yaml
+# ~/.hermes/plugins/hermes-auto-titler/config.yaml
+provider: "your-provider"   # a provider name from your ~/.hermes config (empty = host auto-routing)
+model: "your-model"         # any model your Hermes setup can reach
+```
+
+- `provider` / `model` refer to entries **you already have configured in Hermes** — the plugin never asks for API keys itself; auth stays in your host config.
+- The pinned channel is used *only* for title evaluation; your main conversation keeps its own model.
+- `allow_model_override: true` (the `~/.hermes/config.yaml` snippet above) is what lets a plugin use a different model than the host's default. Without it, the plugin silently falls back to the host model.
+- Not sure what names are valid? `/autotitler status` shows the active provider/model after restart.
+
+Example: route evaluations to a free community model while you chat with a frontier model.
+
 **Requirements:** Python ≥ 3.11 · a recent Hermes Agent (older hosts degrade gracefully where APIs are missing).
 
 > Note: place the plugin directly at `~/.hermes/plugins/hermes-auto-titler/`. If you symlink the package directory instead, `config.yaml` must live where the package physically resides (config resolves relative to the package).
@@ -150,7 +169,13 @@ Restart Hermes, then verify:
 
 ## 💰 Cost
 
-A typical eval carries 1–3K characters of context (compacted-session bulk retitles can carry more). The plugin requests `max_tokens=64`, but many OpenAI-compatible routes drop explicit caps, so treat 64 as a request, not a guarantee — one measured acceptance run recorded 597 input / 1639 output tokens. The real savings are in what *doesn't* fire: turn/time/source gates, in-flight dedup, and internal-turn exclusion. Every real call is recorded in Hermes usage stats under `task=hermes_auto_titler`.
+**Per-eval cost.** Each evaluation sends a compact context to the model — the current title plus short excerpts (opening/recent messages, user-message trajectory), typically **1–3K characters of input**. The expected output is one tiny JSON line (`{"action":"keep"}` or a new title).
+
+The plugin requests `max_tokens=64`, but many OpenAI-compatible providers ignore explicit caps. One measured acceptance run recorded **597 input / 1639 output tokens** — the model "thought out loud" past where we asked it to stop. That number is published so you can budget honestly: assume output up to ~2K tokens per eval unless your provider honors `max_tokens`.
+
+**What keeps the bill low** is not small prompts — it's that most turns trigger *no call at all*: turn-cadence gating (`every_n_turns`), time throttling (`min_interval_minutes`), in-flight dedup, and exclusion of cron/subagent/interrupted turns. Every real call is recorded in Hermes usage stats under `task=hermes_auto_titler`, so you can audit actual spend with `/usage` or your provider's dashboard.
+
+**Cheapest setup:** point `model` at a free/cheap model (see below).
 
 ## 🧪 Development
 

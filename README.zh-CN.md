@@ -22,11 +22,14 @@
 
 ```text
 ┌─ SESSIONS ────────────────────────────────────────────────┐
-│  ~~new chat 3~~      →  Redis connection leak    [AUTO]   │
-│  vLLM deploy & tuning                            [KEPT]   │
-│  🔒 my own title                                 [USER]   │
+│  ✦ Redis worker leak                          [AUTO]      │
+│    was: how do i fix the thi…                             │
+│  ✓ vLLM quant benchmarks                      [KEPT]      │
+│    newest: "ok thanks!"                                   │
+│  🔒 my research notes                         [USER]      │
+│    never overwritten                                      │
 │                                                           │
-│  derived < llm < user · 用户手改的标题永不覆盖             │
+│  derived < llm < user                                     │
 └───────────────────────────────────────────────────────────┘
 ```
 

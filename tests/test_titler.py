@@ -1352,9 +1352,9 @@ def test_config_command_enabled_message_notes_restart(monkeypatch):
     assert "需重启" in out2
 
 
-# -- 滞后机制：候选标题需连续确认才写库 -----------------------------------------
+# -- 评审协议：候选标题由下一次评估裁决（approve/rename/keep） --------------------
 
-def _confirmations_titler(confirmations=2, per_hour=0, title="旧标题"):
+def _review_titler(confirmations=2, per_hour=0, title="旧标题"):
     db = FakeDB(messages=MSGS, title=title, source="llm")
     t, ctx = make_titler(
         db,
@@ -1365,8 +1365,8 @@ def _confirmations_titler(confirmations=2, per_hour=0, title="旧标题"):
 
 
 def test_first_candidate_is_pending_not_written():
-    # 第一次给出候选：不写库，返回 pending
-    db, t, ctx = _confirmations_titler()
+    # 首次 rename 成为待审候选：不写库
+    db, t, ctx = _review_titler()
     r = t.evaluate("s1", force=True)
     assert r["action"] == "pending"
     assert r.get("candidate") == "新标题"
@@ -1374,43 +1374,73 @@ def test_first_candidate_is_pending_not_written():
     assert db.calls == []  # 无任何写库调用
 
 
-def test_second_same_candidate_confirms_rename():
-    # 连续两次相同候选 → 真正改名
-    db, t, ctx = _confirmations_titler()
+def test_second_eval_approve_confirms_rename():
+    # 下一次评估模型 approve 候选 → 落库
+    db, t, ctx = _review_titler()
     assert t.evaluate("s1", force=True)["action"] == "pending"
+    ctx.llm.text = _dec("approve")
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     assert db.title == "新标题"
 
 
-def test_different_candidates_reset_confirmation():
-    # 候选变化：重新计数（震荡信号被机械拦截）
-    db, t, ctx = _confirmations_titler()
+def test_second_eval_same_candidate_counts_as_endorsement():
+    # 模型看到 Proposed title 后原样重复 → 视为背书，落库
+    db, t, ctx = _review_titler()
     assert t.evaluate("s1", force=True)["action"] == "pending"
-    # 第二次模型改主意，给出另一个候选 → pending 新候选，计数重置为 1
+    ctx.llm.text = _dec("rename", "新标题")
+    r = t.evaluate("s1", force=True)
+    assert r["action"] == "renamed"
+    assert db.title == "新标题"
+
+
+def test_review_candidate_change_replaces_pending():
+    # 裁决时给出更好的新候选：替换 pending，旧候选作废
+    db, t, ctx = _review_titler()
+    assert t.evaluate("s1", force=True)["action"] == "pending"
     ctx.llm.text = _dec("rename", "另一标题")
     r = t.evaluate("s1", force=True)
     assert r["action"] == "pending"
     assert r.get("candidate") == "另一标题"
     assert db.title == "旧标题"
-    # 第三次回到「另一标题」→ 确认
+    ctx.llm.text = _dec("approve")
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     assert db.title == "另一标题"
 
 
 def test_keep_clears_pending_candidate():
-    # 中途一次 keep：清空 pending（模型自己否决了之前的候选）
-    db, t, ctx = _confirmations_titler()
+    # 模型裁决 keep：放弃候选，回到当前标题
+    db, t, ctx = _review_titler()
     assert t.evaluate("s1", force=True)["action"] == "pending"
     ctx.llm.text = _dec("keep")
     assert t.evaluate("s1", force=True)["action"] == "keep"
     assert t._pending.get("s1") is None
-    # 再次 rename 需要重新攒满确认数
+    # 之后重新提出候选 → approve 落库
     ctx.llm.text = _dec("rename", "新标题")
     assert t.evaluate("s1", force=True)["action"] == "pending"
-    assert db.title == "旧标题"
+    ctx.llm.text = _dec("approve")
     assert t.evaluate("s1", force=True)["action"] == "renamed"
+
+
+def test_approve_without_pending_is_keep():
+    # 无待审候选时的 approve 防御性视为 keep，不写库
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    t, ctx = make_titler(db, text=_dec("approve"), cfg={"rename_confirmations": 2})
+    r = t.evaluate("s1", force=True)
+    assert r["action"] == "keep"
+    assert db.title == "旧标题"
+    assert db.calls == []
+
+
+def test_approve_writes_pending_candidate_not_echoed_title():
+    # approve 背书的是候选本身：忽略模型回显的 title 字段
+    db, t, ctx = _review_titler()
+    assert t.evaluate("s1", force=True)["action"] == "pending"
+    ctx.llm.text = '{"action":"approve","title":"别的标题"}'
+    r = t.evaluate("s1", force=True)
+    assert r["action"] == "renamed"
+    assert db.title == "新标题"
 
 
 def test_current_title_equal_to_candidate_still_keep():
@@ -1418,21 +1448,21 @@ def test_current_title_equal_to_candidate_still_keep():
     db = FakeDB(messages=MSGS, title="新标题", source="llm")
     t, ctx = make_titler(db, text=_dec("rename", "新标题"),
                          cfg={"rename_confirmations": 2})
-    t._pending["s1"] = {"title": "新标题", "count": 1}
+    t._pending["s1"] = {"title": "新标题"}
     assert t.evaluate("s1", force=True)["action"] == "keep"
     assert t._pending.get("s1") is None
 
 
 def test_confirmations_1_keeps_single_shot_behavior():
-    # 默认配置（1）：单次评估直接改名，与历史行为完全一致
-    db, t, ctx = _confirmations_titler(confirmations=1)
+    # 默认配置（1）：单次评估直接改名，评审协议关闭
+    db, t, ctx = _review_titler(confirmations=1)
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     assert db.title == "新标题"
 
 
 def test_derived_upgrade_bypasses_confirmation():
-    # derived/无标题的首次升级是补漏不是折腾：旁路滞后立即写
+    # derived/无标题的首次升级是补漏不是折腾：旁路评审立即写
     db = FakeDB(messages=MSGS, title="旧兜底", source="derived")
     t, ctx = make_titler(db, text=_dec("rename", "正式标题"),
                          cfg={"rename_confirmations": 3})
@@ -1449,45 +1479,78 @@ def test_derived_upgrade_bypasses_confirmation():
 
 
 def test_close_eval_bypasses_confirmation():
-    # close 终局评估直接提交：会话结束时全貌已知，不再要求二次确认
-    db, t, ctx = _confirmations_titler()
-    r = t.evaluate("s1", force=True, blind=True)  # blind=retitle-all/close 路径
+    # blind 终局评估（retitle-all）直接提交：全貌已知，不再评审
+    db, t, ctx = _review_titler()
+    r = t.evaluate("s1", force=True, blind=True)
     assert r["action"] == "renamed"
     assert db.title == "新标题"
 
 
+def test_blind_review_ignores_pending_and_writes_directly():
+    # blind 评估忽略进程内待审候选，直接落库并清空
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    t, ctx = make_titler(db, text=_dec("rename", "盲改标题"),
+                         cfg={"rename_confirmations": 2})
+    t._pending["s1"] = {"title": "待审候选"}
+    r = t.evaluate("s1", force=True, blind=True)
+    assert r["action"] == "renamed"
+    assert db.title == "盲改标题"
+    assert t._pending.get("s1") is None
+
+
+def test_review_prompt_shows_proposed_title_and_approve_contract():
+    # 有待审候选的评估：user prompt 展示 Proposed title，system 契约含 approve；
+    # 无候选的首轮评估不出现 approve
+    db, t, ctx = _review_titler()
+    t.evaluate("s1", force=True)
+    first_system = ctx.llm.calls[0]["messages"][0]["content"]
+    assert "approve" not in first_system
+    t.evaluate("s1", force=True)
+    second_system = ctx.llm.calls[1]["messages"][0]["content"]
+    second_user = ctx.llm.calls[1]["messages"][1]["content"]
+    assert "Proposed title" in second_user
+    assert "新标题" in second_user
+    assert "approve" in second_system
+
+
 def test_renames_per_hour_cap_blocks_and_recovers():
-    # 每小时频次上限：窗口内第 3 次（上限 2）被拒；窗口滑过后恢复
-    db, t, ctx = _confirmations_titler(per_hour=2)
+    # 每小时频次上限：窗口内第 3 次（上限 2）被拒；窗口滑过后 approve 落库
+    db, t, ctx = _review_titler(per_hour=2)
     now = 1000.0
     with patch("hermes_auto_titler.titler.time.time", return_value=now):
         assert t.evaluate("s1", force=True)["action"] == "pending"
     with patch("hermes_auto_titler.titler.time.time", return_value=now + 60):
+        ctx.llm.text = _dec("approve")
         assert t.evaluate("s1", force=True)["action"] == "renamed"  # 写 #1
-    # 攒第二个候选并确认 → 写 #2（窗口内第 2 次，仍允许）
+    # 第二个候选：pending → approve → 写 #2（窗口内第 2 次，仍允许）
     db.title = "又旧了"
     with patch("hermes_auto_titler.titler.time.time", return_value=now + 120):
+        ctx.llm.text = _dec("rename", "另一标题")
         assert t.evaluate("s1", force=True)["action"] == "pending"
     with patch("hermes_auto_titler.titler.time.time", return_value=now + 180):
+        ctx.llm.text = _dec("approve")
         assert t.evaluate("s1", force=True)["action"] == "renamed"  # 写 #2
-    # 第三个候选确认时触顶 → capped 不写
+    # 第三个候选 approve 时触顶 → capped 不写，候选保留
     db.title = "第三版旧标题"
     with patch("hermes_auto_titler.titler.time.time", return_value=now + 240):
+        ctx.llm.text = _dec("rename", "第三候选")
         assert t.evaluate("s1", force=True)["action"] == "pending"
     with patch("hermes_auto_titler.titler.time.time", return_value=now + 300):
+        ctx.llm.text = _dec("approve")
         r = t.evaluate("s1", force=True)
         assert r["action"] == "capped"
         assert db.title == "第三版旧标题"
-    # 窗口滑过（最早一次写 >3600s 前）→ 恢复写入
+    # 窗口滑过（最早一次写 >3600s 前）→ 下一次 approve 落库
     with patch("hermes_auto_titler.titler.time.time", return_value=now + 60 + 3600 + 1):
+        ctx.llm.text = _dec("approve")
         r = t.evaluate("s1", force=True)
         assert r["action"] == "renamed"
-        assert db.title == "新标题"
+        assert db.title == "第三候选"
 
 
 def test_user_race_during_confirmation_clears_pending():
-    # 等待二次确认期间用户 /title 抢先：放弃 pending，用户权威胜出
-    db, t, ctx = _confirmations_titler()
+    # 评审期间用户 /title 抢先：放弃 pending，用户权威胜出
+    db, t, ctx = _review_titler()
     assert t.evaluate("s1", force=True)["action"] == "pending"
     db.title, db.source = "用户手改", "user"
     r = t.evaluate("s1", force=True)
@@ -1520,3 +1583,12 @@ def test_prompt_conservative_rule_prefers_keep_when_uncertain():
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
     assert "When uncertain, keep" in system
+
+
+# -- 评审协议解析与契约 ------------------------------------------------------------
+
+def test_parse_decision_accepts_approve():
+    from hermes_auto_titler.titler import _parse_decision
+
+    assert _parse_decision('{"action":"approve"}') == ("approve", None)
+    assert _parse_decision('{"action":"approve","title":"X"}') == ("approve", "X")

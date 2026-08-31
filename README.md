@@ -39,7 +39,7 @@ Your agent's sidebar is its memory map. But most tools name a session **once**, 
 |---|---|
 | **Provenance-safe** | Enforces `derived < llm < user`. `derived` = Hermes' deterministic fallback from the first message; `llm` = model-generated; `user` = yours, **never overwritten**. Old titles with no provenance (pre-provenance rows) are treated as user-set and protected too. |
 | **Whole-session subject** | Reads opening turns, recent turns, *and* your full user-message trajectory — so a mid-session subtask can't kidnap the title of a long-running effort. |
-| **Anti-oscillation hysteresis** | Optional `rename_confirmations`: an llm→llm rename only lands after N consecutive evaluations agree on the same candidate. `renames_per_hour` caps churn per session. |
+| **Anti-oscillation review protocol** | Optional `rename_confirmations` (≥2): an llm→llm rename first becomes a pending candidate; the next evaluation shows it to the model as `Proposed title`, which approves it, replaces it with a better one, or drops it. `renames_per_hour` caps churn per session. |
 | **Cheap by design** | Four gating layers (turn cadence, time interval, source, in-flight dedup) plus exclusion of cron/subagent/background turns. Typical eval input is 1–3K chars; output JSON is one line. |
 | **Prompt hygiene built in** | Mandatory CJK↔Latin spacing, brand display casing (OpenCodex, not `opencodex`), and a dodge rule: when the canonical spelling is uncertain, don't guess. |
 | **Profile-isolated** | SessionDB handles are cached per Hermes profile — no cross-profile leakage. Usage is recorded natively per call (`task=hermes_auto_titler`). |
@@ -151,7 +151,7 @@ Example: route evaluations to a free community model while you chat with a front
 | `provider` / `model` | `""` / `""` | Pin the evaluation channel; empty = host default routing. |
 | `min_interval_minutes` | `5` | Minimum interval between evals of one session. |
 | `max_title_length` / `max_display_width` | `24` / `40` | Character and sidebar-column hard limits (12-char soft target). |
-| `rename_confirmations` | `1` | Hysteresis: require N consecutive identical candidates before an llm→llm rename lands (1 = off, max 5). |
+| `rename_confirmations` | `1` | Review protocol: with ≥2, an llm→llm rename becomes a pending candidate decided at the next evaluation (`approve` lands it, `rename` replaces it, `keep` drops it; 1 = off, max 5). |
 | `renames_per_hour` | `0` | Per-session sliding-window rename cap (0 = unlimited). |
 
 </details>

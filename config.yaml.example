@@ -19,5 +19,5 @@ model: ""                 # 留空 = 宿主默认模型；也可指定你在 Her
 min_interval_minutes: 5
 max_title_length: 24
 max_display_width: 40
-rename_confirmations: 1  # 滞后机制：llm→llm 改名需连续 N 次评估给出相同候选才写库（1=关闭；derived/无标题升级与 close 盲改旁路；上限 5）
+rename_confirmations: 1  # 评审协议：>1 时 llm→llm 改名候选先挂起，下一次评估裁决（approve=落库/rename=换新候选/keep=放弃；derived/无标题升级与 retitle-all 盲改旁路；1=关闭；上限 5）
 renames_per_hour: 0      # 单会话每小时实际改名上限（滑动窗口）；0=不限

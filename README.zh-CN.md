@@ -39,7 +39,7 @@
 |---|---|
 | **来源安全** | 遵守 `derived < llm < user`（derived = Hermes 从首条消息截出的临时兜底；llm = 模型生成；user = 你手改的，**永不覆盖**）。无来源标记的 legacy 旧标题按用户标题同等保护。 |
 | **全会话主线** | 同时读取开头轮次、最近轮次和完整用户意图轨迹——长任务中途插进来的小任务拐不跑标题。 |
-| **防震荡滞后机制** | 可选 `rename_confirmations`：llm→llm 改名需连续 N 次评估给出相同候选才落库；`renames_per_hour` 限制单会话改名频率。 |
+| **防震荡评审协议** | 可选 `rename_confirmations`（≥2）：llm→llm 改名先成为待审候选，下一次评估以 `Proposed title` 交给模型裁决（approve 落库 / rename 换新 / keep 放弃）；`renames_per_hour` 限制单会话改名频率。 |
 | **成本克制** | 四层触发门控（轮数、时间、来源、in-flight 去重），并排除 cron/subagent/后台回合。单次评估输入约 1–3K 字符。 |
 | **排版护栏内置** | 中英文边界强制空格、品牌名规范大小写（OpenCodex 而非 `opencodex`）、拼写拿不准就不猜的 dodge 规则。 |
 | **Profile 隔离** | SessionDB 句柄按 Hermes profile 分别缓存，无跨 profile 泄露；每次调用原生记账（`task=hermes_auto_titler`）。 |
@@ -149,7 +149,7 @@ model: "你的模型名"         # 你的 Hermes 能访问到的任意模型
 | `provider` / `model` | `""` / `""` | 固定评估通道；留空走宿主默认路由。 |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔。 |
 | `max_title_length` / `max_display_width` | `24` / `40` | 字符数与侧边栏列宽硬限（12 字符软目标）。 |
-| `rename_confirmations` | `1` | 滞后机制：连续 N 次相同候选才改名（1=关闭，最大 5）。 |
+| `rename_confirmations` | `1` | 评审协议：≥2 时 llm→llm 改名先挂起为候选，下一次评估裁决（approve 落库 / rename 换新 / keep 放弃；1=关闭，最大 5）。 |
 | `renames_per_hour` | `0` | 单会话滑动窗口改名上限（0=不限）。 |
 
 </details>

@@ -94,7 +94,7 @@ class AutoTitler:
         self._turns: Dict[str, int] = {}
         self._last_eval: Dict[str, float] = {}
         self._current_session: Optional[str] = None
-        # 滞后机制：session_id -> {"title": 候选, "count": 已确认次数}
+        # 滞后机制：session_id -> {"title": 待审候选}（评审协议，见 evaluate）
         self._pending: Dict[str, Dict[str, Any]] = {}
         # 频次窗口：session_id -> 实际改名时间戳列表（滑动 60 分钟）
         self._rename_times: Dict[str, List[float]] = {}
@@ -311,40 +311,70 @@ class AutoTitler:
         # 尚未成功升级；短句也可能是「这个文件夹是做什么的」这类污染标题，
         # 因此只要仍是 derived 就要求本次模型给出正式标题。
         force_rename = src == SessionDB.TITLE_SOURCE_DERIVED and bool(current)
+        # 评审协议（rename_confirmations>1）：llm→llm 的改名候选先挂起，由下一
+        # 次评估裁决——approve（背书落库）/ rename（换更好的新候选）/ keep（放弃），
+        # 模型原样重复候选也视为背书。derived/无标题升级是补漏、blind 是终局
+        # 评估（全貌已知），都旁路直接提交。
+        needed = 1 if blind else int(self.cfg.get("rename_confirmations", 1))
+        review = needed > 1 and src == SessionDB.TITLE_SOURCE_LLM and bool(current)
+        pending = self._pending.get(session_id) if review else None
+        proposed = pending["title"] if pending else None
+        if blind:
+            # 终局评估以内容为准，直接落库并忽略进程内待审候选
+            self._pending.pop(session_id, None)
+
         action, title = self._generate(
             current, recent, all_user, opening,
-            force_rename=force_rename, blind=blind,
+            force_rename=force_rename, blind=blind, proposed=proposed,
             earlier_summary=earlier_summary, session_id=session_id,
         )
         # 规范化 + 截断后的候选才与当前标题比较；相等 = keep（不是 failed/加后缀）
         candidate = self._prepare_candidate(title) if title else None
+
+        if review and proposed:
+            if proposed == current:
+                # stale 候选（当前标题已是它）：无意义，放弃
+                self._pending.pop(session_id, None)
+                log.info("auto-titler %s: keep (stale review candidate)", session_id[:12])
+                return {"action": "keep"}
+            if action == "approve" or (action == "rename" and candidate == proposed):
+                # 模型背书候选（显式 approve，或裁决时原样重复）→ 落库候选本身
+                return self._commit_rename(db, session_id, proposed)
+            if action == "rename" and candidate and candidate != current:
+                # 模型给出更好的新候选：替换待审，旧候选作废
+                self._pending[session_id] = {"title": candidate}
+                log.info(
+                    "auto-titler %s: pending (review) candidate=%r",
+                    session_id[:12], candidate,
+                )
+                return {"action": "pending", "candidate": candidate}
+            # keep / 无效 rename / 候选等于当前标题：放弃待审候选
+            self._pending.pop(session_id, None)
+            log.info("auto-titler %s: keep (review, current=%r)", session_id[:12], current)
+            return {"action": "keep"}
+
         if action != "rename" or not candidate or candidate == current:
             # keep：模型否决了之前的候选 → 清空 pending
             self._pending.pop(session_id, None)
             log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)
             return {"action": "keep"}
 
-        # 滞后机制旁路：derived/无标题升级是补漏、blind 是 close/retitle-all
-        # 终局评估（会话全貌已知）——都不需要二次确认。
-        needed = 1 if blind else int(self.cfg.get("rename_confirmations", 1))
-        if needed > 1 and src != SessionDB.TITLE_SOURCE_DERIVED and current:
-            prev = self._pending.get(session_id)
-            if not prev or prev["title"] != candidate:
-                self._pending[session_id] = {"title": candidate, "count": 1}
-            else:
-                prev["count"] += 1
-            count = self._pending[session_id]["count"]
-            if count < needed:
-                log.info(
-                    "auto-titler %s: pending (%d/%d) candidate=%r",
-                    session_id[:12], count, needed, candidate,
-                )
-                return {"action": "pending", "candidate": candidate, "count": count}
-            # 达到确认数：暂不 pop——频次上限拦截后保留已确认态，
-            # 窗口滑过即可直接写入；写库出确定结果后才清。
+        if review:
+            # 首次提出候选：挂起待审，不写库
+            self._pending[session_id] = {"title": candidate}
+            log.info(
+                "auto-titler %s: pending candidate=%r", session_id[:12], candidate,
+            )
+            return {"action": "pending", "candidate": candidate}
 
-        # 频次上限：滑动 60 分钟窗口内的实际改名次数。
-        # 时间戳在写库成功后才记账——被保护/写失败的尝试不消耗名额。
+        return self._commit_rename(db, session_id, candidate)
+
+    def _commit_rename(self, db: SessionDB, session_id: str, title: str) -> Dict[str, Any]:
+        """频次上限检查 + 实际写库 + 记账。title 必须是已 _prepare_candidate 的候选。
+
+        时间戳在写库成功后才记账——被保护/写失败的尝试不消耗名额；
+        触顶保留待审候选，窗口滑过后模型背书即可写入。
+        """
         cap = int(self.cfg.get("renames_per_hour", 0))
         if cap > 0:
             now = time.time()
@@ -357,7 +387,7 @@ class AutoTitler:
                 return {"action": "capped", "reason": "renames_per_hour limit"}
             self._rename_times[session_id] = times
 
-        written = self._write(db, session_id, candidate)
+        written = self._write(db, session_id, title)
         if written:
             self._pending.pop(session_id, None)
             # 记账：仅实际写入成功的改名消耗频次名额
@@ -371,7 +401,7 @@ class AutoTitler:
             # LLM 调用期间用户 /title（或出现 legacy NULL 标题）：权威方胜出，不算失败
             log.info("auto-titler %s: %s", session_id[:12], reason)
             return {"action": "skipped", "reason": reason}
-        log.warning("auto-titler %s: rename failed to write title %r", session_id[:12], candidate)
+        log.warning("auto-titler %s: rename failed to write title %r", session_id[:12], title)
         return {"action": "failed"}
 
     # -- 模型生成 -----------------------------------------------------------
@@ -384,6 +414,7 @@ class AutoTitler:
         opening: List[Tuple[str, str]],
         force_rename: bool = False,
         blind: bool = False,
+        proposed: Optional[str] = None,
         earlier_summary: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> Tuple[str, Optional[str]]:
@@ -400,6 +431,18 @@ class AutoTitler:
                 "sustained intent, not by where a topic appears in time. Do not title "
                 "the session after final validation, cleanup, or parameter tuning "
                 "unless that work is the session's entire subject."
+            )
+        elif proposed and not blind:
+            # 评审模式：裁决上一轮评估提出的候选标题
+            rule = (
+                "A candidate title was proposed at a previous evaluation and is "
+                "shown below as the Proposed title. Judge it against the full "
+                "conversation: action \"approve\" if it is already the best "
+                "summary as-is; \"rename\" with a better title if it misses the "
+                "main subject or is wrong; \"keep\" if the current title is fine "
+                "and the proposal is not an improvement. Replacing an accurate "
+                "current title with a narrower or less complete proposal is not "
+                "an improvement."
             )
         elif strategy == "aggressive":
             rule = (
@@ -498,10 +541,16 @@ class AutoTitler:
                 "subject and only the minimum intent needed to distinguish "
                 "it. Do not retell what happened."
             )
+        # JSON 契约：评审模式（有待审候选）增加 approve 动作
+        contract = (
+            '{"action":"keep"|"approve"|"rename","title":"..."}\n'
+            if proposed and not blind
+            else '{"action":"keep"|"rename","title":"..."}\n'
+        )
         system = (
             "You maintain concise titles for Hermes conversations.\n"
             "Return JSON only:\n"
-            '{"action":"keep"|"rename","title":"..."}\n'
+            f"{contract}"
             f"\n{rule}\n"
             f"\n{style_req}\n"
             f"{hierarchy}"
@@ -549,6 +598,8 @@ class AutoTitler:
         lines = []
         if not blind:
             lines.append(f"Current title: {current or '(none)'}")
+            if proposed:
+                lines.append(f"Proposed title: {proposed}")
             lines.append("")
         if earlier_summary and not blind:
             # 压缩会话日常评估：可见窗口开头是摘要之后的局部续段，不是原始
@@ -632,6 +683,8 @@ class AutoTitler:
         action, title = _parse_decision(text)
         if action == "rename" and title:
             return "rename", title
+        if action == "approve":
+            return "approve", None
         return "keep", None
 
     # -- 用量记账 -----------------------------------------------------------
@@ -874,7 +927,7 @@ def _parse_decision(text: str) -> Tuple[str, Optional[str]]:
         if not d:
             continue
         action = str(d.get("action", "keep")).lower()
-        if action in ("keep", "rename"):
+        if action in ("keep", "approve", "rename"):
             title = str(d.get("title") or "").strip().strip('"').strip("'")
             return action, (title or None)
     return "keep", None

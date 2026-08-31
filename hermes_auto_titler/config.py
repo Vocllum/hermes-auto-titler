@@ -36,8 +36,9 @@ DEFAULTS: dict[str, Any] = {
     # hermes-auto-titler 这类较长的字面标识符及少量中文意图。
     "max_title_length": 24,
     "max_display_width": 40,
-    # 滞后机制：候选标题需连续 N 次评估给出相同结果才写库（derived/无标题/
-    # close 盲改旁路）。1 = 关闭（单次确认即写），上限 5。
+    # 评审协议：>1 时 llm→llm 改名候选先挂起，下一次评估裁决（approve=落库 /
+    # rename=换新候选 / keep=放弃；原样重复候选视为背书）。derived/无标题升级
+    # 与 blind 终局评估旁路。1 = 关闭（单次评估直接改名），上限 5。
     "rename_confirmations": 1,
     # 单会话每小时实际改名次数上限（滑动 60 分钟窗口）；0 = 不设上限。
     "renames_per_hour": 0,

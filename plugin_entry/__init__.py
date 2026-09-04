@@ -12,7 +12,9 @@ import sys
 from pathlib import Path
 
 _here = Path(__file__).parent
-for _c in (_here, _here.resolve()):
+# Keep the plugin-directory spelling last: insert-at-front makes it win when
+# the root entry is loaded through a symlinked Hermes plugin directory.
+for _c in (_here.resolve(), _here):
     if str(_c) not in sys.path:
         sys.path.insert(0, str(_c))
 

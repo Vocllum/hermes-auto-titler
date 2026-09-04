@@ -664,8 +664,16 @@ class AutoTitler:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_prompt},
                 ],
-                model=self.cfg.get("model") or None,
-                provider=self.cfg.get("provider") or None,
+                # provider/model 均留空时复用 Hermes 内建标题辅助任务；
+                # 任一自定义值存在时，走插件明确配置的独立通道。
+                **(
+                    {"task": "title_generation"}
+                    if not (self.cfg.get("provider") or self.cfg.get("model"))
+                    else {
+                        "provider": self.cfg.get("provider") or None,
+                        "model": self.cfg.get("model") or None,
+                    }
+                ),
                 temperature=0,
                 # 插件侧请求上限；当前 Hermes auxiliary_client 会对多数普通
                 # OpenAI-compatible 路由省略该 wire 参数，

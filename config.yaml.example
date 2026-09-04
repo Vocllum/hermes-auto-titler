@@ -14,8 +14,10 @@ summary_preview_chars: 1200      # 压缩摘要进标题评估的截断长度（
 retitle_summary_chars: 12000     # 仅 retitle-all 全量重命名（盲改）：压缩摘要截断长度（0=沿用 preview_chars）
 title_style: concise  # concise = LABEL：主体标签（Subject + 最小区分意图）；complete = SUMMARY：简短事件梗概（Subject + 主要意图/事件）。信息类型是第一约束，长度只是护栏
 strategy: conservative
-provider: ""              # 留空 = 宿主按 auto 路由；要固定通道时填你的 provider 名
-model: ""                 # 留空 = 宿主默认模型；也可指定你在 Hermes 里可用的具体模型名
+# 留空并通过 Hermes 的内建 title_generation 辅助任务路由；
+# 插件运行时会优先使用 auxiliary.title_generation 的 provider/model。
+provider: ""
+model: ""
 min_interval_minutes: 5
 max_title_length: 24
 max_display_width: 40

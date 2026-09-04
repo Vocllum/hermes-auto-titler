@@ -757,8 +757,19 @@ def test_generate_nonblind_with_summary_anchors_subject_on_summary():
     assert "compacted session the earlier history summary anchors the subject" in system
 
 
-def test_generate_forwards_provider_from_config():
-    """配置了 provider 时，complete 调用必须显式传 provider（防宿主 auto 静默回退）。"""
+def test_generate_uses_hermes_title_generation_task():
+    """空 provider/model 时走 Hermes 内建标题辅助任务。"""
+    db = FakeDB(messages=MSGS, title=None)
+    t, ctx = make_titler(db, text=_dec("keep"))
+    t.evaluate("s1", force=True)
+    call = ctx.llm.calls[0]
+    assert call["task"] == "title_generation"
+    assert "provider" not in call
+    assert "model" not in call
+
+
+def test_generate_forwards_explicit_custom_route():
+    """配置自定义 provider/model 时保留插件独立通道。"""
     db = FakeDB(messages=MSGS, title=None)
     t, ctx = make_titler(db, text=_dec("keep"))
     t.cfg["provider"] = "example-provider"
@@ -767,6 +778,7 @@ def test_generate_forwards_provider_from_config():
     call = ctx.llm.calls[0]
     assert call["provider"] == "example-provider"
     assert call["model"] == "example/model:free"
+    assert "task" not in call
 
 
 def test_evaluate_blind_with_summary_keeps_user_continuation_but_omits_assistant_tail():
@@ -939,6 +951,7 @@ def test_status_includes_early_turn_eval():
     t, _ = make_titler(db, cfg={"early_turn_eval": True})
     out = make_handler(t)("status")
     assert "early_turn_eval=True" in out
+    assert "provider=(host default)" in out
 
 
 def test_config_command_rejects_invalid_and_accepts_new_keys(monkeypatch):
@@ -1234,7 +1247,7 @@ def test_get_db_singleton_under_concurrent_first_access(monkeypatch):
     assert FakeSessionDB.instances == 1  # 并发首次构造只建一个 DB
 
 
-def test_get_db_isolates_profiles_by_hermes_home(monkeypatch):
+def test_get_db_isolates_profiles_by_hermes_home(monkeypatch, tmp_path):
     # 双 profile 隔离：HERMES_HOME 变化后 get_db 必须返回指向不同库的实例；
     # 同一 profile 内重复调用复用同一句柄。发布门禁回归（模块级单例曾串库）。
     import hermes_auto_titler.titler as titler_mod
@@ -1249,14 +1262,16 @@ def test_get_db_isolates_profiles_by_hermes_home(monkeypatch):
 
     monkeypatch.setattr(titler_mod, "SessionDB", FakeSessionDB)
     monkeypatch.setattr(titler_mod, "_dbs", {})
-    monkeypatch.setenv("HERMES_HOME", "/tmp/profile-A")
+    profile_a = str(tmp_path / "profile-A")
+    profile_b = str(tmp_path / "profile-B")
+    monkeypatch.setenv("HERMES_HOME", profile_a)
     db_a1 = titler_mod.get_db()
     db_a2 = titler_mod.get_db()
-    monkeypatch.setenv("HERMES_HOME", "/tmp/profile-B")
+    monkeypatch.setenv("HERMES_HOME", profile_b)
     db_b = titler_mod.get_db()
     assert db_a1 is db_a2  # 同 profile 复用
     assert db_a1 is not db_b  # 跨 profile 新建
-    assert db_b.home == "/tmp/profile-B"  # B 用的是 B 的路径，不是 A 的
+    assert db_b.home == profile_b  # B 用的是 B 的路径，不是 A 的
 
 
 # -- 写回竞态：每次 apply 前刷新来源 ------------------------------------------

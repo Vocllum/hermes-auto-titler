@@ -60,7 +60,7 @@ Your agent's sidebar is its memory map. But most tools name a session **once**, 
 
 - **Why a second model instead of better first-message naming?** The first message under-describes long sessions by construction. Only something that sees the trajectory can maintain the label over time.
 - **Why synchronous close evals?** A title written after the session is closed may never be seen. We trade up to ~30 s of provider timeout for determinism exactly once per session.
-- **Why hysteresis instead of a smarter prompt?** Real-world oscillation chains (three renames in 33 minutes, each individually reasonable) are structural. Requiring consecutive agreement kills them mechanically, at zero cost.
+- **Why a review protocol instead of a smarter prompt?** Real-world oscillation chains (three renames in 33 minutes, each individually reasonable) are structural. With `rename_confirmations ≥ 2`, a proposed title is shown again on the next evaluation and can be approved, replaced, or dropped before it is written.
 - **Known limitation:** Hermes exposes no atomic compare-and-swap for same-source title writes, so llm→llm has a tiny race window. It is narrowed and detected, not claimed impossible.
 
 </details>
@@ -83,7 +83,9 @@ git clone https://github.com/Vocllum/hermes-auto-titler
 cp hermes-auto-titler/config.yaml.example hermes-auto-titler/config.yaml
 ```
 
-Then allow the plugin to pick its own evaluation model (optional but recommended):
+By default, the plugin uses Hermes' built-in `title_generation` auxiliary task, so the host owns the provider/model choice. To use a plugin-local custom route instead, set `provider` and/or `model` in the plugin config; when either value is set, the plugin sends that explicit override. The host must authorize the selected mode as shown below:
+
+Then allow the plugin to use the configured route or built-in auxiliary task:
 
 ```yaml
 # ~/.hermes/config.yaml
@@ -93,7 +95,9 @@ plugins:
   entries:
     hermes-auto-titler:
       llm:
+        allow_provider_override: true
         allow_model_override: true
+        allow_task_override: true
 ```
 
 Restart Hermes, then verify:
@@ -104,9 +108,9 @@ Restart Hermes, then verify:
 
 ### Which model does it use?
 
-**Zero config needed.** By default the plugin rides Hermes' normal model routing — whatever your host already uses.
+**Hermes auxiliary mode (default).** Leave `provider` and `model` empty. The plugin calls Hermes' built-in `title_generation` task, and Hermes resolves `auxiliary.title_generation.provider` / `model` for it. This keeps title generation on the host's dedicated auxiliary-model policy.
 
-To pin a specific (e.g. free or cheaper) model for title evaluation, set two keys in `~/.hermes/plugins/hermes-auto-titler/config.yaml`:
+**Plugin custom mode (optional).** Set `provider` and `model` in `~/.hermes/plugins/hermes-auto-titler/config.yaml` to use an explicit plugin-local route:
 
 ```yaml
 # ~/.hermes/plugins/hermes-auto-titler/config.yaml
@@ -114,9 +118,9 @@ provider: "your-provider"   # a provider name from your ~/.hermes config (empty 
 model: "your-model"         # any model your Hermes setup can reach
 ```
 
-- `provider` / `model` refer to entries **you already have configured in Hermes** — the plugin never asks for API keys itself; auth stays in your host config.
-- The pinned channel is used *only* for title evaluation; your main conversation keeps its own model.
-- `allow_model_override: true` (the `~/.hermes/config.yaml` snippet above) is what lets a plugin use a different model than the host's default. Without it, the plugin silently falls back to the host model.
+- In Hermes auxiliary mode, `allow_task_override: true` authorizes the plugin to borrow the built-in `title_generation` task.
+- In plugin custom mode, `provider` / `model` refer to entries **you already have configured in Hermes** — the plugin never asks for API keys itself; auth stays in your host config. `allow_provider_override: true` and `allow_model_override: true` authorize those explicit overrides.
+- The selected channel is used *only* for title evaluation; your main conversation keeps its own model. If an override is rejected, the plugin keeps the current title safely.
 - Not sure what names are valid? `/autotitler status` shows the active provider/model after restart.
 
 Example: route evaluations to a free community model while you chat with a frontier model.
@@ -147,8 +151,8 @@ Example: route evaluations to a free community model while you chat with a front
 | `summary_preview_chars` | `1200` | Compaction-summary budget for normal evals. |
 | `retitle_summary_chars` | `12000` | Larger summary budget for bulk retitles. |
 | `title_style` | `concise` | `concise` = subject label · `complete` = short event summary. |
-| `strategy` | `conservative` | Rename only on clear mismatch (`aggressive` optimizes every eval). |
-| `provider` / `model` | `""` / `""` | Pin the evaluation channel; empty = host default routing. |
+| `strategy` | `conservative` | Rename only on clear mismatch; `aggressive` gives more weight to the latest subject when a rename is justified. |
+| `provider` / `model` | `""` / `""` | Empty = Hermes `auxiliary.title_generation`; set either to select the plugin custom route. |
 | `min_interval_minutes` | `5` | Minimum interval between evals of one session. |
 | `max_title_length` / `max_display_width` | `24` / `40` | Character and sidebar-column hard limits (12-char soft target). |
 | `rename_confirmations` | `1` | Review protocol: with ≥2, an llm→llm rename becomes a pending candidate decided at the next evaluation (`approve` lands it, `rename` replaces it, `keep` drops it; 1 = off, max 5). |

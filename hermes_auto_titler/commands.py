@@ -45,7 +45,9 @@ def make_handler(titler) -> Callable[[str], str]:
                 f" | every {c['every_n_turns']} turns | early_turn_eval={c['early_turn_eval']}"
                 f" | on_close={c['on_close']}"
                 f" | recent {c['recent_turns']} turns | all_user_msgs={c['include_all_user_messages']}"
-                f" | strategy={c['strategy']} | model={c['model'] or '(host default)'}"
+                f" | strategy={c['strategy']}"
+                f" | provider={c['provider'] or '(host default)'}"
+                f" | model={c['model'] or '(host default)'}"
                 f" | interval={c['min_interval_minutes']}m | max_len={c['max_title_length']}"
             )
 

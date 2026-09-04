@@ -60,7 +60,7 @@
 
 - **为什么用第二个模型而不是更好的首条命名？** 首条消息对长会话的概括天然不足。只有能看到轨迹的东西才能长期维护标签。
 - **为什么关闭评估要同步？** 会话关闭后才写的标题可能永远没人看到。用最多约 30 秒的 provider timeout 换取每会话一次的确定性。
-- **为什么用滞后机制而不是更强的提示词？** 真实运行中的震荡链（33 分钟连改三次，每次单独看都合理）是结构性问题。「连续一致才提交」机械地消灭它，零额外成本。
+- **为什么用评审协议而不是更强的提示词？** 真实运行中的震荡链（33 分钟连改三次，每次单独看都合理）是结构性问题。`rename_confirmations ≥ 2` 时，候选会在下一次评估中重新展示，可被 approve、替换或放弃，再决定是否写入。
 - **已知限制：** Hermes 公开 API 没有同来源标题写的原子 CAS，llm→llm 存在极小的竞态窗口。实现负责缩小和检测，不宣称绝对原子。
 
 </details>
@@ -83,7 +83,7 @@ git clone https://github.com/Vocllum/hermes-auto-titler
 cp hermes-auto-titler/config.yaml.example hermes-auto-titler/config.yaml
 ```
 
-允许插件使用自己的评估模型（可选但推荐）：
+默认情况下，插件复用 Hermes 内建的 `title_generation` 辅助任务，由宿主统一决定 provider/model。若要使用插件自己的自定义通道，可在插件配置中填写 `provider` 或 `model`；任一值存在时走显式 override。先配置对应权限：
 
 ```yaml
 # ~/.hermes/config.yaml
@@ -93,7 +93,9 @@ plugins:
   entries:
     hermes-auto-titler:
       llm:
+        allow_provider_override: true
         allow_model_override: true
+        allow_task_override: true
 ```
 
 重启 Hermes 后验证：
@@ -104,9 +106,9 @@ plugins:
 
 ### 用哪个模型？
 
-**默认零配置**——插件走 Hermes 宿主的正常模型路由，装完即用。
+**Hermes 辅助模式（默认）**——保持 `provider` 和 `model` 为空。插件调用 Hermes 内建的 `title_generation` 任务，由 Hermes 的 `auxiliary.title_generation.provider` / `model` 统一解析标题模型。
 
-想把标题评估固定到更便宜（或免费）的模型，在 `~/.hermes/plugins/hermes-auto-titler/config.yaml` 里设两个键：
+**插件自定义模式（可选）**——在 `~/.hermes/plugins/hermes-auto-titler/config.yaml` 里填写 `provider` 和 `model`，使用插件显式指定的通道：
 
 ```yaml
 # ~/.hermes/plugins/hermes-auto-titler/config.yaml
@@ -114,9 +116,9 @@ provider: "你的-provider"   # 你 ~/.hermes 配置里已有的 provider 名（
 model: "你的模型名"         # 你的 Hermes 能访问到的任意模型
 ```
 
-- `provider` / `model` 指的是**你在 Hermes 里已经配好的条目**——插件自己不收 API key，认证始终留在宿主配置里。
-- 固定通道只用于标题评估；主对话用你自己的模型，互不影响。
-- 上面的 `allow_model_override: true` 就是允许插件使用与宿主不同模型的开关；不开的话插件静默回退宿主模型。
+- Hermes 辅助模式需要 `allow_task_override: true`，它授权插件借用内建的 `title_generation` 任务。
+- 插件自定义模式中的 `provider` / `model` 指的是**你在 Hermes 里已经配好的条目**——插件自己不收 API key，认证始终留在宿主配置里；`allow_provider_override: true` 与 `allow_model_override: true` 授权这些显式 override。
+- 选中的通道只用于标题评估；主对话用你自己的模型，互不影响。override 被 Hermes 拒绝时，插件会安全保留当前标题。
 - 不确定名字对不对？重启后 `/autotitler status` 会显示当前生效的 provider/model。
 
 **要求：** Python ≥ 3.11 · 较新的 Hermes Agent（老宿主缺 API 时按能力探测降级）。
@@ -145,8 +147,8 @@ model: "你的模型名"         # 你的 Hermes 能访问到的任意模型
 | `summary_preview_chars` | `1200` | 日常评估的压缩摘要预算。 |
 | `retitle_summary_chars` | `12000` | 批量重命名的更大摘要预算。 |
 | `title_style` | `concise` | `concise` = 主体标签 · `complete` = 事件梗概。 |
-| `strategy` | `conservative` | 明显失配才改（`aggressive` 每次都优化）。 |
-| `provider` / `model` | `""` / `""` | 固定评估通道；留空走宿主默认路由。 |
+| `strategy` | `conservative` | 明显失配才改；`aggressive` 在确需改名时更重视最近主题。 |
+| `provider` / `model` | `""` / `""` | 留空 = Hermes `auxiliary.title_generation`；填写任一项 = 插件自定义通道。 |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔。 |
 | `max_title_length` / `max_display_width` | `24` / `40` | 字符数与侧边栏列宽硬限（12 字符软目标）。 |
 | `rename_confirmations` | `1` | 评审协议：≥2 时 llm→llm 改名先挂起为候选，下一次评估裁决（approve 落库 / rename 换新 / keep 放弃；1=关闭，最大 5）。 |

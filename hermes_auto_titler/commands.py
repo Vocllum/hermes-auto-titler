@@ -42,7 +42,8 @@ def make_handler(titler) -> Callable[[str], str]:
             c = titler.cfg
             return (
                 f"autotitler: {'enabled' if c['enabled'] else 'disabled'}"
-                f" | every {c['every_n_turns']} turns | early_turn_eval={c['early_turn_eval']}"
+                f" | every {c['every_n_turns']} turns | first_title={c.get('first_title_mode', 'builtin')}"
+                f" | early_turn_eval={c['early_turn_eval']}"
                 f" | on_close={c['on_close']}"
                 f" | recent {c['recent_turns']} turns | all_user_msgs={c['include_all_user_messages']}"
                 f" | strategy={c['strategy']}"

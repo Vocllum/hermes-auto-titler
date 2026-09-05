@@ -385,9 +385,46 @@ def test_finalize_respects_on_close_disabled():
     assert ctx.llm.calls == []
 
 
-def test_early_turn_eval_submits_early_turns(recording_threads):
+def test_first_title_mode_builtin_suppresses_early(recording_threads):
+    # builtin：即使旧 early_turn_eval=true，首轮也不抢（首标题归内建）
     db = FakeDB(messages=MSGS, title=None)
-    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "early_turn_eval": True})
+    t, _ = make_titler(db, text=_dec("keep"), cfg={
+        "every_n_turns": 3, "early_turn_eval": True, "first_title_mode": "builtin",
+    })
+    t.on_session_end(session_id="s1", completed=True)  # n=1
+    t.on_session_end(session_id="s1", completed=True)  # n=2
+    assert len(recording_threads.instances) == 0
+    t.on_session_end(session_id="s1", completed=True)  # n=3 正常边界仍评估
+    assert len(recording_threads.instances) == 1
+
+
+def test_first_title_mode_plugin_takes_first_turn(recording_threads):
+    # plugin：第 1 轮就接管（等价旧 early=true）
+    db = FakeDB(messages=MSGS, title=None)
+    t, _ = make_titler(db, text=_dec("keep"), cfg={
+        "every_n_turns": 3, "early_turn_eval": False, "first_title_mode": "plugin",
+    })
+    t.on_session_end(session_id="s1", completed=True)  # n=1 < 3 → 提交
+    run_recorded(recording_threads)
+    assert len(recording_threads.instances) == 1
+
+
+def test_first_title_mode_config_validation(tmp_path):
+    from hermes_auto_titler.config import DEFAULTS, load_config
+
+    assert DEFAULTS["first_title_mode"] == "builtin"
+    p = tmp_path / "config.yaml"
+    p.write_text("first_title_mode: plugin\n", encoding="utf-8")
+    assert load_config(path=p)["first_title_mode"] == "plugin"
+    p.write_text("first_title_mode: bogus\n", encoding="utf-8")
+    assert load_config(path=p)["first_title_mode"] == "builtin"  # 非法回退默认
+
+
+def test_early_turn_eval_submits_early_turns(recording_threads):
+    # 旧开关兼容：未配 first_title_mode 时默认 builtin 会压住 early；
+    # 此处显式切 plugin 还原旧行为
+    db = FakeDB(messages=MSGS, title=None)
+    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "early_turn_eval": True, "first_title_mode": "plugin"})
     t.on_session_end(session_id="s1", completed=True)  # n=1 < 3 → 提交
     run_recorded(recording_threads)  # 完成评估（清 in-flight）
     t.on_session_end(session_id="s1", completed=True)  # n=2 < 3 → 提交
@@ -405,7 +442,7 @@ def test_early_turn_eval_submits_early_turns(recording_threads):
 
 def test_early_turn_eval_noop_when_every_n_is_one(recording_threads):
     db = FakeDB(messages=MSGS, title=None)
-    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 1, "early_turn_eval": True})
+    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 1, "early_turn_eval": True, "first_title_mode": "plugin"})
     for _ in range(4):
         t.on_session_end(session_id="s1", completed=True)
         run_recorded(recording_threads)
@@ -414,7 +451,7 @@ def test_early_turn_eval_noop_when_every_n_is_one(recording_threads):
 
 def test_early_turns_still_throttled_by_min_interval(recording_threads):
     db = FakeDB(messages=MSGS, title=None)
-    t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 5, "early_turn_eval": True})
+    t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 5, "early_turn_eval": True, "first_title_mode": "plugin"})
     t.on_session_end(session_id="s1", completed=True)  # n=1 → 提交
     run_recorded(recording_threads)  # 评估 #1
     assert len(ctx.llm.calls) == 1
@@ -468,6 +505,22 @@ def test_malformed_model_output_keeps():
     t, _ = make_titler(db, text="抱歉，我无法完成这个请求。")
     r = t.evaluate("s1", force=True)
     assert r["action"] == "keep"
+
+
+def test_blind_untitled_keep_is_reported_as_failed():
+    db = FakeDB(messages=MSGS, title=None, source=None)
+    t, _ = make_titler(db, text=_dec("keep"))
+    r = t.evaluate("s1", force=True, blind=True)
+    assert r["action"] == "failed"
+    assert "new title" in r["reason"]
+
+
+def test_blind_untitled_rename_is_still_written():
+    db = FakeDB(messages=MSGS, title=None, source=None)
+    t, _ = make_titler(db, text=_dec("rename", "Test 空转排查"))
+    r = t.evaluate("s1", force=True, blind=True)
+    assert r["action"] == "renamed"
+    assert db.title == "Test 空转排查"
 
 
 def test_derived_rename_uses_atomic_set_auto_title():
@@ -647,8 +700,8 @@ def test_short_derived_title_is_provisional_and_forces_model_upgrade():
     t, ctx = make_titler(db, text=_dec("keep"))
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
-    assert "provisional deterministic fallback" in system
-    assert "action MUST be rename" in system
+    assert "临时首句标题" in system
+    assert "必须" in system and "rename" in system
 
 
 def test_title_generation_uses_zero_temperature():
@@ -674,25 +727,18 @@ def test_generate_blind_omits_current_title_and_forces_rename():
     assert (action, title) == ("rename", "新标题")
     system = ctx.llm.calls[0]["messages"][0]["content"]
     user_prompt = ctx.llm.calls[0]["messages"][1]["content"]
-    assert "MUST be rename" in system or "must be rename" in system.lower()
+    assert "action 必须为 rename" in system
     assert "truncated auto-generated" not in system  # 不是 derived 截断文案
-    assert "largest share" in system
-    assert "earliest sustained" not in system
-    assert "final validation, cleanup, or parameter tuning" in system
-    assert "dominant language" in system
-    assert "express them in that language" in system
-    assert "natural word order" in system
-    assert "established display name and standard spacing" in system
-    assert "reference symbols such as '#'" in system
-    assert "Never abbreviate, clip, or leave a word or phrase incomplete" in system
-    assert "full hard budget for a complete label" in system
-    assert "ordinary task, action, and topic words" in system
-    assert "ingest, deploy, config, fix, plugin, and update" in system
-    assert "do not invent a topic" in system
-    assert "byte-for-byte" in system
-    assert "hyphens" in system
-    assert "Current title:" not in user_prompt  # 原标题不喂给模型
-    assert "Opening (" in user_prompt
+    assert "主体名词" in system
+    assert "临时措施" in system
+    assert "主要语言" in system
+    assert "不确定的名称不要猜" in system
+    assert "自然语序" in system
+    assert "保留原文" in system
+    assert "当前标题：" not in user_prompt  # 原标题不喂给模型
+    assert "开头内容" in user_prompt
+    assert "标题要包含" in system
+    assert "不能只有动作词" in system
 
 
 def test_default_limit_preserves_literal_repository_identifier_and_intent():
@@ -720,10 +766,10 @@ def test_generate_blind_renders_summary_as_primary_historical_context():
     )
     assert (action, title) == ("rename", "X 项目开发")
     prompt = ctx.llm.calls[0]["messages"][1]["content"]
-    opening_block = prompt.split("Opening (", 1)[1].split("Earlier history summary", 1)[0]
+    opening_block = prompt.split("可见开头", 1)[1].split("历史摘要", 1)[0]
     assert "Session Arc Summary" not in opening_block
-    assert "Earlier history summary (primary historical context" in prompt
-    assert "weak hint" not in prompt
+    assert "历史摘要" in prompt
+    assert "弱提示" not in prompt
     assert "Session Arc Summary" in prompt
 
 
@@ -746,15 +792,14 @@ def test_generate_nonblind_with_summary_anchors_subject_on_summary():
     assert (action, title) == ("rename", "账号体系注册运营")
     system = ctx.llm.calls[0]["messages"][0]["content"]
     user_prompt = ctx.llm.calls[0]["messages"][1]["content"]
-    # 有摘要时：opening 标记为局部续段，不再自称 primary subject source
-    assert "Visible opening (top of the visible message window" in user_prompt
-    assert "NOT the original session opening" in user_prompt
-    assert "Opening (the session's starting turns" not in user_prompt
-    # 摘要标记为历史主题锚点，不再是 weak hint
-    assert "historical subject anchor" in user_prompt
-    assert "weak hint" not in user_prompt
-    # hierarchy 含压缩会话锚定规则（system 侧）
-    assert "compacted session the earlier history summary anchors the subject" in system
+    # 有摘要时：opening 标记为局部续段，摘要提供历史主线
+    assert "可见开头" in user_prompt
+    assert "历史摘要" in user_prompt
+    assert "开头内容（用于识别会话主体和主线）" not in user_prompt
+    assert "历史摘要（原始开头已被压缩；用于识别更早的主线）" in user_prompt
+    assert "弱提示" not in user_prompt
+    assert "压缩后的局部续段" in user_prompt
+    assert "标题要包含" in system
 
 
 def test_generate_uses_hermes_title_generation_task():
@@ -793,8 +838,9 @@ def test_evaluate_blind_with_summary_keeps_user_continuation_but_omits_assistant
     assert result["action"] == "renamed"
     prompt = ctx.llm.calls[0]["messages"][1]["content"]
     assert "Hermes 自动标题插件开发" in prompt
-    assert "Post-summary user continuation" in prompt
+    assert "摘要之后的用户消息" in prompt
     assert "后续持续转向 WSP 搜索配置" in prompt
+    assert "用户:" in prompt
     assert "参数已调整" not in prompt
 
 
@@ -858,7 +904,7 @@ def test_retitle_all_skips_user_and_uses_blind():
     # blind：prompt 里没有当前标题（只有 s1 会调模型）
     assert len(ctx.llm.calls) == 1
     for call in ctx.llm.calls:
-        assert "Current title:" not in call["messages"][1]["content"]
+        assert "当前标题：" not in call["messages"][1]["content"]
 
 
 def test_retitle_all_skips_user_and_dry_run():
@@ -943,6 +989,16 @@ def test_auxiliary_usage_noop_without_api():
 
 
 # -- 命令与生命周期注册 -------------------------------------------------------
+
+def test_status_includes_first_title_mode():
+    from hermes_auto_titler.commands import make_handler
+
+    db = FakeDB(messages=MSGS)
+    t, _ = make_titler(db, cfg={"first_title_mode": "builtin"})
+    out = make_handler(t)("status")
+    assert "first_title=builtin" in out
+    assert "provider=(host default)" in out
+
 
 def test_status_includes_early_turn_eval():
     from hermes_auto_titler.commands import make_handler
@@ -1059,7 +1115,7 @@ class BrokenSourceDB(FakeDB):
 
 
 def _early_titler(db, **cfg):
-    return make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "early_turn_eval": True, **cfg})
+    return make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "early_turn_eval": True, "first_title_mode": "plugin", **cfg})
 
 
 def test_early_gate_untitled_submits(recording_threads):
@@ -1523,7 +1579,7 @@ def test_review_prompt_shows_proposed_title_and_approve_contract():
     t.evaluate("s1", force=True)
     second_system = ctx.llm.calls[1]["messages"][0]["content"]
     second_user = ctx.llm.calls[1]["messages"][1]["content"]
-    assert "Proposed title" in second_user
+    assert "候选标题：" in second_user
     assert "新标题" in second_user
     assert "approve" in second_system
 
@@ -1577,19 +1633,22 @@ def test_user_race_during_confirmation_clears_pending():
 # -- 提示词防漂移规范 ------------------------------------------------------------
 
 def test_prompt_contains_stability_rules_on_normal_eval():
-    # 日常评估注入稳定性规则；盲改（终局）不注入
+    # 日常评估和盲改都使用精简中文提示词；盲改只允许 rename。
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t, ctx = make_titler(db)
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
-    assert "Stability rules" in system
-    assert "MULTIPLE later user requests" in system
+    assert "当前标题仍能概括全文则 keep" in system
+    assert "最近子任务" in system
+    assert "多个后续用户请求持续转向" in system
+    assert "只返回一个 JSON 对象" in system
 
     db2 = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t2, ctx2 = make_titler(db2)
     t2.evaluate("s1", force=True, blind=True)
     blind_system = ctx2.llm.calls[0]["messages"][0]["content"]
-    assert "Stability rules" not in blind_system
+    assert '格式：{"action":"rename","title":"..."}' in blind_system
+    assert "action 必须为 rename" in blind_system
 
 
 def test_prompt_conservative_rule_prefers_keep_when_uncertain():
@@ -1597,7 +1656,7 @@ def test_prompt_conservative_rule_prefers_keep_when_uncertain():
     t, ctx = make_titler(db)
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
-    assert "When uncertain, keep" in system
+    assert "两者都合理时 keep" in system
 
 
 # -- 评审协议解析与契约 ------------------------------------------------------------

@@ -143,7 +143,7 @@ class AutoTitler:
         if n % every == 0:
             self._submit_eval(session_id)
         elif (
-            self.cfg.get("early_turn_eval", False)
+            self._early_enabled()
             and n < every
             and self._early_eligible(session_id)
         ):
@@ -162,6 +162,15 @@ class AutoTitler:
         self._close_eval(session_id)
 
     # -- 评估调度 -----------------------------------------------------------
+
+    def _early_enabled(self) -> bool:
+        """首轮命名一键开关：plugin=插件第 1 轮接管；builtin=首轮归内建。
+
+        plugin 等价旧 early_turn_eval=true；builtin 下 early_turn_eval 被强制
+        视为关闭（首标题只走内建 title_generation，正常轮次/关闭评估不变）。
+        未知值保守按 builtin 处理（不抢首轮）。
+        """
+        return str(self.cfg.get("first_title_mode", "builtin")) == "plugin"
 
     def _early_eligible(self, session_id: str) -> bool:
         """early_turn_eval 的来源门：只对无标题或 derived 来源的会话提前评估。
@@ -354,8 +363,14 @@ class AutoTitler:
             return {"action": "keep"}
 
         if action != "rename" or not candidate or candidate == current:
-            # keep：模型否决了之前的候选 → 清空 pending
+            # 盲改是显式的重生成请求：无原标题时模型不得用 keep 伪装成成功。
+            # 记录为失败供批处理闭环统计，避免把缺标题误报为 keep；不自动
+            # 再调一次模型，防止语义失败触发重试风暴。
             self._pending.pop(session_id, None)
+            if blind and not current:
+                reason = "blind generation did not return a new title"
+                log.warning("auto-titler %s: %s", session_id[:12], reason)
+                return {"action": "failed", "reason": reason}
             log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)
             return {"action": "keep"}
 
@@ -418,244 +433,67 @@ class AutoTitler:
         earlier_summary: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> Tuple[str, Optional[str]]:
-        strategy = self.cfg.get("strategy", "conservative")
-        stability = ""  # 盲改不注入稳定性规则（终局评估以内容为准）
-        if blind:
-            # retitle-all 盲改：不提供原标题，直接按内容重新命名
-            rule = (
-                "Generate the best title directly from the conversation "
-                "content (the current title is NOT provided); action MUST "
-                "be rename. Name the subject or combination of subjects that "
-                "explains the largest share of the session's substantive user "
-                "requests and completed work. Judge dominance by coverage and "
-                "sustained intent, not by where a topic appears in time. Do not title "
-                "the session after final validation, cleanup, or parameter tuning "
-                "unless that work is the session's entire subject."
-            )
-        elif proposed and not blind:
-            # 评审模式：裁决上一轮评估提出的候选标题
-            rule = (
-                "A candidate title was proposed at a previous evaluation and is "
-                "shown below as the Proposed title. Judge it against the full "
-                "conversation: action \"approve\" if it is already the best "
-                "summary as-is; \"rename\" with a better title if it misses the "
-                "main subject or is wrong; \"keep\" if the current title is fine "
-                "and the proposal is not an improvement. Replacing an accurate "
-                "current title with a narrower or less complete proposal is not "
-                "an improvement."
-            )
-        elif strategy == "aggressive":
-            rule = (
-                "Rename whenever your title is better. "
-                "The opening main task always outranks the latest subtask."
-            )
-        else:
-            rule = (
-                "Rename only when the current title no longer summarizes "
-                "the conversation as a whole. When uncertain, keep."
-            )
-        if force_rename and not blind:
-            rule += (
-                " The current title is a provisional deterministic fallback "
-                "copied from the first user message, not a model title; "
-                "action MUST be rename."
-            )
-
-        if blind:
-            hierarchy = (
-                "\nInformation hierarchy:\n"
-                "- Use the whole available history. The opening, latest phase, and "
-                "current blocker are evidence, not automatic winners.\n"
-                "- In a compacted session, the earlier summary is a historical "
-                "baseline and may predate a later phase.\n"
-                "- A post-summary continuation may supersede or extend that baseline "
-                "only when multiple substantive user requests establish a sustained "
-                "topic shift.\n"
-                "- One-off follow-ups, current blockers, validation, cleanup, and "
-                "parameter tuning remain details even when they are the latest messages.\n"
-            )
-            multi_subject_rule = (
-                "- When multiple phases are each substantial, prefer one precise shared "
-                "umbrella only if it truthfully covers them; otherwise name up to two "
-                "major subjects within the full length budget. A single task involving "
-                "several core entities (sites, products, repositories, machines) should "
-                "name them all.\n"
-            )
-        else:
-            hierarchy = (
-                "\nInformation hierarchy:\n"
-                "- Subject comes from the session opening (or the earlier "
-                "history summary when the original opening was compacted away); "
-                "it is the main topic the session started about. A device or "
-                "entity that appears only in the final turns is detail, not "
-                "the subject.\n"
-                "- Main intent comes from the user-message trajectory.\n"
-                "- Recent turns show the latest event, current state, or a "
-                "genuine topic shift; they must never define the subject by "
-                "themselves.\n"
-                "- Interim tools, temporary measures, and final validation, cleanup, "
-                "or parameter tuning do not define the subject even when they are "
-                "the latest messages.\n"
-                "- In a compacted session the earlier history summary anchors the "
-                "subject; the visible opening is only a local continuation after it "
-                "and must not replace the summary as the main through-line.\n"
-            )
-            stability = (
-                "\nStability rules:\n"
-                "- The subject changes ONLY for a sustained topic shift confirmed by "
-                "MULTIPLE later user requests. A single recent user message, however "
-                "specific, is a subtask unless it opens an entirely new long-running "
-                "effort.\n"
-                "- If several subjects each have substantial coverage, prefer a title "
-                "that covers them together; changing an existing accurate title to a "
-                "narrower one is drift, not improvement.\n"
-                "- Keep identifiers already present in the current title when they are "
-                "still part of the conversation's subject (for example repository or "
-                "product names); dropping them loses retrievability.\n"
-                "- Prefer keep over rename when both options would be defensible: a "
-                "title that is still broadly correct must not be replaced by one that "
-                "is only marginally different.\n"
-            )
-            multi_subject_rule = (
-                "- When the conversation has two distinct tasks, name both "
-                "entities even if it uses the full length budget. When one task "
-                "involves several core entities (sites, products, repositories, "
-                "machines), name them all rather than keeping only the most recent "
-                "or most prominent one.\n"
-            )
-
-        # 标题风格：concise = 主体标签（Subject + 最小区分意图）/ complete =
-        # 简短事件梗概（Subject + 主要意图/事件）。信息类型是第一约束，
-        # 长度只是护栏（12 为目标、max_title_length 为硬上限）。
         max_title_len = int(self.cfg.get("max_title_length", 24))
         style = self.cfg.get("title_style", "concise")
-        if style == "complete":
-            style_req = (
-                "SUMMARY STYLE: briefly describe what the conversation is "
-                "mainly about. Preserve the main subject and the most "
-                "important intent, event, or correction."
-            )
-        else:
-            style_req = (
-                "LABEL STYLE: name the conversation. Identify its main "
-                "subject and only the minimum intent needed to distinguish "
-                "it. Do not retell what happened."
-            )
-        # JSON 契约：评审模式（有待审候选）增加 approve 动作
-        contract = (
-            '{"action":"keep"|"approve"|"rename","title":"..."}\n'
-            if proposed and not blind
-            else '{"action":"keep"|"rename","title":"..."}\n'
+        style_req = (
+            "主题概括：保留主体和最重要的意图。"
+            if style == "complete"
+            else "简洁标签：主体，加上区分所需的最少意图。"
         )
+        if blind:
+            contract = '{"action":"rename","title":"..."}'
+            decision = (
+                "当前标题不会提供给你。请直接根据会话内容生成新标题，action 必须为 rename。"
+            )
+        elif proposed:
+            contract = '{"action":"keep"|"approve"|"rename","title":"..."}'
+            decision = (
+                "请比较当前标题和候选标题：候选最佳则 approve；候选不准则 rename 并给出新标题；"
+                "当前标题更好则 keep。"
+            )
+        elif force_rename:
+            contract = '{"action":"keep"|"rename","title":"..."}'
+            decision = "当前标题只是临时首句标题，必须根据完整会话生成新标题，action 必须为 rename。"
+        else:
+            contract = '{"action":"keep"|"rename","title":"..."}'
+            decision = "当前标题仍能概括全文则 keep；不能概括主线才 rename；两者都合理时 keep。"
+
         system = (
-            "You maintain concise titles for Hermes conversations.\n"
-            "Return JSON only:\n"
-            f"{contract}"
-            f"\n{rule}\n"
-            f"\n{style_req}\n"
-            f"{hierarchy}"
-            f"{stability if not blind else ''}"
-            "\nRules:\n"
-            f"- Length is a guardrail, not the goal: aim for at most 12 "
-            f"characters; never exceed {max_title_len} (Chinese and Latin "
-            "each count as 1 character).\n"
-            "- Never abbreviate, clip, or leave a word or phrase incomplete to meet the "
-            "12-character target; use the full hard budget for a complete label.\n"
-            "- Use the dominant language of the user's substantive messages for all ordinary "
-            "task, action, and topic words. Generic English technical words such as ingest, "
-            "deploy, config, fix, plugin, and update are not identifiers; when the dominant "
-            "language is not English, express them in that language. Preserve proper product "
-            "names and explicit literal identifiers as-is.\n"
-            "- Use the natural word order and idiomatic phrasing of the dominant language; "
-            "do not mirror the word order of another language.\n"
-            "- Spacing is mandatory: insert exactly one half-width space at every boundary "
-            "between CJK characters and Latin letters or digits, on both sides of every "
-            "Latin word or run in a mixed-language title. A missing space there is a "
-            "formatting error even when the words are correct.\n"
-            "- Product and brand names use their established display casing in running text "
-            "(each significant part capitalized), not the spelling of config keys, package "
-            "names, domains, or CLI commands; treat a lowercase form as an identifier only "
-            "when the conversation refers to that literal artifact (a path, command, "
-            "package spec, or file), otherwise render the display name.\n"
-            "- If you are not certain of a product name's canonical display spelling, do "
-            "NOT guess or invent one: express that item in the dominant language (or omit "
-            "it) instead.\n"
-            "- A final spelling check is mandatory: normalize every plain-language product "
-            "and technical term to its established display name and standard spacing, keep "
-            "standard spacing around numbers and reference symbols such as '#', and never "
-            "merge adjacent Latin names.\n"
-            "- Preserve every explicit literal repository, package, file, or command "
-            "identifier byte-for-byte, including hyphens, underscores, dots, spacing, "
-            "and case (for example hermes-auto-titler). Never shorten or respell it to "
-            "meet the 12-character target; use the full hard length budget when needed.\n"
-            f"{multi_subject_rule}"
-            "- No trailing punctuation, no quotes.\n"
-            "- When the conversation has almost no substantive content, produce the shortest "
-            "accurate label for what is actually there; do not invent a topic.\n"
-            'Reply with JSON only.'
+            "你负责维护 Hermes 会话标题。只返回一个 JSON 对象，不要输出解释。\n"
+            f"格式：{contract}\n{decision}\n{style_req}\n"
+            "标题要包含可识别的主体名词或明确实体，不能只有动作词。"
+            "以会话开头确立的主线为基调；最近子任务、临时措施和收尾验证不能单独改变主体。"
+            "只有多个后续用户请求持续转向新主题时才换主体。\n"
+            "使用用户实质消息的主要语言；产品名、项目名、仓库名、文件名、命令和明确标识符保留原文。"
+            "使用自然语序和标准中英文空格；不确定的名称不要猜；标题不加引号和结尾标点。\n"
+            f"目标约 12 个字符，不能超过 {max_title_len} 个字符；不能为凑短删掉关键主体或标识符。"
         )
 
         lines = []
         if not blind:
-            lines.append(f"Current title: {current or '(none)'}")
+            lines.append(f"当前标题：{current or '（无）'}")
             if proposed:
-                lines.append(f"Proposed title: {proposed}")
+                lines.append(f"候选标题：{proposed}")
             lines.append("")
-        if earlier_summary and not blind:
-            # 压缩会话日常评估：可见窗口开头是摘要之后的局部续段，不是原始
-            # opening。摘要锚定主题；局部工具操作与最近轮次不得推翻它。
-            # （盲改路径保留原标记：摘要已是 primary，opening 语义由 blind
-            # hierarchy 的 supersede 规则约束。）
-            lines.append(
-                "Visible opening (top of the visible message window; in a "
-                "compacted session this is a local continuation AFTER the "
-                "earlier summary, NOT the original session opening — the "
-                "earlier summary is the subject anchor):"
-            )
+        if earlier_summary:
+            lines.append("可见开头（压缩后的局部续段）：")
         else:
-            lines.append(
-                "Opening (the session's starting turns; the main through-line "
-                "anchor; primary subject source):"
-            )
+            lines.append("开头内容（用于识别会话主体和主线）：")
         for role, text in opening:
             lines.append(f"{role}: {text}")
         if earlier_summary:
-            lines.append("")
-            if blind:
-                lines.append(
-                    "Earlier history summary (primary historical context and historical "
-                    "baseline because the original opening is unavailable; it may predate "
-                    "a sustained post-summary continuation):"
-                )
-            else:
-                lines.append(
-                    "Earlier history summary (historical subject anchor — the original "
-                    "opening was compacted away; the session's main through-line comes "
-                    "from here. Local tool operations and the latest turns must not "
-                    "override it; only a sustained new user task can shift the subject):"
-                )
-            lines.append(earlier_summary)
-        lines.append("")
-        lines.append(
-            "Recent (the latest turns; the current event, state, or a genuine "
-            "topic shift — never the subject by itself):"
-        )
+            lines.extend([
+                "",
+                "历史摘要（原始开头已被压缩；用于识别更早的主线）：",
+                earlier_summary,
+            ])
+        lines.extend(["", "最近内容（用于判断当前状态或是否真正转题）："])
         for role, text in recent:
             lines.append(f"{role}: {text}")
         if all_user:
-            lines.append("")
-            if blind and earlier_summary:
-                lines.append(
-                    f"Post-summary user continuation ({len(all_user)} user messages; "
-                    "newer than the historical summary):"
-                )
-            else:
-                lines.append(
-                    "User-message trajectory (how the conversation evolved; "
-                    "the main intent source):"
-                )
+            lines.extend(["", f"{('摘要之后的用户消息' if blind and earlier_summary else '用户意图轨迹')}（用于判断持续意图）："])
             for _, text in all_user:
-                lines.append(f"user: {text}")
+                lines.append(f"用户: {text}")
         user_prompt = "\n".join(lines)
 
         try:

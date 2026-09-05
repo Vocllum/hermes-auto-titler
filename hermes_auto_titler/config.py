@@ -16,6 +16,9 @@ DEFAULTS: dict[str, Any] = {
     "every_n_turns": 4,
     "on_close": True,
     "early_turn_eval": False,
+    # 首轮命名一键开关：builtin=插件首轮不抢（early 强制失效，首标题归内建；
+    # 正常轮次/关闭评估不受影响）；plugin=插件第 1 轮就接管（等价 early_turn_eval=true）。
+    "first_title_mode": "builtin",
     "recent_turns": 2,
     "opening_turns": 2,
     "ignore_model_messages": False,
@@ -46,6 +49,7 @@ DEFAULTS: dict[str, Any] = {
 
 VALID_STRATEGIES = {"conservative", "aggressive"}
 VALID_STYLES = {"concise", "complete"}
+VALID_FIRST_TITLE_MODES = {"builtin", "plugin"}
 
 _TRUE_STRINGS = {"true", "1", "yes", "on"}
 _FALSE_STRINGS = {"false", "0", "no", "off"}
@@ -114,6 +118,12 @@ def coerce_value(key: str, raw: Any) -> Any:
             if raw not in VALID_STYLES:
                 raise ValueError(
                     f"invalid title_style {raw!r} (expected one of {sorted(VALID_STYLES)})"
+                )
+            v = raw
+        elif key == "first_title_mode":
+            if raw not in VALID_FIRST_TITLE_MODES:
+                raise ValueError(
+                    f"invalid first_title_mode {raw!r} (expected one of {sorted(VALID_FIRST_TITLE_MODES)})"
                 )
             v = raw
         else:

@@ -375,6 +375,7 @@ def test_config_sanitizes_bad_values(tmp_path):
 def test_config_has_new_keys(tmp_path):
     cfg = load_config(path=tmp_path / "missing.yaml")
     assert cfg["early_turn_eval"] is False
+    assert cfg["first_title_mode"] == "builtin"
     assert cfg["retitle_summary_chars"] == 12000
 
 

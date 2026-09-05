@@ -57,16 +57,20 @@ on_session_end
 
 `every_n_turns=N` 表示每 N 个真实完成的前台回合评估一次。计数仅存在于当前进程，重启后从零开始；它不是业务状态，不需要持久化。
 
-### Early 评估
+### Early 评估（一键开关 `first_title_mode`）
 
-`early_turn_eval=true` 只让无标题或 `derived` 来源的会话在周期边界前获得一次升级机会：
+`first_title_mode=plugin` 时插件第 1 轮就接管全上下文命名（等价旧
+`early_turn_eval=true`）；`builtin`（默认）时首轮归内建 `title_generation`，
+插件 early 强制失效，只从正常周期/关闭评估开始维护：
 
 - `user`、`llm` 和非空 legacy `NULL provenance` 不触发 early 调用；
 - 正常周期边界仍按 `every_n_turns` 工作；
 - 仍受 `min_interval_minutes` 和 in-flight 去重约束；
 - `every_n_turns=1` 时没有额外效果。
 
-默认关闭，避免把一次显式 opt-in 偷换成 `every_n_turns=1` 的隐式语义。
+默认 `builtin`，避免首轮内建（~150 token，只看首条消息）与插件全上下文
+（~1500 token）重复调用；旧 `early_turn_eval` 保留兼容，`plugin` 模式下
+等价 true，`builtin` 模式下强制失效。
 
 ### 关闭评估
 

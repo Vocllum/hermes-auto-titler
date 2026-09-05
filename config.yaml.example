@@ -2,7 +2,8 @@
 enabled: true
 every_n_turns: 4
 on_close: true
-early_turn_eval: false  # true 时未达 every_n_turns 的已完成前台轮次仅对无标题/derived 来源会话提前评估（llm/user/legacy 不提前；正常轮数边界不受影响；受 min_interval_minutes 节流；every_n_turns=1 无额外效果）
+early_turn_eval: false  # 旧开关（保留兼容）：first_title_mode=plugin 时等价 true；builtin 时强制失效
+first_title_mode: builtin  # 首轮命名一键开关：builtin=首轮归内建（插件不抢，省一次全上下文调用）；plugin=插件第1轮就接管全上下文命名
 recent_turns: 2
 opening_turns: 2
 ignore_model_messages: false

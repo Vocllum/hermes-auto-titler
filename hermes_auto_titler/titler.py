@@ -384,6 +384,23 @@ class AutoTitler:
 
         return self._commit_rename(db, session_id, candidate)
 
+    @staticmethod
+    def _language_rule() -> str:
+        """Use the host-normalized title locale, falling back to display.language."""
+        try:
+            from hermes_cli.config import load_config_readonly
+            root = load_config_readonly() or {}
+            aux = root.get("auxiliary") or {}
+            title_cfg = aux.get("title_generation") or {}
+            configured = str(title_cfg.get("language") or "").strip()
+            from agent.i18n import get_language, _normalize_lang
+            raw = _normalize_lang(configured) if configured else get_language()
+            if raw:
+                return f"标题必须使用 Hermes 当前界面语言，语言代码为 {raw}；不要改用其他语言。"
+        except Exception:
+            pass
+        return "使用用户实质消息的主要语言；"
+
     def _commit_rename(self, db: SessionDB, session_id: str, title: str) -> Dict[str, Any]:
         """频次上限检查 + 实际写库 + 记账。title 必须是已 _prepare_candidate 的候选。
 
@@ -464,7 +481,8 @@ class AutoTitler:
             "标题要包含可识别的主体名词或明确实体，不能只有动作词。"
             "以会话开头确立的主线为基调；最近子任务、临时措施和收尾验证不能单独改变主体。"
             "只有多个后续用户请求持续转向新主题时才换主体。\n"
-            "使用用户实质消息的主要语言；产品名、项目名、仓库名、文件名、命令和明确标识符保留原文。"
+            f"{self._language_rule()}"
+            "产品名、项目名、仓库名、文件名、命令和明确标识符保留原文。"
             "使用自然语序和标准中英文空格；不确定的名称不要猜；标题不加引号和结尾标点。\n"
             f"目标约 12 个字符，不能超过 {max_title_len} 个字符；不能为凑短删掉关键主体或标识符。"
         )

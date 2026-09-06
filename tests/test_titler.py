@@ -704,6 +704,23 @@ def test_short_derived_title_is_provisional_and_forces_model_upgrade():
     assert "必须" in system and "rename" in system
 
 
+def test_generate_uses_display_language_for_title_instruction(monkeypatch):
+    db = FakeDB(messages=MSGS, title=None)
+    fake_i18n = types.ModuleType("agent.i18n")
+    fake_i18n.get_language = lambda: "zh"
+    setattr(fake_i18n, "_normalize_lang", lambda value: value.strip().lower().split("-", 1)[0] or "en")
+    monkeypatch.setitem(sys.modules, "agent.i18n", fake_i18n)
+    t, ctx = make_titler(db, text=_dec("rename", "中文标题"))
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config_readonly",
+        lambda: {"display": {"language": "zh"}, "auxiliary": {"title_generation": {}}},
+    )
+    t.evaluate("s1", force=True)
+    system = ctx.llm.calls[0]["messages"][0]["content"]
+    assert "语言代码为 zh" in system
+    assert "不要改用其他语言" in system
+
+
 def test_title_generation_uses_zero_temperature():
     db = FakeDB(messages=MSGS, title=None)
     t, ctx = make_titler(db, text=_dec("keep"))
@@ -731,7 +748,7 @@ def test_generate_blind_omits_current_title_and_forces_rename():
     assert "truncated auto-generated" not in system  # 不是 derived 截断文案
     assert "主体名词" in system
     assert "临时措施" in system
-    assert "主要语言" in system
+    assert "语言代码为 zh" in system or "主要语言" in system
     assert "不确定的名称不要猜" in system
     assert "自然语序" in system
     assert "保留原文" in system

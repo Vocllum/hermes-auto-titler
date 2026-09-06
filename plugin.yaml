@@ -1,5 +1,5 @@
 name: hermes-auto-titler
-version: 1.1.0
+version: 0.1.1
 description: "Provenance-aware automatic session title maintenance"
 author: "Vocllum"
 provides_hooks:

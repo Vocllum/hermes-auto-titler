@@ -9,9 +9,13 @@ session DB，遵守标题来源优先级（用户手改的永不覆盖）。
 
 from __future__ import annotations
 
-from .config import load_config
+import logging
+
+from .config import disable_builtin_title_generation, load_config
 from .titler import AutoTitler
 from .commands import make_handler
+
+log = logging.getLogger(__name__)
 
 
 def register(ctx) -> None:
@@ -19,6 +23,19 @@ def register(ctx) -> None:
     cfg = load_config()
     titler = AutoTitler(ctx, cfg)
     if cfg.get("enabled", True):
+        if cfg.get("first_title_mode", "builtin") == "plugin":
+            try:
+                changed = disable_builtin_title_generation()
+                log.info(
+                    "hermes-auto-titler takeover mode: built-in title generation %s",
+                    "disabled" if changed else "already disabled",
+                )
+            except Exception:
+                log.warning(
+                    "hermes-auto-titler could not disable built-in title generation; "
+                    "plugin takeover may race the host titleer",
+                    exc_info=True,
+                )
         ctx.register_hook("on_session_end", titler.on_session_end)
         # 真实会话关闭/终局（CLI 退出、TUI 关闭、gateway 过期、/new）走 lifecycle
         # hook：正常节流（force=False），且不重复进行中的自动评估

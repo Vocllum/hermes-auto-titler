@@ -15,7 +15,7 @@
 
 非目标：
 
-- 不接管 Hermes 首轮标题生成。
+- 不在 `first_title_mode=builtin` 时接管 Hermes 首轮标题生成。
 - 不引入 embeddings、标题缓存数据库或多阶段评分管线。
 - 不自动升级旧的非空 `NULL provenance` 标题。
 - 不修改 Hermes 核心代码或新增桌面设置页。
@@ -62,6 +62,10 @@ on_session_end
 `first_title_mode=plugin` 时插件第 1 轮就接管全上下文命名（等价旧
 `early_turn_eval=true`）；`builtin`（默认）时首轮归内建 `title_generation`，
 插件 early 强制失效，只从正常周期/关闭评估开始维护：
+
+插件进入 `plugin` 模式时会通过 Hermes 的配置 API 自动关闭宿主
+`auxiliary.title_generation.enabled`，避免宿主先用首条消息生成另一个标题并与插件竞争。
+切回 `builtin` 不会替用户恢复或修改宿主设置；需要恢复时由用户显式开启。
 
 - `user`、`llm` 和非空 legacy `NULL provenance` 不触发 early 调用；
 - 正常周期边界仍按 `every_n_turns` 工作；

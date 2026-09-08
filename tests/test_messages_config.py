@@ -5,7 +5,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hermes_auto_titler.config import DEFAULTS, load_config, save_config
+from hermes_auto_titler.config import (
+    DEFAULTS,
+    disable_builtin_title_generation,
+    load_config,
+    save_config,
+)
 from hermes_auto_titler.messages import load_context, load_context_with_summary, message_text
 
 
@@ -377,6 +382,34 @@ def test_config_has_new_keys(tmp_path):
     assert cfg["early_turn_eval"] is False
     assert cfg["first_title_mode"] == "builtin"
     assert cfg["retitle_summary_chars"] == 12000
+
+
+def test_disable_builtin_title_generation_updates_host_config(monkeypatch):
+    host = {"auxiliary": {"title_generation": {"enabled": True, "model": "Free"}}}
+    saved = []
+    fake = type("HostConfig", (), {
+        "load_config": staticmethod(lambda: host),
+        "save_config": staticmethod(lambda cfg: saved.append(cfg)),
+    })
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+
+    assert disable_builtin_title_generation() is True
+    assert host["auxiliary"]["title_generation"]["enabled"] is False
+    assert saved == [host]
+    assert disable_builtin_title_generation() is False
+
+
+def test_disable_builtin_title_generation_creates_missing_sections(monkeypatch):
+    host = {}
+    saved = []
+    fake = type("HostConfig", (), {
+        "load_config": staticmethod(lambda: host),
+        "save_config": staticmethod(lambda cfg: saved.append(cfg)),
+    })
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+
+    assert disable_builtin_title_generation() is True
+    assert saved == [{"auxiliary": {"title_generation": {"enabled": False}}}]
 
 
 def test_config_coerces_bool_and_int_strings(tmp_path):

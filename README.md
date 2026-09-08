@@ -140,7 +140,7 @@ Example: route evaluations to a free community model while you chat with a front
 |---|---|---|
 | `enabled` | `true` | Master switch; `false` registers no hooks (zero overhead). Toggling at runtime needs a restart. |
 | `every_n_turns` | `4` | Evaluate every N completed foreground turns. |
-| `first_title_mode` | `builtin` | First-title switch: `builtin` = first round belongs to built-in (plugin skips early, saves one full-context call); `plugin` = plugin takes over from turn 1 with full context. |
+| `first_title_mode` | `builtin` | First-title switch: `builtin` = first round belongs to built-in (plugin skips early, saves one full-context call); `plugin` = plugin takes over from turn 1 with full context and automatically disables the host title generator to prevent a race. |
 | `early_turn_eval` | `false` | Legacy switch (kept for compat): equivalent to true in `plugin` mode, forced off in `builtin` mode. |
 | `on_close` | `true` | Evaluate on real session finalize/close (synchronous, throttled). |
 | `recent_turns` / `opening_turns` | `2` / `2` | Context windows in real user turns; each turn keeps the user message + last assistant reply. |

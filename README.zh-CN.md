@@ -136,7 +136,7 @@ model: "你的模型名"         # 你的 Hermes 能访问到的任意模型
 |---|---|---|
 | `enabled` | `true` | 总开关；false 时零开销。运行期切换需重启。 |
 | `every_n_turns` | `4` | 每 N 个完成的前台轮次评估一次。 |
-| `first_title_mode` | `builtin` | 首轮命名一键开关：`builtin`=首轮归内建（插件不抢，省一次全上下文调用）；`plugin`=插件第 1 轮接管全上下文命名。 |
+| `first_title_mode` | `builtin` | 首轮命名一键开关：`builtin`=首轮归内建（插件不抢，省一次全上下文调用）；`plugin`=插件第 1 轮接管全上下文命名，并自动关闭宿主内建标题器，避免双重生成。 |
 | `early_turn_eval` | `false` | 旧开关（保留兼容）：`plugin` 模式等价 true；`builtin` 模式强制失效。 |
 | `on_close` | `true` | 真实关闭/终局时评估一次（同步、受节流）。 |
 | `recent_turns` / `opening_turns` | `2` / `2` | 上下文窗口按真实用户轮计；每轮保留用户消息 + 最后一条模型回复。 |

@@ -3,7 +3,7 @@ enabled: true
 every_n_turns: 4
 on_close: true
 early_turn_eval: false  # 旧开关（保留兼容）：first_title_mode=plugin 时等价 true；builtin 时强制失效
-first_title_mode: builtin  # 首轮命名一键开关：builtin=首轮归内建（插件不抢，省一次全上下文调用）；plugin=插件第1轮就接管全上下文命名
+first_title_mode: builtin  # 首轮命名一键开关：builtin=首轮归内建（插件不抢，省一次全上下文调用）；plugin=插件第1轮就接管全上下文命名并自动关闭宿主标题器
 recent_turns: 2
 opening_turns: 2
 ignore_model_messages: false

@@ -52,6 +52,114 @@ _db_lock = threading.Lock()
 # Hermes 内部平台：cron（定时任务）与 subagent（子代理）的轮次不参与标题评估
 _INTERNAL_PLATFORMS = frozenset({"cron", "subagent"})
 
+_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+_HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7a3]")
+_IDENTIFIER_PUNCT = frozenset("-_.:/#")
+
+
+def _is_han(ch: str) -> bool:
+    return bool(ch and _HAN_RE.fullmatch(ch))
+
+
+def _has_identifier_neighbor(text: str, start: int, end: int) -> bool:
+    """Whether an ASCII word is part of a literal identifier.
+
+    ``hermes-auto-titler`` and ``verify_on_stop`` must stay byte-for-byte
+    intact.  Plain product words such as ``Codex`` can be spaced/canonicalized
+    next to Chinese text; identifier-like tokens are left alone.
+    """
+    i = start - 1
+    while i >= 0 and (text[i].isalnum() or text[i] in _IDENTIFIER_PUNCT):
+        if text[i] in _IDENTIFIER_PUNCT:
+            return True
+        i -= 1
+    i = end
+    while i < len(text) and (text[i].isalnum() or text[i] in _IDENTIFIER_PUNCT):
+        if text[i] in _IDENTIFIER_PUNCT:
+            return True
+        i += 1
+    return False
+
+
+def _name_hints(items: List[Tuple[str, str]]) -> Dict[str, str]:
+    """Infer capitalization only when the current conversation supports it.
+
+    A lowercase user form and an explicitly cased assistant form must both be
+    present.  This prevents common words such as ``we`` or ``api`` from being
+    changed merely because they appeared capitalized somewhere in an answer,
+    while still correcting a locally evidenced product-name spelling.
+    """
+    variants: Dict[str, Dict[str, int]] = {}
+    user_lower: set[str] = set()
+    assistant_variants: set[str] = set()
+    for role, text in items:
+        for match in _NAME_TOKEN_RE.finditer(text or ""):
+            token = match.group(0)
+            key = token.lower()
+            variants.setdefault(key, {})[token] = variants.setdefault(key, {}).get(token, 0) + 1
+            if role == "user" and token == key and len(token) > 1:
+                user_lower.add(key)
+            if role == "assistant" and token != key and any(ch.isupper() for ch in token):
+                assistant_variants.add(token)
+    hints: Dict[str, str] = {}
+    for key, choices in variants.items():
+        if key not in user_lower:
+            continue
+        supported = {
+            token: score
+            for token, score in choices.items()
+            if token in assistant_variants
+        }
+        if not supported:
+            continue
+        preferred, _ = max(
+            supported.items(),
+            key=lambda item: (item[1], sum(ch.isupper() for ch in item[0]), len(item[0])),
+        )
+        hints[key] = preferred
+    return hints
+
+
+def _canonicalize_name_case(title: str, hints: Dict[str, str]) -> str:
+    if not title or not hints:
+        return title
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if _has_identifier_neighbor(title, match.start(), match.end()):
+            return token
+        preferred = hints.get(token.lower())
+        return preferred if preferred and token == token.lower() else token
+
+    return _NAME_TOKEN_RE.sub(replace, title)
+
+
+def _normalize_mixed_script_spacing(title: str) -> str:
+    """Add one space at safe Latin/CJK word boundaries.
+
+    The operation is intentionally conservative and skips literal identifiers
+    containing ``-``, ``_``, ``.``, ``/``, ``:`` or ``#``.
+    """
+    if not title:
+        return title
+    out = title
+    changed = True
+    while changed:
+        changed = False
+        for match in list(_NAME_TOKEN_RE.finditer(out)):
+            start, end = match.span()
+            if _has_identifier_neighbor(out, start, end):
+                continue
+            if start > 0 and _is_han(out[start - 1]) and out[start - 1] != " ":
+                out = out[:start] + " " + out[start:]
+                changed = True
+                break
+            if end < len(out) and _is_han(out[end]) and (end == len(out) or out[end] != " "):
+                out = out[:end] + " " + out[end:]
+                changed = True
+                break
+    return out
+
 
 def get_db() -> SessionDB:
     key = str(get_hermes_home())
@@ -84,6 +192,34 @@ def _wrap_with_context(target):
 
         return _fallback
     return propagate_context_to_thread(target)
+
+
+def _safe_audit_action(text: str) -> str:
+    """Return only the parsed action for logs; never log the raw model body."""
+    action, _ = _parse_decision(text)
+    return action
+
+
+def _safe_audit_title(text: str) -> Optional[str]:
+    """Return a bounded title field for logs, with no prompt or raw response."""
+    _, title = _parse_decision(text)
+    return title[:80] if title else None
+
+
+def _audit_input_shape(
+    current: Optional[str],
+    recent: List[Tuple[str, str]],
+    all_user: List[Tuple[str, str]],
+    opening: List[Tuple[str, str]],
+    earlier_summary: Optional[str],
+) -> str:
+    """Log shape only, keeping conversation text out of the log file."""
+    return (
+        f"current={'yes' if current else 'no'} "
+        f"opening={len(opening)} recent={len(recent)} users={len(all_user)} "
+        f"summary={'yes' if earlier_summary else 'no'} "
+        f"chars={sum(len(t) for _, t in opening + recent + all_user) + len(earlier_summary or '')}"
+    )
 
 
 class AutoTitler:
@@ -320,25 +456,40 @@ class AutoTitler:
         # 尚未成功升级；短句也可能是「这个文件夹是做什么的」这类污染标题，
         # 因此只要仍是 derived 就要求本次模型给出正式标题。
         force_rename = src == SessionDB.TITLE_SOURCE_DERIVED and bool(current)
-        # 评审协议（rename_confirmations>1）：llm→llm 的改名候选先挂起，由下一
-        # 次评估裁决——approve（背书落库）/ rename（换更好的新候选）/ keep（放弃），
-        # 模型原样重复候选也视为背书。derived/无标题升级是补漏、blind 是终局
-        # 评估（全貌已知），都旁路直接提交。
-        needed = 1 if blind else int(self.cfg.get("rename_confirmations", 1))
-        review = needed > 1 and src == SessionDB.TITLE_SOURCE_LLM and bool(current)
+        # 评审协议：0 = 关闭（单轮评估直接改名写库）；
+        # 1 = 确认 1 次（第 1 轮产生候选 pending，第 2 轮模型觉得上一轮改名可以则 approve 采用落库）；
+        # derived/无标题升级与 blind 终局评估旁路直接提交。
+        needed = 0 if blind else int(self.cfg.get("rename_confirmations", 0))
+        review = needed >= 1 and src == SessionDB.TITLE_SOURCE_LLM and bool(current)
         pending = self._pending.get(session_id) if review else None
         proposed = pending["title"] if pending else None
         if blind:
             # 终局评估以内容为准，直接落库并忽略进程内待审候选
             self._pending.pop(session_id, None)
 
+        evidence: List[Tuple[str, str]] = list(opening) + list(recent) + list(all_user)
+        if earlier_summary:
+            evidence.append(("user", earlier_summary))
+        name_hints = _name_hints(evidence)
+        current_surface = self._normalize_title_surface(current, name_hints) if current else None
+
         action, title = self._generate(
             current, recent, all_user, opening,
             force_rename=force_rename, blind=blind, proposed=proposed,
             earlier_summary=earlier_summary, session_id=session_id,
         )
+        log.info(
+            "auto-titler %s: captured current=%r input=%s",
+            session_id[:12],
+            current,
+            _audit_input_shape(current, recent, all_user, opening, earlier_summary),
+        )
         # 规范化 + 截断后的候选才与当前标题比较；相等 = keep（不是 failed/加后缀）
         candidate = self._prepare_candidate(title) if title else None
+        if candidate:
+            candidate = self._prepare_candidate(_canonicalize_name_case(
+                _normalize_mixed_script_spacing(candidate), name_hints
+            ))
 
         if review and proposed:
             if proposed == current:
@@ -371,6 +522,14 @@ class AutoTitler:
                 reason = "blind generation did not return a new title"
                 log.warning("auto-titler %s: %s", session_id[:12], reason)
                 return {"action": "failed", "reason": reason}
+            if current and current_surface and current_surface != current:
+                candidate_surface = self._prepare_candidate(current_surface)
+                if candidate_surface and candidate_surface != current:
+                    log.info(
+                        "auto-titler %s: keep -> surface-normalize %r -> %r",
+                        session_id[:12], current, candidate_surface,
+                    )
+                    return self._commit_rename(db, session_id, candidate_surface)
             log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)
             return {"action": "keep"}
 
@@ -396,10 +555,10 @@ class AutoTitler:
             from agent.i18n import get_language, _normalize_lang
             raw = _normalize_lang(configured) if configured else get_language()
             if raw:
-                return f"标题必须使用 Hermes 当前界面语言，语言代码为 {raw}；不要改用其他语言。"
+                return f"Write the title in Hermes display language (language code: {raw}). Do not switch to other languages."
         except Exception:
             pass
-        return "使用用户实质消息的主要语言；"
+        return "Write the title in the primary natural language of the user's messages."
 
     def _commit_rename(self, db: SessionDB, session_id: str, title: str) -> Dict[str, Any]:
         """频次上限检查 + 实际写库 + 记账。title 必须是已 _prepare_candidate 的候选。
@@ -452,39 +611,42 @@ class AutoTitler:
     ) -> Tuple[str, Optional[str]]:
         max_title_len = int(self.cfg.get("max_title_length", 24))
         style = self.cfg.get("title_style", "concise")
-        style_req = (
-            "主题概括：保留主体和最重要的意图。"
-            if style == "complete"
-            else "简洁标签：主体，加上区分所需的最少意图。"
-        )
+        if style == "complete":
+            style_req = "Complete summary: preserve both the core subject and primary intent."
+        else:
+            style_req = "Concise label: core subject with minimal intent needed to distinguish it."
+
         if blind:
             contract = '{"action":"rename","title":"..."}'
-            decision = (
-                "当前标题不会提供给你。请直接根据会话内容生成新标题，action 必须为 rename。"
-            )
+            decision = "Current title is not provided. Generate a new title from the conversation; action must be rename."
         elif proposed:
             contract = '{"action":"keep"|"approve"|"rename","title":"..."}'
             decision = (
-                "请比较当前标题和候选标题：候选最佳则 approve；候选不准则 rename 并给出新标题；"
-                "当前标题更好则 keep。"
+                "Compare the current title and proposed title: approve if proposed is best; "
+                "rename with a better title if inaccurate; keep if current title is better."
             )
         elif force_rename:
             contract = '{"action":"keep"|"rename","title":"..."}'
-            decision = "当前标题只是临时首句标题，必须根据完整会话生成新标题，action 必须为 rename。"
+            decision = "Current title is only a provisional first-line preview. You must generate a new title from the full conversation; action must be rename."
         else:
             contract = '{"action":"keep"|"rename","title":"..."}'
-            decision = "当前标题仍能概括全文则 keep；不能概括主线才 rename；两者都合理时 keep。"
+            decision = "keep if the current title accurately summarizes the conversation; rename if it no longer represents the main topic or active goal; keep when both are reasonable."
 
         system = (
-            "你负责维护 Hermes 会话标题。只返回一个 JSON 对象，不要输出解释。\n"
-            f"格式：{contract}\n{decision}\n{style_req}\n"
-            "标题要包含可识别的主体名词或明确实体，不能只有动作词。"
-            "以会话开头确立的主线为基调；最近子任务、临时措施和收尾验证不能单独改变主体。"
-            "只有多个后续用户请求持续转向新主题时才换主体。\n"
-            f"{self._language_rule()}"
-            "产品名、项目名、仓库名、文件名、命令和明确标识符保留原文。"
-            "使用自然语序和标准中英文空格；不确定的名称不要猜；标题不加引号和结尾标点。\n"
-            f"目标约 12 个字符，不能超过 {max_title_len} 个字符；不能为凑短删掉关键主体或标识符。"
+            "You maintain chat session titles for Hermes. Return JSON only, no explanation.\n"
+            f"Format: {contract}\n{decision}\n{style_req}\n"
+            "Rules:\n"
+            "1. Objective over Recency: Title the user's durable subject and intended outcome, NOT the newest message. "
+            "Later turns override the existing topic ONLY when they clearly replace or abandon the underlying subject or goal; "
+            "otherwise treat them as refinements, subtasks, or implementation details.\n"
+            "2. Instrument vs Subject: Exclude tools, environments, libraries, and execution agents (e.g. ego, browser, python, terminal, git) "
+            "unless the tool itself is the explicit object being developed, configured, debugged, or compared. "
+            "Counterfactual test: if replacing or removing the mentioned tool would leave the user's underlying goal essentially unchanged, omit it from the title.\n"
+            "3. Context vs Intent: Code, logs, shell commands, and quotes are context. Focus on what outcome the user wants achieved overall.\n"
+            f"4. Language: {self._language_rule()}\n"
+            "5. Formatting: Keep product names, repo names, filenames, commands, and identifiers exact. "
+            "Use natural phrasing with standard spaces between scripts. Do not guess uncertain names. No quotes or trailing punctuation.\n"
+            f"Target ~12 characters, maximum {max_title_len} characters; never drop the essential subject or identifier to fit length."
         )
 
         lines = []
@@ -543,6 +705,13 @@ class AutoTitler:
             log.warning("auto-titler LLM call failed: %s", e)
             return "keep", None
         self._record_usage(session_id, res)
+        log.info(
+            "auto-titler %s: llm result action=%s title=%r input=%s",
+            (session_id or "-")[:12],
+            _safe_audit_action(text),
+            _safe_audit_title(text),
+            _audit_input_shape(current, recent, all_user, opening, earlier_summary),
+        )
 
         action, title = _parse_decision(text)
         if action == "rename" and title:
@@ -550,8 +719,6 @@ class AutoTitler:
         if action == "approve":
             return "approve", None
         return "keep", None
-
-    # -- 用量记账 -----------------------------------------------------------
 
     def _record_usage(self, session_id: Optional[str], res: Any) -> None:
         """把真实 PluginLlm 调用记入 SessionDB.record_auxiliary_usage。
@@ -609,6 +776,13 @@ class AutoTitler:
             if t == prev:
                 break
         return t
+
+    @staticmethod
+    def _normalize_title_surface(title: Optional[str], hints: Dict[str, str]) -> Optional[str]:
+        """Apply only reversible spacing and conversation-backed name casing."""
+        if not title:
+            return None
+        return _canonicalize_name_case(_normalize_mixed_script_spacing(title), hints) or None
 
     def _prepare_candidate(self, title: str) -> Optional[str]:
         """规范化 + 双重硬截断（字符上限 + 列宽上限）后的候选标题；空则 None。"""

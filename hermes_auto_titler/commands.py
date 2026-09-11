@@ -60,10 +60,18 @@ def make_handler(titler) -> Callable[[str], str]:
             return "用法: /autotitler config <key> [value]"
 
         if cmd == "rename-now":
-            sid = args[1] if len(args) > 1 else titler._current_session
+            raw_arg = args[1] if len(args) > 1 else ""
+            db = titler.db
+            # 解析目标会话 ID：优先精准匹配或前缀匹配持久化 ID，否则回退当前活跃会话
+            sid = None
+            if raw_arg:
+                sid = getattr(db, "resolve_session_id", lambda x: None)(raw_arg) or raw_arg
+            if not sid:
+                sid = titler._current_session
             if not sid:
                 return "没有可用的会话（最近未发生对话）。可指定: /autotitler rename-now <session_id>"
-            r = titler.evaluate(sid, force=True)
+            # 手动重命名代表用户显式即时意图，必须旁路评审协议（blind=True），立即生成并落库
+            r = titler.evaluate(sid, force=True, blind=True)
             return _fmt_result({"session_id": sid, **r})
 
         if cmd == "retitle-all":

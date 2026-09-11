@@ -11,7 +11,12 @@ from hermes_auto_titler.config import (
     load_config,
     save_config,
 )
-from hermes_auto_titler.messages import load_context, load_context_with_summary, message_text
+from hermes_auto_titler.messages import (
+    clean_captured_text,
+    load_context,
+    load_context_with_summary,
+    message_text,
+)
 
 
 def test_message_text_plain_string():
@@ -166,6 +171,42 @@ def test_load_context_filters_system_noise():
     assert opening[0] == ("user", "真实提问一")
 
 
+def test_clean_captured_text_extracts_real_message_from_handoff_wrapper():
+    wrapped = "[STILL IN PROGRESS — continue the task] 真实用户意图"
+    assert clean_captured_text(wrapped) == "真实用户意图"
+
+    compacted = (
+        "[CONTEXT COMPACTION — REFERENCE ONLY]\n"
+        "这里是旧摘要，不应进入标题输入。\n"
+        "--- END OF CONTEXT SUMMARY — respond to the message below ---\n\n"
+        "[STILL IN PROGRESS — continue the task] 当前真实请求"
+    )
+    assert clean_captured_text(compacted) == "当前真实请求"
+
+
+def test_clean_captured_text_discards_unfinished_handoff_and_system_notice():
+    assert clean_captured_text("[CONTEXT COMPACTION — REFERENCE ONLY] 还没有结束") is None
+    assert clean_captured_text("[System: model changed]") is None
+
+
+def test_load_context_deduplicates_replayed_adjacent_user_messages():
+    conv = [
+        {"role": "user", "content": "[STILL IN PROGRESS — replay] 同一个请求"},
+        {"role": "user", "content": "同一个请求"},
+        {"role": "assistant", "content": "已处理"},
+        {"role": "user", "content": "同一个请求"},
+    ]
+    _, all_user, opening, _ = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
+    )
+    assert all_user == [("user", "同一个请求"), ("user", "同一个请求")]
+    assert opening == [
+        ("user", "同一个请求"),
+        ("assistant", "已处理"),
+        ("user", "同一个请求"),
+    ]
+
+
 def test_load_context_summary_hint_only_when_opening_is_missing():
     conv = [
         {"role": "user", "content": "[Session Arc Summary (d1, node 73)] # 当前焦点：X 项目开发"},
@@ -312,6 +353,22 @@ def test_smart_preview_extracts_first_last_sentence():
     out = smart_preview(multi, 12)
     assert "第一行" in out and "第三行" in out
 
+    # 真实故障回归：长命令/配置后跟倒数第二句核心请求，尾部窗口必须完整容纳
+    realistic = (
+        "我昨天运行过git clone https://github.com/MDX-Tom/gpt-instruct.git\n"
+        "cd gpt-instruct\n\n"
+        "# 预览稳定版，不写入配置\n"
+        "python3 codex-instruct.py --apply --version gpt-5.6-v45 --dry-run\n\n"
+        "# 部署当前稳定版\n"
+        "python3 codex-instruct.py --apply --version gpt-5.6-v45\n\n"
+        "# 部署 gpt-6-astra-v1 正式版\n"
+        "python3 codex-instruct.py --apply --version gpt-6-v1。帮我清理掉。Windows"
+    )
+    res = smart_preview(realistic, 300)
+    assert "git clone" in res
+    assert "帮我清理掉" in res
+    assert "Windows" in res
+
 
 def test_sample_user_messages_head_tail():
     from hermes_auto_titler.messages import sample_user_messages
@@ -455,24 +512,26 @@ def test_config_yaml_list_does_not_crash(tmp_path):
 def test_rename_confirmations_defaults_and_clamps(tmp_path):
     p = tmp_path / "config.yaml"
 
-    # 缺省：1（现行为，单次确认即写）
+    # 缺省：0（关闭确认，单次直接写）
     p.write_text("enabled: true\n", encoding="utf-8")
     cfg = load_config(path=p)
-    assert cfg["rename_confirmations"] == 1
+    assert cfg["rename_confirmations"] == 0
 
-    # 合法值 2/3
+    # 合法值 1/2/3
+    p.write_text("rename_confirmations: 1\n", encoding="utf-8")
+    assert load_config(path=p)["rename_confirmations"] == 1
     p.write_text("rename_confirmations: 2\n", encoding="utf-8")
     assert load_config(path=p)["rename_confirmations"] == 2
     p.write_text("rename_confirmations: 3\n", encoding="utf-8")
     assert load_config(path=p)["rename_confirmations"] == 3
 
-    # 下限钳到 1；上限钳到 5
+    # 下限钳到 0，非负整数原样保留（不设多余的人为上限）
     p.write_text("rename_confirmations: 0\n", encoding="utf-8")
-    assert load_config(path=p)["rename_confirmations"] == 1
+    assert load_config(path=p)["rename_confirmations"] == 0
     p.write_text("rename_confirmations: -2\n", encoding="utf-8")
-    assert load_config(path=p)["rename_confirmations"] == 1
+    assert load_config(path=p)["rename_confirmations"] == 0
     p.write_text("rename_confirmations: 99\n", encoding="utf-8")
-    assert load_config(path=p)["rename_confirmations"] == 5
+    assert load_config(path=p)["rename_confirmations"] == 99
 
     # 非法浮点回退默认
     p.write_text("rename_confirmations: 1.5\n", encoding="utf-8")

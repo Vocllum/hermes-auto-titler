@@ -105,27 +105,79 @@ def is_summary(text: str) -> bool:
     return any(t.startswith(p) for p in _SUMMARY_PREFIXES)
 
 
+_HANDOFF_END_RE = re.compile(
+    r"---\s*end of context summary\s*[—-].*?---\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+_HANDOFF_REPLAY_RE = re.compile(
+    r"^\s*\[still in progress[^\]]*\]\s*",
+    re.IGNORECASE,
+)
+
+
+def clean_captured_text(text: str) -> Optional[str]:
+    """Remove Hermes handoff wrappers while preserving the real user turn.
+
+    Context compaction and replay markers are persisted as ordinary user
+    messages.  A whole compaction handoff is not useful title evidence, but
+    its final message after ``END OF CONTEXT SUMMARY`` is a real user turn and
+    must be retained.  An unfinished handoff is discarded rather than fed to
+    the title model as if it were user intent.
+    """
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not t:
+        return None
+
+    if t.lower().startswith("[context compaction"):
+        match = _HANDOFF_END_RE.search(t)
+        if not match:
+            return None
+        t = t[match.end():].strip()
+
+    t = _HANDOFF_REPLAY_RE.sub("", t, count=1).strip()
+    if not t or is_system_noise(t):
+        return None
+    return t
+
+
 # 句子边界：中文/通用标点 + 换行 + 英文句点后跟空白
 _SENT_RE = re.compile(r"[。！？…!?]|(?<=\.)\s|\n")
 
 
 def smart_preview(text: str, limit: int) -> str:
-    """超长消息提取首尾句（替代硬切）。
+    """超长消息提取首句与尾部窗口（保留开头实体与尾部连续指令，无任何硬编码词表）。
 
-    - 长度 ≤ limit：原样
-    - 有句子边界：保留第一句 + 最后一句（各限 limit//2），中间省略
+    - 长度 ≤ limit：零损耗原样返回
+    - 有句子/换行边界：
+      - 头部提取：首句（预算 limit // 2）
+      - 尾部提取：尾窗（从末尾向前尽可能多地容纳完整的连续句子，直到填满剩余预算）
     - 无句子边界（单行长串：日志/代码）：硬切前 2/3 + 后 1/3
     """
     if limit <= 0 or len(text) <= limit:
         return text
     parts = [p.strip() for p in _SENT_RE.split(text) if p.strip()]
     if len(parts) >= 2:
-        head, tail = parts[0], parts[-1]
         budget = max(1, limit // 2)
+        head = parts[0]
         if len(head) > budget:
             head = head[:budget].rstrip()
-        if len(tail) > budget:
-            tail = tail[-budget:].lstrip()
+
+        # 尾部窗口：从末尾往前尽可能多地容纳完整的句子（确保倒数多句都在预算内完整保留）
+        tail_budget = max(1, limit - len(head) - 3)
+        tail_parts = []
+        cur_len = 0
+        for p in reversed(parts[1:]):
+            needed = len(p) + (1 if tail_parts else 0)
+            if cur_len + needed <= tail_budget or not tail_parts:
+                tail_parts.append(p)
+                cur_len += needed
+            else:
+                break
+        tail_parts.reverse()
+        tail = " ".join(tail_parts)
+        if len(tail) > tail_budget:
+            tail = tail[-tail_budget:].lstrip()
+
         return f"{head} … {tail}"
     cut = limit * 2 // 3
     return text[:cut].rstrip() + " … " + text[-(limit - cut):].lstrip()
@@ -210,7 +262,7 @@ def load_context_with_summary(
             continue
         if ignore_model_messages and role == "assistant":
             continue
-        text = message_text(m.get("content")).strip()
+        text = clean_captured_text(message_text(m.get("content")))
         if not text:
             continue
         if is_summary(text):
@@ -221,12 +273,21 @@ def load_context_with_summary(
             continue
         if not saw_summary:
             saw_visible_opening = True
+        # Handoff/replay can persist the same user turn twice without an
+        # assistant response between them.  Keep later turns with the same
+        # wording; only collapse the adjacent replay introduced by the
+        # transport so repeated user intent remains visible in the trajectory.
+        if pairs and role == "user" and pairs[-1] == ("user", text):
+            continue
         pairs.append((role, text))
 
     def preview(text: str) -> str:
-        if preview_chars > 0 and len(text) > preview_chars:
-            return text[:preview_chars] + "…"
-        return text
+        if preview_chars <= 0 or len(text) <= preview_chars:
+            return text
+        parts = [p.strip() for p in _SENT_RE.split(text) if p.strip()]
+        if len(parts) >= 2:
+            return smart_preview(text, preview_chars)
+        return text[:preview_chars] + "…"
 
     # 角色配额：每个选中的真实用户轮次只保留用户消息和最后一条模型文本
     # 回复。工具过程已经被过滤；压缩后残留在首条 user 之前的 assistant

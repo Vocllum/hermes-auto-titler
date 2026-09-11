@@ -22,7 +22,7 @@ DEFAULTS: dict[str, Any] = {
     "recent_turns": 2,
     "opening_turns": 2,
     "ignore_model_messages": False,
-    "preview_chars": 100,
+    "preview_chars": 400,
     "include_all_user_messages": True,
     "user_message_threshold": 40,
     "user_message_preview_chars": 300,
@@ -39,10 +39,9 @@ DEFAULTS: dict[str, Any] = {
     # hermes-auto-titler 这类较长的字面标识符及少量中文意图。
     "max_title_length": 24,
     "max_display_width": 40,
-    # 评审协议：>1 时 llm→llm 改名候选先挂起，下一次评估裁决（approve=落库 /
-    # rename=换新候选 / keep=放弃；原样重复候选视为背书）。derived/无标题升级
-    # 与 blind 终局评估旁路。1 = 关闭（单次评估直接改名），上限 5。
-    "rename_confirmations": 1,
+    # 评审协议：0 = 关闭（单次评估直接改名写库）；
+    # 1 = 确认 1 次（第 1 轮产生待审候选 pending，第 2 轮模型觉得上一轮改名可以则 approve 采用落库）。
+    "rename_confirmations": 0,
     # 单会话每小时实际改名次数上限（滑动 60 分钟窗口）；0 = 不设上限。
     "renames_per_hour": 0,
 }
@@ -148,7 +147,7 @@ def coerce_value(key: str, raw: Any) -> Any:
     elif key == "max_display_width":
         v = max(10, min(int(v), 100))
     elif key == "rename_confirmations":
-        v = max(1, min(int(v), 5))
+        v = max(0, int(v))
     elif key == "renames_per_hour":
         v = max(0, int(v))
     return v

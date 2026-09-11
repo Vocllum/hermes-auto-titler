@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hermes_auto_titler.config import DEFAULTS
 from hermes_auto_titler.messages import display_width, load_context, load_context_with_summary
-from hermes_auto_titler.titler import AutoTitler
+from hermes_auto_titler.titler import AutoTitler, _canonicalize_name_case, _name_hints, _normalize_mixed_script_spacing
 
 
 class FakeDB:
@@ -161,6 +161,23 @@ def _wait_inflight_clear(t, sid, timeout=5.0):
         time.sleep(0.005)
 
 
+def test_name_case_hints_are_conversation_local_and_conservative():
+    hints = _name_hints([
+        ("assistant", "已确认 OpenCodex 的 API"),
+        ("user", "opencodex 相关配置"),
+    ])
+    assert _canonicalize_name_case("opencodex 配置", hints) == "OpenCodex 配置"
+    # 助手单独提到 API 时，不足以把普通词强行首字母化。
+    assert "api" not in _name_hints([("assistant", "API 配置")])
+    # 连接符标识符保持原文，避免把私有命令/仓库名拆改。
+    assert _canonicalize_name_case("opencodex-hindsight", hints) == "opencodex-hindsight"
+
+
+def test_mixed_script_spacing_does_not_modify_identifiers():
+    assert _normalize_mixed_script_spacing("codex hindsight提取") == "codex hindsight 提取"
+    assert _normalize_mixed_script_spacing("hermes-auto-titler补丁") == "hermes-auto-titler补丁"
+
+
 MSGS = [
     {"role": "user", "content": "帮我看看 Test 空转的问题"},
     {"role": "assistant", "content": "我查了日志，是 wake 重放导致的"},
@@ -215,6 +232,28 @@ def test_keep_does_not_write():
     r = t.evaluate("s1", force=True)
     assert r["action"] == "keep"
     assert db.calls == []
+
+
+def test_keep_repairs_safe_mixed_script_spacing_in_existing_auto_title():
+    db = FakeDB(messages=MSGS, title="codex hindsight提取无关信息", source="llm")
+    t, _ = make_titler(db, text=_dec("keep"))
+    r = t.evaluate("s1", force=True)
+    assert r["action"] == "renamed"
+    assert r["title"] == "codex hindsight 提取无关信息"
+    assert db.title == "codex hindsight 提取无关信息"
+    assert db.source == "llm"
+
+
+def test_evaluate_logs_capture_shape_and_parsed_llm_result(caplog):
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    t, _ = make_titler(db, text=_dec("keep"))
+    with caplog.at_level("INFO", logger="hermes_auto_titler.titler"):
+        t.evaluate("s1", force=True)
+    joined = "\\n".join(caplog.messages)
+    assert "captured current='旧标题'" in joined
+    assert "opening=" in joined and "recent=" in joined and "users=" in joined
+    assert "llm result action=keep" in joined
+    assert "帮我看看" not in joined  # audit log records shape, not conversation text
 
 
 def test_rename_to_same_title_is_keep():
@@ -700,8 +739,8 @@ def test_short_derived_title_is_provisional_and_forces_model_upgrade():
     t, ctx = make_titler(db, text=_dec("keep"))
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
-    assert "临时首句标题" in system
-    assert "必须" in system and "rename" in system
+    assert "provisional first-line preview" in system
+    assert "action must be rename" in system
 
 
 def test_generate_uses_display_language_for_title_instruction(monkeypatch):
@@ -717,8 +756,8 @@ def test_generate_uses_display_language_for_title_instruction(monkeypatch):
     )
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
-    assert "语言代码为 zh" in system
-    assert "不要改用其他语言" in system
+    assert "language code: zh" in system
+    assert "Do not switch to other languages" in system
 
 
 def test_title_generation_uses_zero_temperature():
@@ -744,18 +783,17 @@ def test_generate_blind_omits_current_title_and_forces_rename():
     assert (action, title) == ("rename", "新标题")
     system = ctx.llm.calls[0]["messages"][0]["content"]
     user_prompt = ctx.llm.calls[0]["messages"][1]["content"]
-    assert "action 必须为 rename" in system
+    assert "action must be rename" in system
     assert "truncated auto-generated" not in system  # 不是 derived 截断文案
-    assert "主体名词" in system
-    assert "临时措施" in system
-    assert "语言代码为 zh" in system or "主要语言" in system
-    assert "不确定的名称不要猜" in system
-    assert "自然语序" in system
-    assert "保留原文" in system
+    assert "durable subject" in system
+    assert "Counterfactual test" in system
+    assert "language code: zh" in system or "natural language" in system
+    assert "Do not guess uncertain names" in system
+    assert "natural phrasing" in system.lower()
+    assert "identifiers exact" in system
     assert "当前标题：" not in user_prompt  # 原标题不喂给模型
     assert "开头内容" in user_prompt
-    assert "标题要包含" in system
-    assert "不能只有动作词" in system
+    assert "Intended outcome" in system or "intended outcome" in system
 
 
 def test_default_limit_preserves_literal_repository_identifier_and_intent():
@@ -816,7 +854,7 @@ def test_generate_nonblind_with_summary_anchors_subject_on_summary():
     assert "历史摘要（原始开头已被压缩；用于识别更早的主线）" in user_prompt
     assert "弱提示" not in user_prompt
     assert "压缩后的局部续段" in user_prompt
-    assert "标题要包含" in system
+    assert "durable subject" in system
 
 
 def test_generate_uses_hermes_title_generation_task():
@@ -1442,7 +1480,7 @@ def test_config_command_enabled_message_notes_restart(monkeypatch):
 
 # -- 评审协议：候选标题由下一次评估裁决（approve/rename/keep） --------------------
 
-def _review_titler(confirmations=2, per_hour=0, title="旧标题"):
+def _review_titler(confirmations=1, per_hour=0, title="旧标题"):
     db = FakeDB(messages=MSGS, title=title, source="llm")
     t, ctx = make_titler(
         db,
@@ -1514,7 +1552,7 @@ def test_keep_clears_pending_candidate():
 def test_approve_without_pending_is_keep():
     # 无待审候选时的 approve 防御性视为 keep，不写库
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
-    t, ctx = make_titler(db, text=_dec("approve"), cfg={"rename_confirmations": 2})
+    t, ctx = make_titler(db, text=_dec("approve"), cfg={"rename_confirmations": 1})
     r = t.evaluate("s1", force=True)
     assert r["action"] == "keep"
     assert db.title == "旧标题"
@@ -1535,15 +1573,15 @@ def test_current_title_equal_to_candidate_still_keep():
     # 候选与当前标题相同 = keep，且应清掉 stale pending
     db = FakeDB(messages=MSGS, title="新标题", source="llm")
     t, ctx = make_titler(db, text=_dec("rename", "新标题"),
-                         cfg={"rename_confirmations": 2})
+                         cfg={"rename_confirmations": 1})
     t._pending["s1"] = {"title": "新标题"}
     assert t.evaluate("s1", force=True)["action"] == "keep"
     assert t._pending.get("s1") is None
 
 
-def test_confirmations_1_keeps_single_shot_behavior():
-    # 默认配置（1）：单次评估直接改名，评审协议关闭
-    db, t, ctx = _review_titler(confirmations=1)
+def test_confirmations_0_keeps_single_shot_behavior():
+    # 默认配置（0）：单次评估直接改名，评审协议关闭
+    db, t, ctx = _review_titler(confirmations=0)
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     assert db.title == "新标题"
@@ -1553,14 +1591,14 @@ def test_derived_upgrade_bypasses_confirmation():
     # derived/无标题的首次升级是补漏不是折腾：旁路评审立即写
     db = FakeDB(messages=MSGS, title="旧兜底", source="derived")
     t, ctx = make_titler(db, text=_dec("rename", "正式标题"),
-                         cfg={"rename_confirmations": 3})
+                         cfg={"rename_confirmations": 2})
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     assert db.title == "正式标题"
 
     db2 = FakeDB(messages=MSGS, title=None, source=None)
     t2, ctx2 = make_titler(db2, text=_dec("rename", "首个标题"),
-                           cfg={"rename_confirmations": 3})
+                           cfg={"rename_confirmations": 2})
     r2 = t2.evaluate("s2", force=True)
     assert r2["action"] == "renamed"
     assert db2.title == "首个标题"
@@ -1578,7 +1616,7 @@ def test_blind_review_ignores_pending_and_writes_directly():
     # blind 评估忽略进程内待审候选，直接落库并清空
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t, ctx = make_titler(db, text=_dec("rename", "盲改标题"),
-                         cfg={"rename_confirmations": 2})
+                         cfg={"rename_confirmations": 1})
     t._pending["s1"] = {"title": "待审候选"}
     r = t.evaluate("s1", force=True, blind=True)
     assert r["action"] == "renamed"
@@ -1655,17 +1693,17 @@ def test_prompt_contains_stability_rules_on_normal_eval():
     t, ctx = make_titler(db)
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
-    assert "当前标题仍能概括全文则 keep" in system
-    assert "最近子任务" in system
-    assert "多个后续用户请求持续转向" in system
-    assert "只返回一个 JSON 对象" in system
+    assert "keep if the current title accurately summarizes" in system
+    assert "durable subject" in system
+    assert "Counterfactual test" in system
+    assert "Return JSON only" in system
 
     db2 = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t2, ctx2 = make_titler(db2)
     t2.evaluate("s1", force=True, blind=True)
     blind_system = ctx2.llm.calls[0]["messages"][0]["content"]
-    assert '格式：{"action":"rename","title":"..."}' in blind_system
-    assert "action 必须为 rename" in blind_system
+    assert 'Format: {"action":"rename","title":"..."}' in blind_system
+    assert "action must be rename" in blind_system
 
 
 def test_prompt_conservative_rule_prefers_keep_when_uncertain():
@@ -1673,7 +1711,7 @@ def test_prompt_conservative_rule_prefers_keep_when_uncertain():
     t, ctx = make_titler(db)
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
-    assert "两者都合理时 keep" in system
+    assert "keep when both are reasonable" in system
 
 
 # -- 评审协议解析与契约 ------------------------------------------------------------

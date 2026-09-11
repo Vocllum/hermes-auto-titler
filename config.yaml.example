@@ -7,7 +7,7 @@ first_title_mode: builtin  # 首轮命名一键开关：builtin=首轮归内建�
 recent_turns: 2
 opening_turns: 2
 ignore_model_messages: false
-preview_chars: 100
+preview_chars: 400
 include_all_user_messages: true
 user_message_threshold: 40
 user_message_preview_chars: 300
@@ -22,5 +22,5 @@ model: ""
 min_interval_minutes: 5
 max_title_length: 24
 max_display_width: 40
-rename_confirmations: 1  # 评审协议：>1 时 llm→llm 改名候选先挂起，下一次评估裁决（approve=落库/rename=换新候选/keep=放弃；derived/无标题升级与 retitle-all 盲改旁路；1=关闭；上限 5）
+rename_confirmations: 0  # 评审协议：0=关闭（单轮直接写库）；1=确认1次（第1轮挂起pending，第2轮模型觉得上一轮改名可以则approve落库）
 renames_per_hour: 0      # 单会话每小时实际改名上限（滑动窗口）；0=不限

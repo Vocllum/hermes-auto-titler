@@ -157,7 +157,7 @@ class AutoTitler(_BaseAutoTitler):
         if earlier_summary:
             lines.append("Visible continuation / 可见开头（压缩后的局部续段; original opening was compacted):")
         else:
-            lines.append("Opening context (identify the durable subject):")
+            lines.append("Opening context / 开头内容 (identify the durable subject):")
         for role, text in opening:
             lines.append(f"{role}: {text}")
         if earlier_summary:

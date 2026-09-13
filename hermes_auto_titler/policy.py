@@ -102,6 +102,28 @@ class AutoTitler(_BaseAutoTitler):
         else:
             style_req = "Concise label: core subject with minimal intent needed to distinguish it."
 
+        if strategy == "aggressive":
+            strategy_rule = (
+                "Strategy: aggressive. Track a real change of direction sooner: rename when the user explicitly "
+                "abandons/replaces the old goal, or when multiple substantive user turns establish a coherent "
+                "new active direction, even if the old title still describes earlier history. A one-off subtask, "
+                "status check, implementation detail, or tool change is not a topic shift."
+            )
+            normal_decision = (
+                "keep if the current title still represents the active durable subject; rename when an explicit "
+                "replacement or sustained new direction has become the active subject, even if the current title "
+                "remains historically accurate. Do not rename for a one-off recent request or a wording-only improvement."
+            )
+        else:
+            strategy_rule = (
+                "Strategy: conservative. Keep the current title unless conversation evidence shows a material, "
+                "durable mismatch. Marginal wording improvements are not enough; when both titles are reasonable, keep."
+            )
+            normal_decision = (
+                "keep if the current title accurately summarizes the conversation; rename if it no longer "
+                "represents the main topic or active goal; keep when both are reasonable."
+            )
+
         if blind:
             contract = '{"action":"rename","title":"..."}'
             decision = (
@@ -111,9 +133,9 @@ class AutoTitler(_BaseAutoTitler):
         elif proposed:
             contract = '{"action":"keep"|"approve"|"rename","title":"..."}'
             decision = (
-                "First infer the conversation subject without relying on either title. Then compare them: "
-                "approve only if the proposed title is materially better for that inferred subject; "
-                "rename with a third, better title if needed; keep if the current title is at least as good."
+                "First infer the conversation subject without relying on either title. Then compare them under the "
+                "selected strategy: approve only if the proposed title is materially better for that inferred active "
+                "subject; rename with a third, better title if needed; keep if the current title remains the better fit."
             )
         elif force_rename:
             contract = '{"action":"keep"|"rename","title":"..."}'
@@ -123,23 +145,7 @@ class AutoTitler(_BaseAutoTitler):
             )
         else:
             contract = '{"action":"keep"|"rename","title":"..."}'
-            decision = (
-                "keep if the current title accurately summarizes the conversation; rename if it no longer "
-                "represents the main topic or active goal; keep when both are reasonable."
-            )
-
-        if strategy == "aggressive":
-            strategy_rule = (
-                "Strategy: aggressive. Track a real change of direction sooner: rename when the user explicitly "
-                "abandons/replaces the old goal, or when multiple substantive user turns establish a coherent "
-                "new active direction, even if the old title still describes earlier history. A one-off subtask, "
-                "status check, implementation detail, or tool change is not a topic shift."
-            )
-        else:
-            strategy_rule = (
-                "Strategy: conservative. Keep the current title unless conversation evidence shows a material, "
-                "durable mismatch. Marginal wording improvements are not enough; when both titles are reasonable, keep."
-            )
+            decision = normal_decision
 
         system = (
             "You maintain chat session titles for Hermes. Return JSON only, no explanation.\n"

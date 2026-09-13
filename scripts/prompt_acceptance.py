@@ -9,9 +9,11 @@ Examples:
   <your-hermes-venv>/bin/python scripts/prompt_acceptance.py
   <your-hermes-venv>/bin/python scripts/prompt_acceptance.py --strategy aggressive
   <your-hermes-venv>/bin/python scripts/prompt_acceptance.py --both
+  <your-hermes-venv>/bin/python scripts/prompt_acceptance.py --both --strict
 
 PASS/WARN is intentionally lightweight. Read the emitted title and rationale for
-borderline cases; this is an acceptance aid, not a replacement for human review.
+borderline cases; by default WARN does not fail the process. Use --strict only when
+you intentionally want the lexical checks to act as a gate.
 """
 
 from __future__ import annotations
@@ -50,26 +52,42 @@ class Case:
     forbid: tuple[str, ...] = ()
 
 
+PROJECT_OPENING = [
+    ("user", "继续维护 hermes-auto-titler，重点是让长会话标题跟随真实主题。"),
+    ("assistant", "先审查长期意图提取和 review state。"),
+    ("user", "整个项目继续做，不要让具体工具或某次操作抢走标题。"),
+]
+PROJECT_RECENT = [
+    ("user", "CI 还剩 Opening context 这个断言失败，修一下测试。"),
+    ("assistant", "这是兼容标签断言，不影响核心主题。"),
+]
+PROJECT_USERS = [
+    ("user", "继续维护 hermes-auto-titler，重点是让长会话标题跟随真实主题。"),
+    ("user", "整个项目继续做，不要让具体工具或某次操作抢走标题。"),
+    ("user", "CI 还剩 Opening context 这个断言失败，修一下测试。"),
+]
+
+
 CASES = [
     Case(
         name="project-over-latest-test",
         purpose="A failing test is one implementation step inside an ongoing project topic.",
         current="Hermes 自动标题维护",
-        opening=[
-            ("user", "继续维护 hermes-auto-titler，重点是让长会话标题跟随真实主题。"),
-            ("assistant", "先审查长期意图提取和 review state。"),
-            ("user", "整个项目继续做，不要让具体工具或某次操作抢走标题。"),
-        ],
-        recent=[
-            ("user", "CI 还剩 Opening context 这个断言失败，修一下测试。"),
-            ("assistant", "这是兼容标签断言，不影响核心主题。"),
-        ],
-        users=[
-            ("user", "继续维护 hermes-auto-titler，重点是让长会话标题跟随真实主题。"),
-            ("user", "整个项目继续做，不要让具体工具或某次操作抢走标题。"),
-            ("user", "CI 还剩 Opening context 这个断言失败，修一下测试。"),
-        ],
+        opening=PROJECT_OPENING,
+        recent=PROJECT_RECENT,
+        users=PROJECT_USERS,
         expected_actions={"keep"},
+        forbid=("Opening context", "pytest", "断言"),
+    ),
+    Case(
+        name="recover-from-too-narrow-title",
+        purpose="An automatic title captured from one implementation step should be pulled back to the durable project topic.",
+        current="Opening context 断言修复",
+        opening=PROJECT_OPENING,
+        recent=PROJECT_RECENT,
+        users=PROJECT_USERS,
+        expected_actions={"rename"},
+        require_any=("Hermes", "hermes-auto-titler", "自动标题"),
         forbid=("Opening context", "pytest", "断言"),
     ),
     Case(
@@ -237,6 +255,7 @@ def parse_args():
     )
     parser.add_argument("--both", action="store_true", help="run every case under both strategies")
     parser.add_argument("--case", action="append", dest="cases", help="run only named case(s)")
+    parser.add_argument("--strict", action="store_true", help="exit non-zero when any lexical check warns")
     return parser.parse_args()
 
 
@@ -300,8 +319,8 @@ def main():
         for case in selected:
             overall = run_case(titler, case) and overall
 
-    print("\nSemantic matrix complete. WARN means inspect the title; do not treat this script as a hard benchmark.")
-    raise SystemExit(0 if overall else 2)
+    print("\nSemantic matrix complete. WARN means inspect the title; human review remains authoritative.")
+    raise SystemExit(2 if args.strict and not overall else 0)
 
 
 if __name__ == "__main__":

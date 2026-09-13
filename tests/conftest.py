@@ -17,6 +17,16 @@ class SessionDB:
 fake_state.SessionDB = SessionDB
 sys.modules.setdefault("hermes_state", fake_state)
 
+# hermes_cli.config（语言解析 / takeover 配置测试需要宿主模块名存在）
+fake_cli = types.ModuleType("hermes_cli")
+fake_cli_config = types.ModuleType("hermes_cli.config")
+fake_cli_config.load_config_readonly = lambda: {}
+fake_cli_config.load_config = lambda: {}
+fake_cli_config.save_config = lambda cfg: None
+fake_cli.config = fake_cli_config
+sys.modules.setdefault("hermes_cli", fake_cli)
+sys.modules.setdefault("hermes_cli.config", fake_cli_config)
+
 # agent.plugin_llm.PluginLlmTextInput
 fake_agent = types.ModuleType("agent")
 fake_plugin_llm = types.ModuleType("agent.plugin_llm")

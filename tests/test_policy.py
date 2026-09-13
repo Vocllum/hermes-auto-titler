@@ -119,6 +119,20 @@ def test_replacing_candidate_resets_confirmation_count():
     assert db.title == "更好标题"
 
 
+def test_external_llm_title_change_invalidates_pending_candidate():
+    db, llm, t = make(confirmations=2)
+    assert t.evaluate("s1", force=True)["action"] == "pending"
+    assert t._pending["s1"]["base_title"] == "旧标题"
+
+    db.title = "其他自动标题"
+    db.source = "llm"
+    llm.text = dec("approve")
+    result = t.evaluate("s1", force=True)
+    assert result["action"] == "keep"
+    assert t._pending.get("s1") is None
+    assert db.title == "其他自动标题"
+
+
 def test_zero_confirmations_remains_direct_write():
     db, llm, t = make(confirmations=0)
     result = t.evaluate("s1", force=True)

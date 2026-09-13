@@ -1,10 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-13
 
 - Implement true N-round review semantics: `rename_confirmations: N` now requires N follow-up endorsements before an llm→llm title write; replacing the candidate resets the count, and a pending candidate is discarded if its base automatic title changes between review rounds.
-- Restore meaningful `conservative` / `aggressive` strategies. Aggressive mode follows explicit or sustained topic pivots sooner without treating one-off subtasks or tool changes as new subjects.
-- Make title judgment evidence-first: conversation evidence is evaluated before the existing/proposed title, assistant text is lower-confidence evidence, and conversation excerpts cannot override the title-maintenance protocol.
+- Change the new-install default to `rename_confirmations: 1`; set it to `0` for immediate writes after one rename decision.
+- Restore meaningful `conservative` / `aggressive` strategies. Aggressive mode follows explicit or sustained topic pivots sooner without treating one-off subtasks, status checks, implementation details, or tool changes as new subjects.
+- Simplify the title prompt into five evidence-first decision principles. Conversation evidence is evaluated before title hypotheses, assistant text is lower-confidence evidence, and structural duplication across opening/recent/trajectory sections is not counted as repeated user intent.
+- Make blind and forced regeneration use a rename-only JSON contract while review mode keeps `keep` / `approve` / `rename`.
+- Keep literal identifiers and uncertain names conservative while retaining language inheritance and mixed-script formatting rules.
+- Make `scripts/review_sample.py` reuse the loaded production context configuration and support strategy overrides, so real-history prompt/model reviews match production sampling more closely.
+- Add/extend regression coverage for N-round counting, candidate replacement, base-title invalidation, strategy thresholds, evidence-before-title ordering, rename-only regeneration, and the v0.2 default.
 
 ## 0.1.3 — 2026-09-12
 

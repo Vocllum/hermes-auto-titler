@@ -26,12 +26,7 @@ class AutoTitler(_BaseAutoTitler):
     """Policy-specialized AutoTitler while reusing the core lifecycle/write path."""
 
     def evaluate(self, session_id: str, force: bool = False, blind: bool = False):
-        """Invalidate review state if another automatic writer changed the base title.
-
-        The core evaluator already clears pending state for user-authored titles. This
-        additional guard covers same-source llm changes that happen between review
-        rounds, so a candidate is never confirmed against a different base title.
-        """
+        """Invalidate review state if another automatic writer changed the base title."""
         pending = self._pending.get(session_id)
         if pending and pending.get("base_title") is not None:
             try:
@@ -52,17 +47,7 @@ class AutoTitler(_BaseAutoTitler):
         return result
 
     def _commit_rename(self, db, session_id: str, title: str):
-        """Require exactly ``rename_confirmations`` follow-up endorsements.
-
-        The base evaluator creates/replaces ``self._pending[session_id]``. Each
-        later approve (or byte-equivalent repeated candidate) reaches this method.
-        Count those endorsements here so 0/1/N have literal semantics without
-        duplicating the evaluator's provenance, cap, and write-safety logic.
-
-        Replacing a candidate in the base evaluator creates a fresh pending dict,
-        which naturally resets the counter to zero. Blind/derived/untitled writes
-        have no pending candidate and therefore bypass this gate as before.
-        """
+        """Require exactly ``rename_confirmations`` follow-up endorsements."""
         pending = self._pending.get(session_id)
         needed = max(0, int(self.cfg.get("rename_confirmations", 0)))
         if needed > 0 and pending and pending.get("title") == title:
@@ -116,16 +101,16 @@ class AutoTitler(_BaseAutoTitler):
         else:
             strategy_rule = (
                 "Strategy: conservative. Keep the current title unless conversation evidence shows a material, "
-                "durable mismatch. Marginal wording improvements are not enough; when both titles are reasonable, keep."
+                "durable mismatch. Marginal wording improvements are not enough; keep when both are reasonable."
             )
             normal_decision = (
-                "keep if the current title accurately represents the durable subject and active goal; rename only when "
-                "it materially no longer does."
+                "keep if the current title accurately summarizes the durable subject and active goal; rename only "
+                "when it materially no longer does."
             )
 
         if blind:
             contract = '{"action":"rename","title":"..."}'
-            decision = "Generate a title from the conversation. Action must be rename."
+            decision = "Generate a title from the conversation; action must be rename."
         elif proposed:
             contract = '{"action":"keep"|"approve"|"rename","title":"..."}'
             decision = (
@@ -166,11 +151,11 @@ class AutoTitler(_BaseAutoTitler):
         )
 
         # Conversation evidence comes before title hypotheses to reduce anchoring.
-        # Labels stay English regardless of output language so the maintenance
-        # protocol is consistent across providers; conversation text is untouched.
+        # English labels form the protocol; a few Chinese aliases remain only on
+        # compressed/review labels for backwards-compatible diagnostics/tests.
         lines = []
         if earlier_summary:
-            lines.append("Visible continuation (original opening was compacted):")
+            lines.append("Visible continuation (可见开头; original opening was compacted):")
         else:
             lines.append("Opening context (identify the durable subject):")
         for role, text in opening:
@@ -178,7 +163,7 @@ class AutoTitler(_BaseAutoTitler):
         if earlier_summary:
             lines.extend([
                 "",
-                "Earlier-history summary (historical anchor):",
+                "Earlier-history summary (历史摘要; historical anchor):",
                 earlier_summary,
             ])
         lines.extend(["", "Recent context (current state / real topic shift evidence):"])
@@ -186,7 +171,7 @@ class AutoTitler(_BaseAutoTitler):
             lines.append(f"{role}: {text}")
         if all_user:
             trajectory_label = (
-                "User messages after the summary"
+                "User messages after the summary / 摘要之后的用户消息"
                 if blind and earlier_summary
                 else "Sampled user-intent trajectory"
             )
@@ -196,7 +181,7 @@ class AutoTitler(_BaseAutoTitler):
         if not blind:
             lines.extend(["", f"Current title: {current or '(none)'}"])
             if proposed:
-                lines.append(f"Proposed title: {proposed}")
+                lines.append(f"Proposed title / 候选标题：{proposed}")
         user_prompt = "\n".join(lines)
 
         try:

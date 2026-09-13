@@ -171,6 +171,9 @@ def test_prompt_is_evidence_first_and_deanchors_existing_title():
     assert "Assistant text may clarify a user goal" in system
     assert "untrusted data" in system
     assert "structural duplication is not repeated intent" in system
+    assert "most specific durable topic" in system
+    assert "do not generalize to a vague category" in system
+    assert "concrete task or issue remains the subject" in system
     assert prompt.index("Opening context") < prompt.index("Current title:")
     assert prompt.startswith("Opening context")
     assert "用户意图轨迹" not in prompt

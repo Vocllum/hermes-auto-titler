@@ -25,6 +25,32 @@ log = logging.getLogger(__name__)
 class AutoTitler(_BaseAutoTitler):
     """Policy-specialized AutoTitler while reusing the core lifecycle/write path."""
 
+    def evaluate(self, session_id: str, force: bool = False, blind: bool = False):
+        """Invalidate review state if another automatic writer changed the base title.
+
+        The core evaluator already clears pending state for user-authored titles. This
+        additional guard covers same-source llm changes that happen between review
+        rounds, so a candidate is never confirmed against a different base title.
+        """
+        pending = self._pending.get(session_id)
+        if pending and pending.get("base_title") is not None:
+            try:
+                current = self.db.get_session_title(session_id)
+            except Exception:
+                current = pending.get("base_title")
+            if current != pending.get("base_title"):
+                self._pending.pop(session_id, None)
+
+        result = super().evaluate(session_id, force=force, blind=blind)
+        if result.get("action") == "pending":
+            pending = self._pending.get(session_id)
+            if pending is not None and "base_title" not in pending:
+                try:
+                    pending["base_title"] = self.db.get_session_title(session_id)
+                except Exception:
+                    pass
+        return result
+
     def _commit_rename(self, db, session_id: str, title: str):
         """Require exactly ``rename_confirmations`` follow-up endorsements.
 

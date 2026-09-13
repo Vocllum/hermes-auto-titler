@@ -14,7 +14,7 @@ user_message_preview_chars: 300
 summary_preview_chars: 1200      # 日常评估的压缩摘要预算
 retitle_summary_chars: 12000     # blind/手动/批量重生成的压缩摘要预算；0=沿用 preview_chars
 title_style: concise  # concise=主体标签；complete=简短事件/意图概括，并增加显示列宽预算
-strategy: conservative  # v0.1.3 兼容键；当前生成路径对 conservative/aggressive 使用同一套持续主题判定
+strategy: conservative  # conservative=仅明显持久失配才改；aggressive=明确放弃旧目标或持续新主线形成后更快跟进
 # provider/model 都留空时复用 Hermes 内建 title_generation 辅助任务；
 # 任一值存在时，走插件显式配置的独立通道。
 provider: ""
@@ -22,5 +22,5 @@ model: ""
 min_interval_minutes: 5
 max_title_length: 24
 max_display_width: 40
-rename_confirmations: 0  # 0=一次判定后直接写；1=候选挂起，再做一次复审。当前 >1 与 1 使用同一复审门
+rename_confirmations: 0  # 0=一次判定直接写；N>0=候选需再获得 N 次后续背书才写；换候选后重新计数
 renames_per_hour: 0      # 单会话每小时成功改名上限（滑动窗口）；0=不限

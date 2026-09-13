@@ -1,6 +1,6 @@
 name: hermes-auto-titler
 version: 0.1.3
-description: "Provenance-aware automatic session title maintenance"
+description: "Topic-aware session re-titling for Hermes Agent"
 author: "Vocllum"
 provides_hooks:
   - on_session_end

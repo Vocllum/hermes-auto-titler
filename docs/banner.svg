@@ -1,4 +1,4 @@
-<svg width="1200" height="320" viewBox="0 0 1200 320" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="hermes-auto-titler — session titles that follow the conversation">
+<svg width="1200" height="320" viewBox="0 0 1200 320" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="hermes-auto-titler — session titles that follow the conversation, not just the opening prompt">
   <defs>
     <linearGradient id="bg2" x1="0" y1="0" x2="1200" y2="320" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#fdfcfa"/>
@@ -44,7 +44,7 @@
 
   <text x="62" y="164" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="50" font-weight="700" letter-spacing="-1.5" fill="#1d1d1f">hermes-auto-titler</text>
   <text x="65" y="200" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="19" font-weight="500" fill="#57534e">Session titles that follow the conversation —</text>
-  <text x="65" y="228" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="19" font-weight="700" fill="#1d1d1f">not the last message.</text>
+  <text x="65" y="228" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, sans-serif" font-size="19" font-weight="700" fill="#1d1d1f">not just the opening prompt.</text>
 
   <!-- right: sessions card -->
   <g filter="url(#cardshadow)">

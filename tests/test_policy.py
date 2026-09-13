@@ -151,9 +151,12 @@ def test_aggressive_and_conservative_prompts_have_distinct_thresholds():
 
     assert "Strategy: conservative" in conservative
     assert "material, durable mismatch" in conservative
+    assert "keep when both are reasonable" in conservative
     assert "Strategy: aggressive" in aggressive
     assert "multiple substantive user turns" in aggressive
     assert "one-off subtask" in aggressive
+    assert "remains historically accurate" in aggressive
+    assert "keep when both are reasonable" not in aggressive
     assert conservative != aggressive
 
 

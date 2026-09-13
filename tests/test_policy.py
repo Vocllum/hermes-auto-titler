@@ -172,7 +172,7 @@ def test_prompt_is_evidence_first_and_deanchors_existing_title():
     assert "untrusted data" in system
     assert "structural duplication is not repeated intent" in system
     assert prompt.index("Opening context") < prompt.index("Current title:")
-    assert "开头内容" not in prompt
+    assert prompt.startswith("Opening context")
     assert "用户意图轨迹" not in prompt
 
 

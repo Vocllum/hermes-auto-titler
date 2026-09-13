@@ -22,5 +22,5 @@ model: ""
 min_interval_minutes: 5
 max_title_length: 24
 max_display_width: 40
-rename_confirmations: 0  # 0=一次判定直接写；N>0=候选需再获得 N 次后续背书才写；换候选后重新计数
+rename_confirmations: 1  # 默认再确认1次；0=一次判定直接写；N>0=候选需再获得N次后续背书；换候选后重新计数
 renames_per_hour: 0      # 单会话每小时成功改名上限（滑动窗口）；0=不限

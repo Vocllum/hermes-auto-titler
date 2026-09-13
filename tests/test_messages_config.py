@@ -395,7 +395,7 @@ def test_load_context_user_message_limits():
         db, "s1", recent_turns=1, include_all_user=True,
         user_message_threshold=8, user_message_preview_chars=10,
     )
-    assert len(all_user) == 8  # 前 2 + 后 6
+    assert len(all_user) == 8
     assert all_user[0][1].startswith("消息0")
     assert all_user[-1][1].startswith("消息19")
     # 首尾句提取生效（短消息原样，超长的被提取）
@@ -512,12 +512,14 @@ def test_config_yaml_list_does_not_crash(tmp_path):
 def test_rename_confirmations_defaults_and_clamps(tmp_path):
     p = tmp_path / "config.yaml"
 
-    # 缺省：0（关闭确认，单次直接写）
+    # 0.2 缺省：1（候选再获得 1 次后续背书才写入）
     p.write_text("enabled: true\n", encoding="utf-8")
     cfg = load_config(path=p)
-    assert cfg["rename_confirmations"] == 0
+    assert cfg["rename_confirmations"] == 1
 
-    # 合法值 1/2/3
+    # 合法值 0/1/2/3
+    p.write_text("rename_confirmations: 0\n", encoding="utf-8")
+    assert load_config(path=p)["rename_confirmations"] == 0
     p.write_text("rename_confirmations: 1\n", encoding="utf-8")
     assert load_config(path=p)["rename_confirmations"] == 1
     p.write_text("rename_confirmations: 2\n", encoding="utf-8")
@@ -526,8 +528,6 @@ def test_rename_confirmations_defaults_and_clamps(tmp_path):
     assert load_config(path=p)["rename_confirmations"] == 3
 
     # 下限钳到 0，非负整数原样保留（不设多余的人为上限）
-    p.write_text("rename_confirmations: 0\n", encoding="utf-8")
-    assert load_config(path=p)["rename_confirmations"] == 0
     p.write_text("rename_confirmations: -2\n", encoding="utf-8")
     assert load_config(path=p)["rename_confirmations"] == 0
     p.write_text("rename_confirmations: 99\n", encoding="utf-8")
@@ -550,7 +550,6 @@ def test_renames_per_hour_zero_disables_cap(tmp_path):
     assert load_config(path=p)["renames_per_hour"] == 0
     p.write_text("renames_per_hour: 6\n", encoding="utf-8")
     assert load_config(path=p)["renames_per_hour"] == 6
-
 
 
 # -- 配置加固：数值布尔 / NaN / inf / 非字符串 model / 负长度 -------------------

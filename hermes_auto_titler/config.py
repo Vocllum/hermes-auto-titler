@@ -39,9 +39,9 @@ DEFAULTS: dict[str, Any] = {
     # hermes-auto-titler 这类较长的字面标识符及少量中文意图。
     "max_title_length": 24,
     "max_display_width": 40,
-    # 评审协议：0 = 关闭（单次评估直接改名写库）；
-    # 1 = 确认 1 次（第 1 轮产生待审候选 pending，第 2 轮模型觉得上一轮改名可以则 approve 采用落库）。
-    "rename_confirmations": 0,
+    # 0 = 单次判定直接写；N>0 = 首次提出候选后，再要求 N 次后续背书。
+    # 0.2 默认 1：降低单次误判导致的标题跳动；需要更快响应可显式改回 0。
+    "rename_confirmations": 1,
     # 单会话每小时实际改名次数上限（滑动 60 分钟窗口）；0 = 不设上限。
     "renames_per_hour": 0,
 }
@@ -202,13 +202,13 @@ def save_config(cfg: dict[str, Any], path: Path | None = None) -> None:
 def disable_builtin_title_generation() -> bool:
     """Disable Hermes' competing first-title generator for ``first_title_mode=plugin``.
 
-    The plugin's takeover mode promises that the plugin owns the first title.  Leaving
+    The plugin's takeover mode promises that the plugin owns the first title. Leaving
     the host task enabled makes both generators race, and the host's short first-message
-    title can win before the plugin sees the full conversation.  Use Hermes' own config
+    title can win before the plugin sees the full conversation. Use Hermes' own config
     loader/saver so profile paths, locking, and atomic writes remain host-owned.
 
     Returns ``True`` when this call changed the host config, ``False`` when it was already
-    disabled.  Callers should catch failures: an unavailable config writer must not stop
+    disabled. Callers should catch failures: an unavailable config writer must not stop
     the title plugin from loading.
     """
     from hermes_cli.config import load_config as load_host_config, save_config as save_host_config

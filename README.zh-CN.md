@@ -43,7 +43,7 @@ Hermes 可以根据开场对话生成第一版标题，但会话会继续发展�
 | **证据优先判定** | 先根据对话证据独立推断持续主题，再比较当前标题/待审标题。明确或重复的用户目标权重最高；assistant 内容可以解释用户意图，但不能单独创造新主题。 |
 | **与 Hermes 首标题协作** | 默认 `first_title_mode: builtin`，第一版标题交给 Hermes，插件负责后续维护；切到 `plugin` 才从第一轮开始接管。 |
 | **保守 / 激进策略** | `conservative` 只有明显、持续的失配才改；`aggressive` 在用户明确放弃旧目标或连续实质回合形成新方向后更快跟进，但单次子任务、状态检查和工具变化仍不算转题。 |
-| **N 轮复审门** | `rename_confirmations: 0` 表示一次改名判定后直接写；`N > 0` 表示候选还要获得 N 次后续背书才写。模型换了候选后重新计数；`renames_per_hour` 另行限制改名频率。 |
+| **N 轮复审门** | v0.2 默认 `rename_confirmations: 1`，即 llm→llm 候选还要再获得一次后续背书。设为 `0` 可改成一次判定直接写；更大的 N 要求 N 次后续背书，换候选后重新计数。 |
 | **调用次数受控** | 轮数门控、单会话时间节流、来源检查、in-flight 去重和内部回合过滤，让多数前台轮次根本不触发标题模型。 |
 | **保守表面规范化** | 保留 repo 名、文件名、命令和其他 literal identifier；只在安全边界补中英文空格，并且只有当前会话给出大小写证据时才统一名称大小写。 |
 | **Profile 隔离 + 可审计** | SessionDB 句柄按 Hermes profile 分开缓存；真实模型调用以 `task=hermes_auto_titler` 记入 Hermes 用量统计。 |
@@ -56,7 +56,7 @@ Hermes 可以根据开场对话生成第一版标题，但会话会继续发展�
 1. **决定第一版标题归谁** —— 默认由 Hermes 内建 `title_generation` 辅助任务生成第一版标题。`first_title_mode: plugin` 下，插件从第一个完整前台轮次开始评估，并在插件加载时关闭宿主内建标题器，避免双重生成。
 2. **触发与门控** —— 挂 `on_session_end` / `on_session_finalize`。只有完整前台轮次计入 `every_n_turns`；失败、被打断、cron、subagent、bg-review 都不计。周期评估放到 daemon worker，关闭/终局评估同步执行，并继续受 `min_interval_minutes` 约束。
 3. **构造意图上下文** —— 开头轮次 + 最近轮次（每个选中轮次只留用户消息和最后一条 assistant 回复）+ 首条与最近若干用户消息组成的受限轨迹。若压缩已经移除原始 opening，则把 earlier summary 单独作为历史锚点。交接包装和 replay 噪声会在采样前清理。
-4. **先推断主题，再比较标题** —— 辅助模型只返回严格 JSON。对话证据会放在当前标题/候选标题之前，降低旧标题造成的锚定；明确、重复的用户意图高于摘要和 assistant 文本。提示词仍用反事实规则排除偶然出现的工具，除非工具本身就是正在开发、配置、排障或比较的对象。
+4. **先推断主题，再比较标题** —— 辅助模型只返回严格 JSON。对话证据放在当前标题/候选标题之前，降低旧标题造成的锚定；同一条消息可能同时出现在 opening/recent/trajectory，提示词明确要求这种结构性重复不能算作“用户重复表达意图”。
 5. **应用策略阈值** —— `conservative` 在标题仍大体准确时倾向保留；`aggressive` 在用户明确替换旧目标，或多个实质用户回合形成持续的新方向时更快转题，但“最新一条消息”本身永远不构成充分证据。
 6. **可选多轮复审** —— `rename_confirmations: N` 时，llm→llm 改名先进入 pending，之后还要获得 N 次后续背书才写入；如果模型提出不同的新候选，计数从 0 重新开始。无标题/derived 升级以及显式 blind 重生成不经过这层。
 7. **安全写回** —— 每次写尝试前重新核对 provenance；待审期间如果基础自动标题被其他路径改掉，旧候选直接失效；标题冲突时添加后缀，并继续遵守字符数和显示列宽限制。自动标题写入后保持 `llm` 来源，因此以后用户手改仍然拥有更高优先级。
@@ -68,7 +68,7 @@ Hermes 可以根据开场对话生成第一版标题，但会话会继续发展�
 - **为什么不直接把完整原始 transcript 全塞进去？** 标题模型需要的是持续意图，不是工具过程。插件保留开头/最近证据和受限的首条 + 最近用户轨迹，同时在长消息里保留首部与尾部。
 - **为什么先看证据，再看原标题？** 当前标题适合做比较对象，却不应该反过来定义会话是什么。把对话证据放在前面，可以减少旧标题的锚定，同时保留写入阶段的保守策略。
 - **为什么关闭评估要同步？** 会话已经关闭后才写进去的标题可能没人再看到。关闭评估最多可能阻塞到 provider timeout（约 30 秒），换取在 teardown 前最后一次更新标题的机会。
-- **为什么允许配置复审深度？** 单次改名即使看起来合理，也可能造成来回跳动。通常 `1` 次额外背书就够；更大的值则明确用响应速度换更强的防震荡能力。
+- **为什么默认复审 1 次？** 单次改名判断可能合理但短暂。再要求一次后续背书，能降低标题来回变化；如果更看重响应速度，可把 `rename_confirmations` 显式改成 `0`。更大的值则继续增加复审深度。
 - **已知限制：** Hermes 没有公开提供同来源标题写入的原子 compare-and-swap，因此 llm→llm 更新仍有极小竞态窗口；插件只能缩小并检测这个窗口，不能宣称完全不存在。
 
 </details>
@@ -128,6 +128,8 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 - 这个通道只用于标题评估，主对话继续使用自己的模型。
 - `/autotitler status` 显示的是插件自身的路由配置。如果看到 `(host default)`，实际 provider/model 需要到 Hermes 的 `auxiliary.title_generation` 配置中查看。
 
+**模型建议。** 这个任务的目标就是让体量较小、成本较低、指令遵循可靠的模型也能完成；比起深度推理，更重要的是严格 JSON、多语言意图判断和遵守规则。建议先用 Hermes 原有的 `title_generation` 辅助通道，再用 `scripts/review_sample.py` 对自己的历史会话做抽样。如果出现主题漂移、JSON 格式错误，或长会话/压缩会话中的多语言命名明显变差，再把标题通道换到更强模型。不要只因为价格低就默认任何小模型都足够。
+
 **要求：** Python ≥ 3.11 · 较新的 Hermes Agent。
 
 > **接管模式注意：** `first_title_mode: plugin` 会在插件加载时通过宿主配置关闭 Hermes 内建标题器。运行期间修改 `first_title_mode` 不会重新执行这一步；从 `plugin` 切回 `builtin` 时，插件也不会自动重新启用之前被它关闭的宿主标题器。因此标题所有权切换应按“修改配置 → 检查 `auxiliary.title_generation.enabled` → 重启 Hermes”处理。
@@ -160,8 +162,8 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `strategy` | `conservative` | `conservative` = 只有明显、持续的失配才改；`aggressive` = 用户明确放弃旧目标或多个实质回合形成持续新方向后更快跟进，但不把单次子任务/工具变化当作转题。 |
 | `provider` / `model` | `""` / `""` | 都为空 = Hermes `title_generation` 辅助任务；填写任一项 = 插件自定义通道。 |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔。 |
-| `max_title_length` / `max_display_width` | `24` / `40` | 字符数和显示列宽硬限制（提示词目标约 12 字符）；`complete` 风格额外增加 12 列。 |
-| `rename_confirmations` | `0` | `0` = 一次判定后直接执行 llm→llm 改名；`N > 0` = 候选还需获得 N 次后续背书才写入；若候选被替换则重新计数。 |
+| `max_title_length` / `max_display_width` | `24` / `40` | 字符数和显示列宽硬限制（提示词目标约 12 个中文字符或相近的简洁长度）；`complete` 风格额外增加 12 列。 |
+| `rename_confirmations` | `1` | v0.2 默认再要求 1 次后续背书；`0` = 一次判定后直接写；`N > 1` = 需要 N 次后续背书。若候选被替换则重新计数。 |
 | `renames_per_hour` | `0` | 单会话滑动窗口内“成功写入”的改名次数上限；`0` = 不限。 |
 
 </details>
@@ -187,18 +189,20 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 
 **真正控制成本的是调用频率：** `every_n_turns`、`min_interval_minutes`、来源检查、in-flight 去重、cron/subagent/被打断回合过滤，使多数轮次不调用标题模型。每次真实调用都会以 `task=hermes_auto_titler` 记入 Hermes 用量统计。
 
-想把成本压低，优先给 Hermes 的辅助标题通道路由廉价模型，或显式配置插件自定义通道。
+设计目标是优先使用成本较低的辅助模型，但应先在自己的真实会话上抽样验证；长会话和压缩会话最适合作为压力样本。
 
 ## 🧪 开发
 
 ```bash
 uv venv .venv && uv pip install --python .venv/bin/python pytest PyYAML
 .venv/bin/python -m pytest tests/ -v
-<your-hermes-checkout>/venv/bin/python scripts/integration_check.py     # 临时 DB 集成套件
-<your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>  # 真实模型端到端
+<your-hermes-checkout>/venv/bin/python scripts/integration_check.py
+<your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20
+<your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20 --strategy aggressive
+<your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>
 ```
 
-> `review_sample.py` 会读取真实 SessionDB 并把片段发送给所配模型。`retitle_all.py --dry-run` 无副作用；不带该参数会真实重写标题。
+`review_sample.py` 是 dry-run，并且现在会完整复用已加载的生产配置，包括 preview、用户轨迹和摘要预算。验证新模型或新 prompt 时，建议对同一批样本分别跑 `conservative` / `aggressive`。`retitle_all.py --dry-run` 不调用模型也不写标题；去掉该参数后会真实改写符合条件的自动标题。
 
 ## 📄 许可证
 

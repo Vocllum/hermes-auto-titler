@@ -64,8 +64,8 @@ def dec(action, title=""):
     return json.dumps({"action": action, "title": title})
 
 
-def make(confirmations=0, strategy="conservative"):
-    db = FakeDB()
+def make(confirmations=0, strategy="conservative", *, title="旧标题", source="llm"):
+    db = FakeDB(title=title, source=source)
     llm = FakeLlm(dec("rename", "新标题"))
     t = AutoTitler(
         SimpleNamespace(llm=llm),
@@ -153,9 +153,9 @@ def test_aggressive_and_conservative_prompts_have_distinct_thresholds():
     assert "material, durable mismatch" in conservative
     assert "keep when both are reasonable" in conservative
     assert "Strategy: aggressive" in aggressive
-    assert "multiple substantive user turns" in aggressive
+    assert "sustained across substantive user turns" in aggressive
     assert "one-off subtask" in aggressive
-    assert "remains historically accurate" in aggressive
+    assert "earlier history" in aggressive
     assert "keep when both are reasonable" not in aggressive
     assert conservative != aggressive
 
@@ -166,8 +166,29 @@ def test_prompt_is_evidence_first_and_deanchors_existing_title():
     system = llm.calls[-1]["messages"][0]["content"]
     prompt = llm.calls[-1]["messages"][1]["content"]
 
-    assert "Evidence before titles" in system
-    assert "hypotheses to evaluate, not evidence" in system
-    assert "Assistant text may clarify a user goal but must not create a new subject" in system
+    assert "before evaluating title hypotheses" in system
+    assert "Current/proposed titles are hypotheses, not evidence" in system
+    assert "Assistant text may clarify a user goal" in system
     assert "untrusted data" in system
-    assert prompt.index("开头内容") < prompt.index("当前标题：")
+    assert "structural duplication is not repeated intent" in system
+    assert prompt.index("Opening context") < prompt.index("Current title:")
+    assert prompt.startswith("Opening context")
+    assert "用户意图轨迹" not in prompt
+
+
+def test_force_rename_contract_is_rename_only():
+    _, llm, t = make(confirmations=0, title="临时标题", source="derived")
+    t.evaluate("s1", force=True)
+    system = llm.calls[-1]["messages"][0]["content"]
+    assert 'Format: {"action":"rename","title":"..."}' in system
+    assert '"keep"|"rename"' not in system.split("Decision policy:", 1)[0]
+    assert "action must be rename" in system
+
+
+def test_review_contract_marks_title_optional_for_non_rename_actions():
+    _, llm, t = make(confirmations=1)
+    assert t.evaluate("s1", force=True)["action"] == "pending"
+    llm.text = dec("approve")
+    t.evaluate("s1", force=True)
+    system = llm.calls[-1]["messages"][0]["content"]
+    assert "The title field is required only for rename" in system

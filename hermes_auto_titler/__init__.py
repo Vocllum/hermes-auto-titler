@@ -13,6 +13,7 @@ import logging
 
 from .config import disable_builtin_title_generation, load_config
 from . import titler as _titler
+from . import policy as _policy
 from .policy import AutoTitler
 from .commands import make_handler
 
@@ -20,6 +21,9 @@ from .commands import make_handler
 # same policy-specialized class as the package/runtime entry point. Core lifecycle
 # and DB plumbing remain in titler.py; prompt/review policy lives in policy.py.
 _titler.AutoTitler = AutoTitler
+# Existing diagnostics/tests consume the historical titler logger; policy logs
+# remain on that channel even though the implementation is split across modules.
+_policy.log = _titler.log
 
 log = logging.getLogger(__name__)
 

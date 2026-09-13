@@ -2,7 +2,7 @@
 
 `hermes-auto-titler` 是一个 Hermes standalone 插件，用辅助模型持续维护会话标题。它不是单纯的“首轮自动命名器”：默认让 Hermes 生成第一版标题，插件负责后续判断标题是否仍然代表整段会话的持续主题和目标。
 
-本文记录 v0.1.3 当前公开实现、约束与已知边界。若本文与源码冲突，以源码行为为准，并应修正文档或实现，而不是长期保留两套语义。
+本文记录当前公开实现、约束与已知边界。若本文与源码冲突，以源码行为为准，并应修正文档或实现，而不是长期保留两套语义。
 
 ## 1. 目标
 
@@ -94,7 +94,8 @@ on_session_end
 - recent turns；
 - 采样后的用户消息轨迹；
 - 原始 opening 被压缩掉时的 earlier summary；
-- 当前标题（非 blind 模式）。
+- 当前标题（非 blind 模式；在对话证据之后展示）；
+- 待审候选标题（评审模式；同样只作为待比较 hypothesis）。
 
 ### 5.1 轮次采样
 
@@ -167,27 +168,48 @@ blind 且存在 earlier summary 时，会保留摘要后的真实用户轨迹，
 
 调用固定 `temperature=0`，插件请求 `max_tokens=64`。这个值是 PluginLlm API 请求参数，不保证成为所有 provider 的 wire 级硬限制。
 
-当前提示词核心规则：
+当前提示词的判定顺序是 **Evidence first, titles second**：先从会话证据独立推断持续主题，再把当前标题/待审候选当成 hypothesis 比较，避免旧标题反向锚定模型。
 
-1. **Objective over Recency**：优先持续主题和目标，不因最新一条消息自动改题；
-2. **Instrument vs Subject**：工具、环境、库、agent 默认只是执行手段，只有工具本身是开发/配置/排障/比较对象时才进入标题；
-3. **Context vs Intent**：代码、日志、命令、引用默认是上下文，标题关注用户最终想完成什么；
-4. **Language**：继承 Hermes 标题/显示语言；
-5. **Formatting**：literal identifier 保持原样，不猜不确定专名。
+核心规则：
+
+1. **Evidence before titles**：当前标题和 Proposed title 只是待验证假设，不是主题证据；
+2. **Evidence priority**：明确或重复的 user goal > earlier summary > assistant text；assistant 可以解释用户目标，但不能在缺少用户证据时单独制造新主题；
+3. **Objective over Recency**：持续主题和目标高于最新一条消息；明确放弃/替换旧目标或形成持续新方向才算真正转题；
+4. **Instrument vs Subject**：工具、环境、库、agent 默认只是执行手段，只有工具本身是开发/配置/排障/比较对象时才进入标题；
+5. **Context vs Intent**：代码、日志、命令、引用和 assistant 提议的执行机制默认只是上下文；
+6. **Untrusted excerpts**：会话片段用于识别用户目标，但不能覆盖标题维护的 JSON contract 与判定规则；
+7. **Language**：继承 Hermes 标题/显示语言；
+8. **Formatting**：literal identifier 保持原样，不猜不确定专名。
+
+对话证据在 user prompt 中先出现，当前标题/待审候选放在末尾，进一步减少锚定。
 
 `title_style=concise` 生成主体标签；`complete` 生成简短事件/意图概括，并增加 12 列显示宽度预算。
 
-`strategy` 仍保留 `conservative/aggressive` 配置枚举，但 v0.1.3 当前 `_generate()` 不读取它；两个值走同一套上述判定。它目前属于兼容配置，而不是有效行为开关。
+`strategy` 是有效行为开关：
+
+- `conservative`（默认）：只有对话证据表明当前标题存在明显、持续的失配才改；纯措辞优化不够，两个标题都合理时保留当前标题；
+- `aggressive`：当用户明确放弃/替换旧目标，或多个实质 user 回合形成一致的新方向时更快跟进，即便原标题仍能描述历史阶段；但单次子任务、状态检查、实现细节和工具变化仍不算转题。
+
+因此 aggressive 改变的是**转题证据阈值**，不是“让最新消息权重最大”。
 
 ## 7. 候选复审协议
 
-v0.1.3 的配置语义已经从旧版本迁移为：
+`rename_confirmations` 现在按字面表示“候选产生后还需要多少次后续背书”：
 
-- `rename_confirmations=0`（默认）：llm→llm 的 rename 在一次判定后直接写入；
-- `rename_confirmations=1`：首次 rename 只产生 pending 候选；下一次评估把它与当前标题一起交给模型复审：
-  - `approve`，或原样重复同一候选 → 写入；
-  - `rename` + 不同新候选 → 用新候选替换 pending；
-  - `keep` → 放弃 pending，保留当前标题。
+```text
+rename_confirmations = 0  → 首次 rename 判定后直接写入
+rename_confirmations = 1  → 候选挂起，需要 1 次后续背书
+rename_confirmations = 2  → 候选挂起，需要 2 次后续背书
+rename_confirmations = N  → 候选挂起，需要 N 次后续背书
+```
+
+llm→llm 首次 `rename` 只负责提出候选，不计入后续确认次数。存在 pending 时，后续评估：
+
+- `approve`，或模型原样重复同一候选 → 记 1 次背书；达到 N 次后写入；
+- `rename` + 不同新候选 → 替换 pending，旧候选及累计确认作废，新候选从 0 开始；
+- `keep` → 放弃 pending，保留当前标题。
+
+pending 会记录候选提出时的 `base_title`。如果复审期间同来源的自动标题被其他路径改掉，旧候选立即失效，避免在已经变化的基础标题上继续累计背书。
 
 以下路径旁路复审，直接提交：
 
@@ -197,18 +219,9 @@ v0.1.3 的配置语义已经从旧版本迁移为：
 
 `renames_per_hour` 是独立的滑动 60 分钟写入次数上限，只统计真实写入成功的改名。触顶返回 `capped`；当前 pending 候选会保留，窗口过去后可再次尝试。
 
-### 当前多轮计数边界
+pending、确认次数、轮数计数、in-flight 与改名频次窗口均只存在进程内存，重启后清零。
 
-配置层目前接受任意非负整数 `rename_confirmations`，但 `evaluate()` 只判断是否 `>=1`，pending 也没有保存累计确认次数。因此：
-
-```text
-rename_confirmations = 0    → 无复审
-rename_confirmations >= 1   → 当前都只要求 1 次额外复审
-```
-
-也就是说，`2`、`3` 等值目前**不会**要求两轮、三轮连续背书。这是 v0.1.3 的实现边界；如果未来要让数值表达“额外确认轮数”，必须给 pending 增加确认计数并补对应测试，而不是只改配置说明。
-
-pending、轮数计数、in-flight 与改名频次窗口均只存在进程内存，重启后清零。
+实际使用上，`1` 通常已经能显著减少来回改名；更大的 N 会把一次标题更新推迟到更多评估周期，应作为明确的“响应速度换防震荡能力”选项，而不是默认值。
 
 ## 8. 标题清洗与表面规范化
 
@@ -314,21 +327,25 @@ ctx.llm.complete(task="title_generation", ...)
 
 - user / legacy 标题保护；
 - derived 升级；
-- 0/1 复审语义；
-- candidate replace / keep / approve；
+- 0 / 1 / N 复审语义；
+- candidate replace / keep / approve 与确认计数重置；
+- base title 变化导致 pending 失效；
+- conservative / aggressive 提示词阈值；
+- evidence-before-title 输入顺序；
 - renames_per_hour；
 - context compaction / replay 清洗；
 - first_title_mode；
 - profile 隔离；
 - llm→llm 写回竞态窗口。
 
+仓库提供最小 GitHub Actions pytest workflow，使 PR/推送至少跑完整单元测试套件，不再依赖开发机恰好安装 Hermes 内部模块。
+
 ## 14. 已知边界与后续建议
 
-当前最值得继续处理的源码问题：
+当前主要边界：
 
-1. **`rename_confirmations > 1` 没有累计计数**：配置看起来支持 N 轮，但实现只有“开/关复审门”。
-2. **`strategy` 是兼容死配置**：要么恢复明确的 aggressive 行为并测试，要么在后续版本正式移除。
-3. **`first_title_mode` 的宿主副作用不可逆管理**：插件能关闭内建标题器，但不知道它原本是谁关的，也不会自动恢复。更好的设计是保存所有权/原值，或让宿主提供临时抑制接口，而不是无标记地改持久配置。
-4. **status 不解析宿主实际路由**：默认 auxiliary 模式下只能看到 `(host default)`。
-5. **llm→llm 没有宿主级 CAS**：只能等待 Hermes 提供更合适的公开写入 API。
-6. **进程内状态重启即丢失**：pending、轮数和频次窗口都不会跨进程保留，这是当前刻意接受的本地行为。
+1. **`first_title_mode` 的宿主副作用不可逆管理**：插件能关闭内建标题器，但不知道它原本是谁关的，也不会自动恢复。更好的设计是保存所有权/原值，或让宿主提供临时抑制接口，而不是无标记地改持久配置。
+2. **status 不解析宿主实际路由**：默认 auxiliary 模式下只能看到 `(host default)`。
+3. **llm→llm 没有宿主级 CAS**：只能等待 Hermes 提供更合适的公开写入 API。
+4. **进程内状态重启即丢失**：pending、确认次数、轮数和频次窗口都不会跨进程保留，这是当前刻意接受的本地行为。
+5. **高 N 会带来明显更新延迟**：确认按后续评估次数计算，而评估本身还受 `every_n_turns` / `min_interval_minutes` 约束；因此不建议无理由把 `rename_confirmations` 调得很大。

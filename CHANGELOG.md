@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Implement true N-round review semantics: `rename_confirmations: N` now requires N follow-up endorsements before an llm→llm title write; replacing the candidate resets the count, and a pending candidate is discarded if its base automatic title changes between review rounds.
+- Restore meaningful `conservative` / `aggressive` strategies. Aggressive mode follows explicit or sustained topic pivots sooner without treating one-off subtasks or tool changes as new subjects.
+- Make title judgment evidence-first: conversation evidence is evaluated before the existing/proposed title, assistant text is lower-confidence evidence, and conversation excerpts cannot override the title-maintenance protocol.
+
 ## 0.1.3 — 2026-09-12
 
 - Fix context extraction: replace hard front-truncation with dynamic head-and-tail window extraction to preserve tail imperatives.

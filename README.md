@@ -40,8 +40,10 @@ Hermes can name a session from its opening exchange. But conversations evolve; t
 | **Provenance-safe** | Enforces `derived < llm < user`. `derived` = Hermes' deterministic fallback from the first message; `llm` = model-generated; `user` = yours, **never overwritten**. Old titles with no provenance (pre-provenance rows) are treated as user-set and protected too. |
 | **Long-horizon intent tracking** | Combines opening turns, recent turns, a capped user-message trajectory, and compaction summaries when the original opening is gone. Long messages use head+tail extraction so late instructions are not lost. |
 | **Intent-aware capture** | Filters Hermes compaction handoffs, system noise, adjacent replay duplicates, and internal cron/subagent/background turns before they can distort the title. |
+| **Evidence-first judgment** | Infers the durable subject from conversation evidence before comparing the current/proposed title. Explicit and repeated user goals outrank summaries; assistant text cannot create a new subject on its own. |
 | **Native first-title coexistence** | `first_title_mode: builtin` (default) leaves the first title to Hermes and maintains it later. `plugin` lets this plugin own the first title too. |
-| **Optional review gate** | `rename_confirmations: 0` writes an approved llm→llm rename directly. `1` holds the candidate for one additional evaluation, where the model can approve, replace, or drop it. `renames_per_hour` adds a separate churn cap. |
+| **Conservative / aggressive policy** | `conservative` requires a clear durable mismatch. `aggressive` follows explicit abandonment or a sustained new direction sooner, while still rejecting one-off subtasks, status checks, and tool changes as topic shifts. |
+| **N-round review gate** | `rename_confirmations: 0` writes after one rename decision. `N > 0` requires N later endorsements of the pending candidate; replacing the candidate resets the count. `renames_per_hour` adds a separate churn cap. |
 | **Call-efficient by design** | Turn cadence, per-session time throttling, provenance checks, in-flight dedup, and internal-turn exclusion prevent most foreground turns from making a model call. |
 | **Conservative surface cleanup** | Preserves literal identifiers, adds safe CJK↔Latin spacing, and only normalizes name casing when the current conversation provides evidence for that casing. |
 | **Profile-isolated and auditable** | SessionDB handles are cached per Hermes profile, and real model calls are recorded under `task=hermes_auto_titler`. |
@@ -54,17 +56,19 @@ Hermes can name a session from its opening exchange. But conversations evolve; t
 1. **Choose first-title ownership** — by default Hermes handles the first title through its built-in `title_generation` auxiliary task. In `first_title_mode: plugin`, this plugin evaluates from the first completed turn and disables the competing host title generator at plugin load.
 2. **Trigger and gate** — hooks `on_session_end` / `on_session_finalize`. Completed foreground turns count toward `every_n_turns`; failed/interrupted turns and cron/subagent/bg-review work do not. Periodic evals run in a daemon worker; close/finalize evals run synchronously and still honor `min_interval_minutes`.
 3. **Build intent context** — opening turns + recent turns (each selected turn keeps the user message and last assistant reply) + a capped first-and-recent user trajectory. If compaction removed the original opening, the earlier summary becomes a separate historical anchor. Handoff wrappers and replay noise are removed before sampling.
-4. **Judge the subject, not the mechanism** — the auxiliary model returns strict JSON. The prompt prioritizes the durable subject and intended outcome over recency, treats code/logs/commands as context, and uses a counterfactual rule to avoid naming incidental tools unless the tool itself is the object of the session.
-5. **Optionally review a rename** — with `rename_confirmations: 1`, an llm→llm rename becomes a pending candidate. The next evaluation can `approve` it, replace it with a better `rename`, or `keep` the current title. Untitled/derived upgrades and explicit blind regeneration bypass this gate.
-6. **Write safely** — provenance is re-checked before every write attempt. Conflict titles get a suffix that still fits character/display-width limits; successful automatic writes retain `llm` provenance so a later user title remains authoritative.
+4. **Infer before comparing** — the auxiliary model returns strict JSON. Conversation evidence is presented before the current/proposed title to reduce anchoring; explicit/repeated user intent has higher evidential weight than summaries or assistant text. The prompt also uses a counterfactual rule to avoid naming incidental tools unless the tool itself is the object of the session.
+5. **Apply the selected strategy** — `conservative` keeps a broadly accurate title unless there is a material durable mismatch. `aggressive` follows an explicit replacement of the old goal or a sustained coherent new direction sooner, but recency alone is never enough.
+6. **Optionally review a rename** — with `rename_confirmations: N`, an llm→llm rename becomes a pending candidate and must receive N later endorsements before writeback. A different replacement candidate restarts the count. Untitled/derived upgrades and explicit blind regeneration bypass this gate.
+7. **Write safely** — provenance is re-checked before every write attempt. Pending reviews are invalidated if their base automatic title changes. Conflict titles get a suffix that still fits character/display-width limits; successful automatic writes retain `llm` provenance so a later user title remains authoritative.
 
 <details>
 <summary><b>Design decisions worth knowing</b></summary>
 
 - **Why maintenance instead of better first-message naming?** The opening exchange cannot describe work that has not happened yet. Long-running sessions need a label that can be reconsidered as intent develops.
 - **Why sample the trajectory instead of sending the raw transcript?** The title model needs durable intent, not tool chatter. The plugin keeps opening/recent evidence and a bounded first+latest user trajectory, while preserving the head and tail of long messages.
+- **Why infer the subject before showing title hypotheses?** Existing labels are useful comparison targets but poor evidence. Putting conversation evidence first reduces anchoring on an outdated title while preserving conservative write decisions.
 - **Why synchronous close evals?** A title written after the session is closed may never be seen. Close evaluation can block up to the provider timeout (~30 s), but it gives the final visible boundary a chance to land the title before teardown.
-- **Why an optional review gate?** A rename can be individually reasonable and still cause oscillation. One extra evaluation lets the model reconsider the candidate against the conversation before the write.
+- **Why configurable review depth?** A rename can be individually reasonable and still cause oscillation. One extra endorsement is usually enough; higher values deliberately trade responsiveness for more resistance to churn.
 - **Known limitation:** Hermes exposes no atomic compare-and-swap for same-source title writes, so llm→llm updates retain a very small race window. The plugin narrows and detects it rather than claiming it cannot happen.
 
 </details>
@@ -153,11 +157,11 @@ model: "your-model"         # any model your Hermes setup can reach
 | `summary_preview_chars` | `1200` | Compaction-summary budget for normal evaluations. |
 | `retitle_summary_chars` | `12000` | Compaction-summary budget for blind/manual/bulk regeneration; `0` falls back to `preview_chars`. |
 | `title_style` | `concise` | `concise` = subject label · `complete` = short event/intent summary (also gets a wider display budget). |
-| `strategy` | `conservative` | Compatibility setting retained in v0.1.3. The current prompt path uses the same durable-subject decision policy for both configured values. |
+| `strategy` | `conservative` | `conservative` = rename only for a material durable mismatch; `aggressive` = follow explicit abandonment or a sustained new direction sooner, while still ignoring one-off subtasks/tool changes. |
 | `provider` / `model` | `""` / `""` | Both empty = Hermes `title_generation` auxiliary task; set either to select a plugin custom route. |
 | `min_interval_minutes` | `5` | Minimum interval between evaluations of one session. |
 | `max_title_length` / `max_display_width` | `24` / `40` | Character and display-column hard limits (~12-character prompt target). `complete` style adds 12 display columns. |
-| `rename_confirmations` | `0` | `0` = direct llm→llm write after one decision; `1` = require one additional review evaluation. Values above `1` are currently accepted by config parsing but use the same review gate as `1`. |
+| `rename_confirmations` | `0` | `0` = direct llm→llm write after one decision; `N > 0` = require N later endorsements before writeback. Replacing the pending candidate restarts the count. |
 | `renames_per_hour` | `0` | Per-session sliding-window successful-rename cap (`0` = unlimited). |
 
 </details>

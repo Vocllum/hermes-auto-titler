@@ -41,8 +41,6 @@ DEFAULTS: dict[str, Any] = {
     # 0 = 单次判定直接写；N>0 = 首次提出候选后，再要求 N 次后续背书。
     # 0.2 默认 1：降低单次误判导致的标题跳动；需要更快响应可显式改回 0。
     "rename_confirmations": 1,
-    # 单会话每小时实际改名次数上限（滑动 60 分钟窗口）；0 = 不设上限。
-    "renames_per_hour": 0,
 }
 
 VALID_STRATEGIES = {"conservative", "aggressive"}
@@ -149,8 +147,6 @@ def coerce_value(key: str, raw: Any) -> Any:
     elif key == "max_display_width":
         v = max(10, min(int(v), 100))
     elif key == "rename_confirmations":
-        v = max(0, int(v))
-    elif key == "renames_per_hour":
         v = max(0, int(v))
     return v
 

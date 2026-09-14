@@ -545,19 +545,6 @@ def test_rename_confirmations_defaults_and_clamps(tmp_path):
     assert cfg["rename_confirmations"] == DEFAULTS["rename_confirmations"]
 
 
-def test_renames_per_hour_zero_disables_cap(tmp_path):
-    p = tmp_path / "config.yaml"
-    # 缺省 0 = 不设频次上限
-    p.write_text("enabled: true\n", encoding="utf-8")
-    cfg = load_config(path=p)
-    assert cfg["renames_per_hour"] == 0
-    # 负值钳到 0
-    p.write_text("renames_per_hour: -3\n", encoding="utf-8")
-    assert load_config(path=p)["renames_per_hour"] == 0
-    p.write_text("renames_per_hour: 6\n", encoding="utf-8")
-    assert load_config(path=p)["renames_per_hour"] == 6
-
-
 # -- 配置加固：数值布尔 / NaN / inf / 非字符串 model / 负长度 -------------------
 
 def test_config_rejects_numeric_bool_outside_01(tmp_path):

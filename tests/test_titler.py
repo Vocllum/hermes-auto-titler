@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hermes_auto_titler.config import DEFAULTS
 from hermes_auto_titler.messages import display_width, load_context, load_context_with_summary
-from hermes_auto_titler.titler import AutoTitler, _canonicalize_name_case, _name_hints, _normalize_mixed_script_spacing
+from hermes_auto_titler.titler import AutoTitler
 
 
 class FakeDB:
@@ -161,23 +161,6 @@ def _wait_inflight_clear(t, sid, timeout=5.0):
         time.sleep(0.005)
 
 
-def test_name_case_hints_are_conversation_local_and_conservative():
-    hints = _name_hints([
-        ("assistant", "已确认 OpenCodex 的 API"),
-        ("user", "opencodex 相关配置"),
-    ])
-    assert _canonicalize_name_case("opencodex 配置", hints) == "OpenCodex 配置"
-    # 助手单独提到 API 时，不足以把普通词强行首字母化。
-    assert "api" not in _name_hints([("assistant", "API 配置")])
-    # 连接符标识符保持原文，避免把私有命令/仓库名拆改。
-    assert _canonicalize_name_case("opencodex-hindsight", hints) == "opencodex-hindsight"
-
-
-def test_mixed_script_spacing_does_not_modify_identifiers():
-    assert _normalize_mixed_script_spacing("codex hindsight提取") == "codex hindsight 提取"
-    assert _normalize_mixed_script_spacing("hermes-auto-titler补丁") == "hermes-auto-titler补丁"
-
-
 MSGS = [
     {"role": "user", "content": "帮我看看 Test 空转的问题"},
     {"role": "assistant", "content": "我查了日志，是 wake 重放导致的"},
@@ -232,16 +215,6 @@ def test_keep_does_not_write():
     r = t.evaluate("s1", force=True)
     assert r["action"] == "keep"
     assert db.calls == []
-
-
-def test_keep_repairs_safe_mixed_script_spacing_in_existing_auto_title():
-    db = FakeDB(messages=MSGS, title="codex hindsight提取无关信息", source="llm")
-    t, _ = make_titler(db, text=_dec("keep"))
-    r = t.evaluate("s1", force=True)
-    assert r["action"] == "renamed"
-    assert r["title"] == "codex hindsight 提取无关信息"
-    assert db.title == "codex hindsight 提取无关信息"
-    assert db.source == "llm"
 
 
 def test_evaluate_logs_capture_shape_and_parsed_llm_result(caplog):
@@ -1491,12 +1464,12 @@ def test_config_command_enabled_message_notes_restart(monkeypatch):
 
 # -- 评审协议：候选标题由下一次评估裁决（approve/rename/keep） --------------------
 
-def _review_titler(confirmations=1, per_hour=0, title="旧标题"):
-    db = FakeDB(messages=MSGS, title=title, source="llm")
+def _review_titler(confirmations=1, per_hour=0):
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t, ctx = make_titler(
         db,
         text=_dec("rename", "新标题"),
-        cfg={"rename_confirmations": confirmations, "renames_per_hour": per_hour},
+        cfg={"rename_confirmations": confirmations},
     )
     return db, t, ctx
 
@@ -1648,41 +1621,6 @@ def test_review_prompt_shows_proposed_title_and_approve_contract():
     assert "候选标题：" in second_user
     assert "新标题" in second_user
     assert "approve" in second_system
-
-
-def test_renames_per_hour_cap_blocks_and_recovers():
-    # 每小时频次上限：窗口内第 3 次（上限 2）被拒；窗口滑过后 approve 落库
-    db, t, ctx = _review_titler(per_hour=2)
-    now = 1000.0
-    with patch("hermes_auto_titler.titler.time.time", return_value=now):
-        assert t.evaluate("s1", force=True)["action"] == "pending"
-    with patch("hermes_auto_titler.titler.time.time", return_value=now + 60):
-        ctx.llm.text = _dec("approve")
-        assert t.evaluate("s1", force=True)["action"] == "renamed"  # 写 #1
-    # 第二个候选：pending → approve → 写 #2（窗口内第 2 次，仍允许）
-    db.title = "又旧了"
-    with patch("hermes_auto_titler.titler.time.time", return_value=now + 120):
-        ctx.llm.text = _dec("rename", "另一标题")
-        assert t.evaluate("s1", force=True)["action"] == "pending"
-    with patch("hermes_auto_titler.titler.time.time", return_value=now + 180):
-        ctx.llm.text = _dec("approve")
-        assert t.evaluate("s1", force=True)["action"] == "renamed"  # 写 #2
-    # 第三个候选 approve 时触顶 → capped 不写，候选保留
-    db.title = "第三版旧标题"
-    with patch("hermes_auto_titler.titler.time.time", return_value=now + 240):
-        ctx.llm.text = _dec("rename", "第三候选")
-        assert t.evaluate("s1", force=True)["action"] == "pending"
-    with patch("hermes_auto_titler.titler.time.time", return_value=now + 300):
-        ctx.llm.text = _dec("approve")
-        r = t.evaluate("s1", force=True)
-        assert r["action"] == "capped"
-        assert db.title == "第三版旧标题"
-    # 窗口滑过（最早一次写 >3600s 前）→ 下一次 approve 落库
-    with patch("hermes_auto_titler.titler.time.time", return_value=now + 60 + 3600 + 1):
-        ctx.llm.text = _dec("approve")
-        r = t.evaluate("s1", force=True)
-        assert r["action"] == "renamed"
-        assert db.title == "第三候选"
 
 
 def test_user_race_during_confirmation_clears_pending():

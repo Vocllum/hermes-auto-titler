@@ -52,114 +52,6 @@ _db_lock = threading.Lock()
 # Hermes 内部平台：cron（定时任务）与 subagent（子代理）的轮次不参与标题评估
 _INTERNAL_PLATFORMS = frozenset({"cron", "subagent"})
 
-_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
-_HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7a3]")
-_IDENTIFIER_PUNCT = frozenset("-_.:/#")
-
-
-def _is_han(ch: str) -> bool:
-    return bool(ch and _HAN_RE.fullmatch(ch))
-
-
-def _has_identifier_neighbor(text: str, start: int, end: int) -> bool:
-    """Whether an ASCII word is part of a literal identifier.
-
-    ``hermes-auto-titler`` and ``verify_on_stop`` must stay byte-for-byte
-    intact.  Plain product words such as ``Codex`` can be spaced/canonicalized
-    next to Chinese text; identifier-like tokens are left alone.
-    """
-    i = start - 1
-    while i >= 0 and (text[i].isalnum() or text[i] in _IDENTIFIER_PUNCT):
-        if text[i] in _IDENTIFIER_PUNCT:
-            return True
-        i -= 1
-    i = end
-    while i < len(text) and (text[i].isalnum() or text[i] in _IDENTIFIER_PUNCT):
-        if text[i] in _IDENTIFIER_PUNCT:
-            return True
-        i += 1
-    return False
-
-
-def _name_hints(items: List[Tuple[str, str]]) -> Dict[str, str]:
-    """Infer capitalization only when the current conversation supports it.
-
-    A lowercase user form and an explicitly cased assistant form must both be
-    present.  This prevents common words such as ``we`` or ``api`` from being
-    changed merely because they appeared capitalized somewhere in an answer,
-    while still correcting a locally evidenced product-name spelling.
-    """
-    variants: Dict[str, Dict[str, int]] = {}
-    user_lower: set[str] = set()
-    assistant_variants: set[str] = set()
-    for role, text in items:
-        for match in _NAME_TOKEN_RE.finditer(text or ""):
-            token = match.group(0)
-            key = token.lower()
-            variants.setdefault(key, {})[token] = variants.setdefault(key, {}).get(token, 0) + 1
-            if role == "user" and token == key and len(token) > 1:
-                user_lower.add(key)
-            if role == "assistant" and token != key and any(ch.isupper() for ch in token):
-                assistant_variants.add(token)
-    hints: Dict[str, str] = {}
-    for key, choices in variants.items():
-        if key not in user_lower:
-            continue
-        supported = {
-            token: score
-            for token, score in choices.items()
-            if token in assistant_variants
-        }
-        if not supported:
-            continue
-        preferred, _ = max(
-            supported.items(),
-            key=lambda item: (item[1], sum(ch.isupper() for ch in item[0]), len(item[0])),
-        )
-        hints[key] = preferred
-    return hints
-
-
-def _canonicalize_name_case(title: str, hints: Dict[str, str]) -> str:
-    if not title or not hints:
-        return title
-
-    def replace(match: re.Match[str]) -> str:
-        token = match.group(0)
-        if _has_identifier_neighbor(title, match.start(), match.end()):
-            return token
-        preferred = hints.get(token.lower())
-        return preferred if preferred and token == token.lower() else token
-
-    return _NAME_TOKEN_RE.sub(replace, title)
-
-
-def _normalize_mixed_script_spacing(title: str) -> str:
-    """Add one space at safe Latin/CJK word boundaries.
-
-    The operation is intentionally conservative and skips literal identifiers
-    containing ``-``, ``_``, ``.``, ``/``, ``:`` or ``#``.
-    """
-    if not title:
-        return title
-    out = title
-    changed = True
-    while changed:
-        changed = False
-        for match in list(_NAME_TOKEN_RE.finditer(out)):
-            start, end = match.span()
-            if _has_identifier_neighbor(out, start, end):
-                continue
-            if start > 0 and _is_han(out[start - 1]) and out[start - 1] != " ":
-                out = out[:start] + " " + out[start:]
-                changed = True
-                break
-            if end < len(out) and _is_han(out[end]) and (end == len(out) or out[end] != " "):
-                out = out[:end] + " " + out[end:]
-                changed = True
-                break
-    return out
-
 
 def get_db() -> SessionDB:
     key = str(get_hermes_home())
@@ -233,7 +125,6 @@ class AutoTitler:
         # 滞后机制：session_id -> {"title": 待审候选}（评审协议，见 evaluate）
         self._pending: Dict[str, Dict[str, Any]] = {}
         # 频次窗口：session_id -> 实际改名时间戳列表（滑动 60 分钟）
-        self._rename_times: Dict[str, List[float]] = {}
         # 失败重试登记簿：记录未成功命名的会话及重试元数据（用于后续轮次补偿重试）
         self._failed_sessions: Dict[str, Dict[str, Any]] = {}
         self._retry_lock = threading.Lock()
@@ -549,12 +440,6 @@ class AutoTitler:
             # 终局评估以内容为准，直接落库并忽略进程内待审候选
             self._pending.pop(session_id, None)
 
-        evidence: List[Tuple[str, str]] = list(opening) + list(recent) + list(all_user)
-        if earlier_summary:
-            evidence.append(("user", earlier_summary))
-        name_hints = _name_hints(evidence)
-        current_surface = self._normalize_title_surface(current, name_hints) if current else None
-
         action, title = self._generate(
             current, recent, all_user, opening,
             force_rename=force_rename, blind=blind, proposed=proposed,
@@ -568,10 +453,6 @@ class AutoTitler:
         )
         # 规范化 + 截断后的候选才与当前标题比较；相等 = keep（不是 failed/加后缀）
         candidate = self._prepare_candidate(title) if title else None
-        if candidate:
-            candidate = self._prepare_candidate(_canonicalize_name_case(
-                _normalize_mixed_script_spacing(candidate), name_hints
-            ))
 
         if action == "error":
             # 模型调用失败（网络中断/503/超时）：登记入失败重试字典，实施指数退避，
@@ -627,14 +508,6 @@ class AutoTitler:
                 reason = "blind generation did not return a new title"
                 log.warning("auto-titler %s: %s", session_id[:12], reason)
                 return {"action": "failed", "reason": reason}
-            if current and current_surface and current_surface != current:
-                candidate_surface = self._prepare_candidate(current_surface)
-                if candidate_surface and candidate_surface != current:
-                    log.info(
-                        "auto-titler %s: keep -> surface-normalize %r -> %r",
-                        session_id[:12], current, candidate_surface,
-                    )
-                    return self._commit_rename(db, session_id, candidate_surface)
             log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)
             return {"action": "keep"}
 
@@ -666,29 +539,10 @@ class AutoTitler:
         return "Write the title in the primary natural language of the user's messages."
 
     def _commit_rename(self, db: SessionDB, session_id: str, title: str) -> Dict[str, Any]:
-        """频次上限检查 + 实际写库 + 记账。title 必须是已 _prepare_candidate 的候选。
-
-        时间戳在写库成功后才记账——被保护/写失败的尝试不消耗名额；
-        触顶保留待审候选，窗口滑过后模型背书即可写入。
-        """
-        cap = int(self.cfg.get("renames_per_hour", 0))
-        if cap > 0:
-            now = time.time()
-            times = [t for t in self._rename_times.get(session_id, []) if now - t < 3600]
-            if len(times) >= cap:
-                log.info(
-                    "auto-titler %s: capped (%d renames in the last hour)",
-                    session_id[:12], len(times),
-                )
-                return {"action": "capped", "reason": "renames_per_hour limit"}
-            self._rename_times[session_id] = times
-
+        """实际写库 + 状态清理。title 必须是已 _prepare_candidate 的候选。"""
         written = self._write(db, session_id, title)
         if written:
             self._pending.pop(session_id, None)
-            # 记账：仅实际写入成功的改名消耗频次名额
-            if cap > 0:
-                self._rename_times.setdefault(session_id, []).append(time.time())
             log.info("auto-titler %s: renamed -> %r", session_id[:12], written)
             return {"action": "renamed", "title": written}
         self._pending.pop(session_id, None)
@@ -758,12 +612,7 @@ class AutoTitler:
         return max_len, max_cols
 
     def _clean_title(self, title: str) -> str:
-        """规范化模型输出：折叠空白、去包裹引号（可嵌套/前缀前后夹）、去
-        'Title:'/'标题：' 前缀、去尾部句读；重复清洗直到稳定。
-
-        覆盖 `Title: "Test 空转排查。"`、`"标题：Foo。"`、`「Title: "Foo"。」`
-        等组合：先去外层引号再摘前缀、再去内层引号，直到无变化。
-        """
+        """规范化模型输出：折叠空白、去包裹引号、去 'Title:'/'标题：' 前缀、去尾部句读。"""
         t = re.sub(r"\s+", " ", (title or "").strip())
         for _ in range(3):
             prev = t
@@ -774,13 +623,6 @@ class AutoTitler:
                 break
         return t
 
-    @staticmethod
-    def _normalize_title_surface(title: Optional[str], hints: Dict[str, str]) -> Optional[str]:
-        """Apply only reversible spacing and conversation-backed name casing."""
-        if not title:
-            return None
-        return _canonicalize_name_case(_normalize_mixed_script_spacing(title), hints) or None
-
     def _prepare_candidate(self, title: str) -> Optional[str]:
         """规范化 + 双重硬截断（字符上限 + 列宽上限）后的候选标题；空则 None。"""
         t = self._clean_title(title)
@@ -788,8 +630,6 @@ class AutoTitler:
             return None
         max_len, max_cols = self._bounds()
         t = truncate_to_width(t, max_cols)
-        # 截断暴露在边界上的标点/引号也要剥掉（如 16 上限下
-        # "abcdefghijklmno:xyz" → "abcdefghijklmno:" → 再去掉冒号）
         t = re.sub(r"[\s\"'“”‘’「」『』.。!！?？,，;；:：…]+$", "", t)
         if len(t) > max_len:
             t = t[:max_len]

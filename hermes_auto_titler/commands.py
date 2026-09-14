@@ -40,16 +40,18 @@ def make_handler(titler) -> Callable[[str], str]:
 
         if cmd == "status":
             c = titler.cfg
+            recent_logs = "\n".join(f"  {line}" for line in list(titler._audit_log)[-5:])
+            log_section = f"\nrecent audits (last {min(5, len(titler._audit_log))}):\n{recent_logs}" if recent_logs else ""
             return (
                 f"autotitler: {'enabled' if c['enabled'] else 'disabled'}"
                 f" | every {c['every_n_turns']} turns | first_title={c.get('first_title_mode', 'builtin')}"
                 f" | early_turn_eval={c['early_turn_eval']}"
                 f" | on_close={c['on_close']}"
-                f" | recent {c['recent_turns']} turns | all_user_msgs={c['include_all_user_messages']}"
                 f" | strategy={c['strategy']}"
                 f" | provider={c['provider'] or '(host default)'}"
                 f" | model={c['model'] or '(host default)'}"
                 f" | interval={c['min_interval_minutes']}m | max_len={c['max_title_length']}"
+                f"{log_section}"
             )
 
         if cmd == "config":

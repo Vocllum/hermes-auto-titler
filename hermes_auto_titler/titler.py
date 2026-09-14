@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import collections
 import contextvars
 import json
 import logging
@@ -128,6 +129,8 @@ class AutoTitler:
         # 失败重试登记簿：记录未成功命名的会话及重试元数据（用于后续轮次补偿重试）
         self._failed_sessions: Dict[str, Dict[str, Any]] = {}
         self._retry_lock = threading.Lock()
+        # 结构化审计环形日志：固定容量（最多 50 条），供 /autotitler status 或排障审查
+        self._audit_log: collections.deque = collections.deque(maxlen=50)
         # 同一会话同一时刻只允许一个进行中的模型评估（hook 并发去重），记录关联的完成 Event
         self._inflight: Dict[str, threading.Event] = {}
         self._inflight_lock = threading.Lock()
@@ -204,7 +207,7 @@ class AutoTitler:
         - 全局背压：每轮调度最多申领少量任务（最多 2 个），避免惊群；
         - 保护校验：若会话已被用户手改标题（source=user）或已达到最大重试次数，则自动出队。
         """
-        now = time.time()
+        now = time.monotonic()
         candidates: List[str] = []
         expired: List[str] = []
 
@@ -365,11 +368,22 @@ class AutoTitler:
     # -- 评估 ---------------------------------------------------------------
 
     def evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
+        t0 = time.monotonic()
+        res = self._do_evaluate(session_id, force=force, blind=blind)
+        dur_ms = int((time.monotonic() - t0) * 1000)
+        action = res.get("action", "unknown")
+        reason = res.get("reason") or res.get("candidate") or res.get("title") or ""
+        log_line = f"sid={session_id[:8]} act={action} reason={reason} dur={dur_ms}ms"
+        self._audit_log.append(log_line)
+        log.info("auto-titler audit: %s", log_line)
+        return res
+
+    def _do_evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
         db = self.db
         if not force:
             last = self._last_eval.get(session_id)
             interval = float(self.cfg.get("min_interval_minutes", 5)) * 60
-            if last is not None and (time.time() - last) < interval:
+            if last is not None and (time.monotonic() - last) < interval:
                 return {"action": "throttled"}
 
         try:
@@ -417,7 +431,7 @@ class AutoTitler:
                 self._failed_sessions.pop(session_id, None)
             return {"action": "skipped", "reason": "no messages"}
 
-        self._last_eval[session_id] = time.time()
+        self._last_eval[session_id] = time.monotonic()
         # 压缩会话的可见消息位于摘要之后，本质上是新鲜续段，不是原始
         # opening。blind 重生成保留其中的真实用户意图，供模型识别持续的新
         # 阶段；assistant/recent 与伪 opening 仍清空，避免收尾回复或执行细节
@@ -465,7 +479,7 @@ class AutoTitler:
                 delay = min(30 * (2 ** (attempts - 1)), 600)  # 30s, 60s, 120s, 240s, 480s, max 600s
                 self._failed_sessions[session_id] = {
                     "attempts": attempts,
-                    "next_retry_at": time.time() + delay,
+                    "next_retry_at": time.monotonic() + delay,
                 }
             log.warning(
                 "auto-titler %s: recorded failure (attempt %d/5, next retry in %ds)",

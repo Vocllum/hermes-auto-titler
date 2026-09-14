@@ -1716,7 +1716,7 @@ def test_retry_backoff_cooldown_not_suppressed_by_last_eval(monkeypatch):
     assert "s1" not in t._last_eval
 
     # 模拟 30 秒后退避到期，捎带检查触发补偿重试
-    t._failed_sessions["s1"]["next_retry_at"] = time.time() - 1
+    t._failed_sessions["s1"]["next_retry_at"] = time.monotonic() - 1
     t._retry_failed_sessions()
     time.sleep(0.05)
 
@@ -1758,7 +1758,7 @@ def test_finalize_waits_for_inflight_worker_completion():
 def test_retry_failed_sessions_drops_user_title():
     db = FakeDB(messages=MSGS, title="用户手动标题", source="user")
     t = AutoTitler(SimpleNamespace(llm=FakeLlm('{"action":"keep"}')), {**DEFAULTS}, db=db)
-    t._failed_sessions["s1"] = {"attempts": 1, "next_retry_at": time.time() - 10}
+    t._failed_sessions["s1"] = {"attempts": 1, "next_retry_at": time.monotonic() - 10}
 
     t.on_session_end(session_id="s2", completed=True)
     assert "s1" not in t._failed_sessions
@@ -1776,9 +1776,6 @@ def test_policy_prompt_soft_length_honors_explicit_max_title_length():
     assert "up to ~18 characters" in system
 
 
-
-
-
 def test_retry_candidate_selection_skips_inflight_preventing_starvation():
     """Codex P1 回归：如果由于在途执行导致占用背压名额，不应阻塞后续候选。"""
     db = FakeDB(messages=MSGS, title="旧标题", source="derived")
@@ -1787,9 +1784,9 @@ def test_retry_candidate_selection_skips_inflight_preventing_starvation():
     # s1 已经在后台执行中
     with t._inflight_lock:
         t._inflight["s1"] = threading.Event()
-    t._failed_sessions["s1"] = {"attempts": 1, "next_retry_at": time.time() - 10}
-    t._failed_sessions["s2"] = {"attempts": 1, "next_retry_at": time.time() - 10}
-    t._failed_sessions["s3"] = {"attempts": 1, "next_retry_at": time.time() - 10}
+    t._failed_sessions["s1"] = {"attempts": 1, "next_retry_at": time.monotonic() - 10}
+    t._failed_sessions["s2"] = {"attempts": 1, "next_retry_at": time.monotonic() - 10}
+    t._failed_sessions["s3"] = {"attempts": 1, "next_retry_at": time.monotonic() - 10}
 
     # 触发重试时，s1 在 inflight 中应该被直接跳过，s2 和 s3 必须被正常调度
     submitted = []
@@ -1804,7 +1801,7 @@ def test_evaluate_evicts_failed_session_on_non_model_skips():
     """Codex P1 回归：非模型早退（如 no messages、legacy title）必须出队，防止死循环无限重试。"""
     db = FakeDB(messages=[], title=None, source=None)
     t = AutoTitler(SimpleNamespace(llm=FakeLlm('{"action":"keep"}')), {**DEFAULTS}, db=db)
-    t._failed_sessions["s_empty"] = {"attempts": 1, "next_retry_at": time.time() - 10}
+    t._failed_sessions["s_empty"] = {"attempts": 1, "next_retry_at": time.monotonic() - 10}
     res = t.evaluate("s_empty", force=True)
     assert res["action"] == "skipped"
     assert res["reason"] == "no messages"

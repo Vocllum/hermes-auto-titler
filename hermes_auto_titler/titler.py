@@ -591,10 +591,6 @@ class AutoTitler:
                 session_id[:12], attempts, delay,
             )
             return {"action": "failed", "reason": "model call failed"}
-        else:
-            # 正常执行成功（无论保持还是改名）：成功恢复，移出失败重试账本
-            with self._retry_lock:
-                self._failed_sessions.pop(session_id, None)
 
         # 评估成功推进：清除该会话的失败重试记录
         with self._retry_lock:

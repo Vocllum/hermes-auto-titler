@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 
 def register(ctx) -> None:
-    """Hermes 插件入口：注册 on_session_end/on_session_finalize hook + /autotitler 命令。"""
+    """Hermes 插件入口：注册 pre_llm_call/on_session_end/on_session_finalize hook + /autotitler 命令。"""
     cfg = load_config()
     titler = AutoTitler(ctx, cfg)
     if cfg.get("enabled", True):
@@ -46,6 +46,7 @@ def register(ctx) -> None:
                     "plugin takeover may race the host titleer",
                     exc_info=True,
                 )
+        ctx.register_hook("pre_llm_call", titler.on_pre_llm_call)
         ctx.register_hook("on_session_end", titler.on_session_end)
         # 真实会话关闭/终局（CLI 退出、TUI 关闭、gateway 过期、/new）走 lifecycle
         # hook：正常节流（force=False），且不重复进行中的自动评估

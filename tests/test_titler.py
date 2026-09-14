@@ -1634,6 +1634,23 @@ def test_user_race_during_confirmation_clears_pending():
     assert t._pending.get("s1") is None
 
 
+def test_on_pre_llm_call_triggers_eager_evaluation_for_new_session(recording_threads):
+    db = FakeDB(messages=MSGS, title=None, source=None)
+    t, ctx = make_titler(db, cfg={"first_title_mode": "plugin", "early_turn_eval": True})
+    t.on_pre_llm_call(session_id="s1")
+    assert len(recording_threads.instances) == 1
+
+
+def test_on_pre_llm_call_ignores_internal_and_user_titled(recording_threads):
+    db = FakeDB(messages=MSGS, title="用户标题", source="user")
+    t, ctx = make_titler(db, cfg={"first_title_mode": "plugin", "early_turn_eval": True})
+    t.on_pre_llm_call(session_id="s1")
+    assert len(recording_threads.instances) == 0
+
+    t.on_pre_llm_call(session_id="s1", platform="cron")
+    assert len(recording_threads.instances) == 0
+
+
 # -- 提示词防漂移规范 ------------------------------------------------------------
 
 def test_prompt_contains_stability_rules_on_normal_eval():

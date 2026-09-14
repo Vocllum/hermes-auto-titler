@@ -151,6 +151,22 @@ class AutoTitler:
         platform = str(payload.get("platform") or "").strip().lower()
         return platform in _INTERNAL_PLATFORMS
 
+    def on_pre_llm_call(self, **payload: Any) -> None:
+        """首回合开局触发：第一回合用户刚发消息时立即异步生成第一版标题，不等整个回合结束。"""
+        if not self.cfg.get("enabled", True):
+            return
+        if self._is_internal_payload(**payload):
+            return
+        session_id = payload.get("session_id") or ""
+        if not session_id:
+            return
+        self._current_session = session_id
+
+        # 仅对首轮接入且当前无标题或 derived 临时截断标题的会话触发
+        if self._early_enabled() and self._early_eligible(session_id):
+            log.info("auto-titler pre_llm_call: eager evaluation for new session %s", session_id[:12])
+            self._submit_eval(session_id)
+
     def on_session_end(self, **payload: Any) -> None:
         if not self.cfg.get("enabled", True):
             return

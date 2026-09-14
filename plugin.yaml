@@ -3,5 +3,6 @@ version: 0.2.0
 description: "Topic-aware session re-titling for Hermes Agent"
 author: "Vocllum"
 provides_hooks:
+  - pre_llm_call
   - on_session_end
   - on_session_finalize

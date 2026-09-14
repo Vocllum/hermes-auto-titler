@@ -674,7 +674,7 @@ def test_parse_decision_tolerates_markdown_fence():
     assert title2 is None
 
 
-def test_llm_failure_keeps():
+def test_llm_failure_records_failed_retry():
     db = FakeDB(messages=MSGS, title=None)
 
     class BoomLlm:
@@ -683,7 +683,11 @@ def test_llm_failure_keeps():
 
     t = AutoTitler(SimpleNamespace(llm=BoomLlm()), {**DEFAULTS}, db=db)
     r = t.evaluate("s1", force=True)
-    assert r["action"] == "keep"
+    assert r["action"] == "failed"
+    assert "model call failed" in r.get("reason", "")
+    assert "s1" in t._failed_sessions
+    assert t._failed_sessions["s1"]["attempts"] == 1
+    assert t._failed_sessions["s1"]["next_retry_at"] > 0
 
 
 def test_title_truncated_to_max_length():
@@ -1746,6 +1750,38 @@ def test_base_autotitler_generate_raises_not_implemented():
         base._generate(None, [], [], [])
 
 
+def test_retry_failed_sessions_compensates_due_session(monkeypatch):
+    db = FakeDB(messages=MSGS, title=None)
+    calls = []
+
+    class SuccessLlm:
+        def complete(self, **kw):
+            calls.append(kw)
+            return SimpleNamespace(text='{"action":"rename","title":"补偿成功标题"}', usage={})
+
+    t = AutoTitler(SimpleNamespace(llm=SuccessLlm()), {**DEFAULTS, "every_n_turns": 4}, db=db)
+    # 模拟 s1 之前由于网络错误进入了失败记录簿，且退避时间已过
+    t._failed_sessions["s1"] = {"attempts": 1, "next_retry_at": time.time() - 10}
+
+    # 另一个 session s2 发生了普通非触发轮次（n=1, every=4）
+    t.on_session_end(session_id="s2", completed=True)
+    # 等待后台线程完成
+    time.sleep(0.05)
+
+    # 验证 s1 被触发补偿重试并成功出队
+    assert "s1" not in t._failed_sessions
+    assert db.title == "补偿成功标题"
+
+
+def test_retry_failed_sessions_drops_user_title():
+    db = FakeDB(messages=MSGS, title="用户手动标题", source="user")
+    t = AutoTitler(SimpleNamespace(llm=FakeLlm('{"action":"keep"}')), {**DEFAULTS}, db=db)
+    t._failed_sessions["s1"] = {"attempts": 1, "next_retry_at": time.time() - 10}
+
+    t.on_session_end(session_id="s2", completed=True)
+    assert "s1" not in t._failed_sessions
+
+
 def test_policy_prompt_soft_length_honors_explicit_max_title_length():
     from types import SimpleNamespace
     from hermes_auto_titler.policy import AutoTitler
@@ -1756,5 +1792,7 @@ def test_policy_prompt_soft_length_honors_explicit_max_title_length():
     t._generate("当前", [("user", "hi")], [], [("user", "hi")])
     system = calls[0]["messages"][0]["content"]
     assert "up to ~18 characters" in system
+
+
 
 

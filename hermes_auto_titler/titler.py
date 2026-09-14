@@ -234,6 +234,8 @@ class AutoTitler:
         self._pending: Dict[str, Dict[str, Any]] = {}
         # 频次窗口：session_id -> 实际改名时间戳列表（滑动 60 分钟）
         self._rename_times: Dict[str, List[float]] = {}
+        # 失败重试登记簿：记录未成功命名的会话及重试元数据（用于后续轮次补偿重试）
+        self._failed_sessions: Dict[str, Dict[str, Any]] = {}
         # 同一会话同一时刻只允许一个进行中的模型评估（hook 并发去重）
         self._inflight: set[str] = set()
         self._inflight_lock = threading.Lock()
@@ -284,6 +286,7 @@ class AutoTitler:
             and self._early_eligible(session_id)
         ):
             self._submit_eval(session_id)
+        self._retry_failed_sessions(exclude_session_id=session_id)
 
     def on_session_finalize(self, **payload: Any) -> None:
         """真实会话关闭/终局（CLI 退出、TUI 关闭、gateway 过期、/new 切换）。"""
@@ -296,8 +299,53 @@ class AutoTitler:
             return
         self._current_session = session_id
         self._close_eval(session_id)
+        self._retry_failed_sessions(exclude_session_id=session_id)
 
     # -- 评估调度 -----------------------------------------------------------
+
+    def _retry_failed_sessions(self, exclude_session_id: Optional[str] = None) -> None:
+        """捎带检查失败记录簿：重试因模型异常未能成功命名的会话。
+
+        特性：
+        - 天然去重：每个会话在 _failed_sessions 字典中仅占一条记录，不按轮次无限累加；
+        - 指数退避：每次失败翻倍等待时长，避免服务商瘫痪时引发重试风暴；
+        - 保护校验：若会话已被用户手改标题（source=user）或已达到最大重试次数，则自动出队。
+        """
+        if not self._failed_sessions:
+            return
+        now = time.time()
+        to_retry: List[str] = []
+        to_remove: List[str] = []
+
+        for sid, meta in list(self._failed_sessions.items()):
+            if sid == exclude_session_id:
+                continue
+            # 超过最大重试次数（默认 5 次）则放弃本轮跟踪，避免永久堆积
+            if int(meta.get("attempts", 0)) >= 5:
+                to_remove.append(sid)
+                continue
+            # 尚未到达退避解禁时间点
+            if now < float(meta.get("next_retry_at", 0)):
+                continue
+            # 检查是否已不需要重试（例如用户手改）
+            try:
+                src = self.db.get_session_title_source(sid)
+                if src == SessionDB.TITLE_SOURCE_USER:
+                    to_remove.append(sid)
+                    continue
+            except Exception:
+                pass
+            to_retry.append(sid)
+
+        for sid in to_remove:
+            self._failed_sessions.pop(sid, None)
+
+        for sid in to_retry:
+            with self._inflight_lock:
+                if sid in self._inflight:
+                    continue
+            log.info("auto-titler retry: triggering compensation eval for %s", sid[:12])
+            self._submit_eval(sid)
 
     def _early_enabled(self) -> bool:
         """首轮命名一键开关：plugin=插件第 1 轮接管；builtin=首轮归内建。
@@ -490,6 +538,26 @@ class AutoTitler:
             candidate = self._prepare_candidate(_canonicalize_name_case(
                 _normalize_mixed_script_spacing(candidate), name_hints
             ))
+
+        if action == "error":
+            # 模型调用失败（网络中断/503/超时）：登记入失败重试字典，实施指数退避，
+            # 并避免记录正常 _last_eval 锁死重试窗口。
+            self._pending.pop(session_id, None)
+            meta = self._failed_sessions.get(session_id, {"attempts": 0})
+            attempts = int(meta.get("attempts", 0)) + 1
+            delay = min(30 * (2 ** (attempts - 1)), 600)  # 30s, 60s, 120s, 240s, 480s, max 600s
+            self._failed_sessions[session_id] = {
+                "attempts": attempts,
+                "next_retry_at": time.time() + delay,
+            }
+            log.warning(
+                "auto-titler %s: recorded failure (attempt %d/5, next retry in %ds)",
+                session_id[:12], attempts, delay,
+            )
+            return {"action": "failed", "reason": "model call failed"}
+
+        # 评估成功推进：清除该会话的失败重试记录
+        self._failed_sessions.pop(session_id, None)
 
         if review and proposed:
             if proposed == current:

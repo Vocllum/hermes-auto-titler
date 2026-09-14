@@ -211,7 +211,7 @@ class AutoTitler(_BaseAutoTitler):
             text = getattr(res, "text", "") or ""
         except Exception as e:
             log.warning("auto-titler LLM call failed: %s", e)
-            return "keep", None
+            return "error", None
 
         self._record_usage(session_id, res)
         log.info(

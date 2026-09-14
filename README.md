@@ -162,7 +162,7 @@ model: "your-model"         # any model your Hermes setup can reach
 | `strategy` | `conservative` | `conservative` = rename only for a material durable mismatch; `aggressive` = follow explicit abandonment or a sustained new direction sooner, while still ignoring one-off subtasks/tool changes. |
 | `provider` / `model` | `""` / `""` | Both empty = Hermes `title_generation` auxiliary task; set either to select a plugin custom route. |
 | `min_interval_minutes` | `5` | Minimum interval between evaluations of one session. |
-| `max_title_length` / `max_display_width` | `24` / `40` | Character and display-column hard limits (~12 CJK-character prompt target or similarly concise wording). `complete` style adds 12 display columns. |
+| `max_title_length` / `max_display_width` | `null` / `40` | `max_title_length: null` avoids hard character slicing in code; length is guided softly by prompt (~12 CJK characters) and strictly capped by `max_display_width` columns. `complete` style adds 12 display columns. |
 | `rename_confirmations` | `1` | Default: require one later endorsement before llm→llm writeback. `0` = immediate write after one decision; `N > 1` = require N later endorsements. Replacing the pending candidate restarts the count. |
 | `renames_per_hour` | `0` | Per-session sliding-window successful-rename cap (`0` = unlimited). |
 

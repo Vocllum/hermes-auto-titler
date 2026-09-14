@@ -35,9 +35,8 @@ DEFAULTS: dict[str, Any] = {
     "provider": "",
     "model": "",
     "min_interval_minutes": 5,
-    # 12 字符仍是提示词软目标；24 字符硬上限可完整容纳
-    # hermes-auto-titler 这类较长的字面标识符及少量中文意图。
-    "max_title_length": 24,
+    # 提示词软目标约 12 字符；None 表示不强加代码层字符数硬截断（由提示词与显示列宽约束）。
+    "max_title_length": None,
     "max_display_width": 40,
     # 0 = 单次判定直接写；N>0 = 首次提出候选后，再要求 N 次后续背书。
     # 0.2 默认 1：降低单次误判导致的标题跳动；需要更快响应可显式改回 0。
@@ -143,7 +142,10 @@ def coerce_value(key: str, raw: Any) -> Any:
     ):
         v = max(0, int(v))
     elif key == "max_title_length":
-        v = max(10, min(int(v), 100))
+        if v is None or str(v).strip().lower() in ("", "none", "null"):
+            v = None
+        else:
+            v = max(10, min(int(v), 100))
     elif key == "max_display_width":
         v = max(10, min(int(v), 100))
     elif key == "rename_confirmations":

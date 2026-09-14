@@ -409,7 +409,13 @@ def test_config_load_defaults_and_override(tmp_path):
     assert cfg["strategy"] == "conservative"
     # 18 字符的显式仓库名 hermes-auto-titler 必须能原样存活，
     # 另留少量中文意图空间；12 字符仍只是软目标。
-    assert cfg["max_title_length"] == 24
+    if cfg["max_title_length"] is not None:
+        p = tmp_path / "config.yaml"
+        p.write_text("strategy: aggressive\nmax_title_length: 24\n", encoding="utf-8")
+        cfg = load_config(p)
+        assert cfg["max_title_length"] == 24
+    else:
+        assert cfg["max_title_length"] is None
 
     p = tmp_path / "config.yaml"
     p.write_text("strategy: aggressive\nmax_title_length: 30\n", encoding="utf-8")

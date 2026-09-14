@@ -609,7 +609,8 @@ class AutoTitler:
         earlier_summary: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> Tuple[str, Optional[str]]:
-        max_title_len = int(self.cfg.get("max_title_length", 24))
+        cfg_len = self.cfg.get("max_title_length")
+        max_title_len = int(cfg_len) if cfg_len is not None else 24
         style = self.cfg.get("title_style", "concise")
         if style == "complete":
             style_req = "Complete summary: preserve both the core subject and primary intent."
@@ -753,7 +754,8 @@ class AutoTitler:
     # -- 写回 ---------------------------------------------------------------
 
     def _bounds(self) -> Tuple[int, int]:
-        max_len = min(int(self.cfg.get("max_title_length", 24)), SessionDB.MAX_TITLE_LENGTH)
+        cfg_len = self.cfg.get("max_title_length")
+        max_len = min(int(cfg_len), SessionDB.MAX_TITLE_LENGTH) if cfg_len is not None else SessionDB.MAX_TITLE_LENGTH
         # 显示列宽硬限（中文=2 列）：complete 风格放宽 12 列
         max_cols = int(self.cfg.get("max_display_width", 40))
         if self.cfg.get("title_style", "concise") == "complete":

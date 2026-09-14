@@ -1721,3 +1721,19 @@ def test_parse_decision_accepts_approve():
 
     assert _parse_decision('{"action":"approve"}') == ("approve", None)
     assert _parse_decision('{"action":"approve","title":"X"}') == ("approve", "X")
+
+
+def test_prepare_candidate_preserves_mixed_script_when_length_limit_is_none():
+    from hermes_auto_titler.titler import AutoTitler
+    titler = AutoTitler(None, {"max_title_length": None, "max_display_width": 40})
+    cand = titler._prepare_candidate("hermes-auto-titler 会话主题归纳")
+    assert cand == "hermes-auto-titler 会话主题归纳"
+
+
+def test_prepare_candidate_still_honors_explicit_max_title_length():
+    from hermes_auto_titler.titler import AutoTitler
+    titler = AutoTitler(None, {"max_title_length": 20, "max_display_width": 40})
+    cand = titler._prepare_candidate("hermes-auto-titler 会话主题归纳")
+    assert cand is not None
+    assert len(cand) <= 20
+

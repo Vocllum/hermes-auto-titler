@@ -162,7 +162,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `strategy` | `conservative` | `conservative` = 只有明显、持续的失配才改；`aggressive` = 用户明确放弃旧目标或多个实质回合形成持续新方向后更快跟进，但不把单次子任务/工具变化当作转题。 |
 | `provider` / `model` | `""` / `""` | 都为空 = Hermes `title_generation` 辅助任务；填写任一项 = 插件自定义通道。 |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔。 |
-| `max_title_length` / `max_display_width` | `24` / `40` | 字符数和显示列宽硬限制（提示词目标约 12 个中文字符或相近的简洁长度）；`complete` 风格额外增加 12 列。 |
+| `max_title_length` / `max_display_width` | `null` / `40` | `max_title_length: null` 不强加代码层字符数硬切，由提示词软目标（~12 汉字）与 `max_display_width` 显示列宽硬限制（中文=2 列）共同约束；`complete` 风格额外增加 12 列。 |
 | `rename_confirmations` | `1` | v0.2 默认再要求 1 次后续背书；`0` = 一次判定后直接写；`N > 1` = 需要 N 次后续背书。若候选被替换则重新计数。 |
 | `renames_per_hour` | `0` | 单会话滑动窗口内“成功写入”的改名次数上限；`0` = 不限。 |
 

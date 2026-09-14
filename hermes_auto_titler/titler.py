@@ -313,45 +313,51 @@ class AutoTitler:
         - 全局背压：每轮调度最多申领少量任务（最多 2 个），避免惊群；
         - 保护校验：若会话已被用户手改标题（source=user）或已达到最大重试次数，则自动出队。
         """
+        now = time.time()
+        candidates: List[str] = []
+        expired: List[str] = []
+
         with self._retry_lock:
             if not self._failed_sessions:
                 return
-            now = time.time()
-            to_retry: List[str] = []
-            to_remove: List[str] = []
-
             for sid, meta in list(self._failed_sessions.items()):
-                # 超过最大重试次数（默认 5 次）则放弃本轮跟踪，避免永久堆积
                 if int(meta.get("attempts", 0)) >= 5:
-                    to_remove.append(sid)
-                    continue
-                # 尚未到达退避解禁时间点
-                if now < float(meta.get("next_retry_at", 0)):
-                    continue
-                # 检查是否已不需要重试（例如会话已有了合法标题，或用户已手改）
-                try:
-                    src = self.db.get_session_title_source(sid)
-                    if src == SessionDB.TITLE_SOURCE_USER:
-                        to_remove.append(sid)
-                        continue
-                    cur_title = self.db.get_session_title(sid)
-                    # 若已成功落库了正式标题（非空且非 derived 临时截断），则无需重试
-                    if cur_title and src == SessionDB.TITLE_SOURCE_LLM:
-                        to_remove.append(sid)
-                        continue
-                except Exception:
-                    pass
-                to_retry.append(sid)
-                if len(to_retry) >= 2:  # 全局背压：每次最多 claim 2 个会话
-                    break
-
-            for sid in to_remove:
+                    expired.append(sid)
+                elif now >= float(meta.get("next_retry_at", 0)):
+                    candidates.append(sid)
+            for sid in expired:
                 self._failed_sessions.pop(sid, None)
 
-        for sid in to_retry:
+        if not candidates:
+            return
+
+        to_retry: List[str] = []
+        to_remove: List[str] = []
+        for sid in candidates:
             with self._inflight_lock:
                 if sid in self._inflight:
                     continue
+            try:
+                src = self.db.get_session_title_source(sid)
+                if src == SessionDB.TITLE_SOURCE_USER:
+                    to_remove.append(sid)
+                    continue
+                cur_title = self.db.get_session_title(sid)
+                if cur_title and src == SessionDB.TITLE_SOURCE_LLM:
+                    to_remove.append(sid)
+                    continue
+            except Exception:
+                pass
+            to_retry.append(sid)
+            if len(to_retry) >= 2:
+                break
+
+        if to_remove:
+            with self._retry_lock:
+                for sid in to_remove:
+                    self._failed_sessions.pop(sid, None)
+
+        for sid in to_retry:
             log.info("auto-titler retry: triggering compensation eval for %s", sid[:12])
             self._submit_eval(sid)
 
@@ -434,7 +440,9 @@ class AutoTitler:
         """真实关闭评估：正常节流（force=False）；已有 in-flight 评估时等待其完成。
 
         刻意保持同步：关闭是用户可见的终局动作，若已有 daemon 线程在执行，必须
-        等待其完成（最多等待 15s），避免进程直接退出导致守护线程被 kill。
+        等待其自然完成（底层 complete 调用本身已有 timeout=30s，此处无界 wait
+        直至该调用正常返回或超时异常释放），避免硬编码 15s 提前 return 导致守护
+        线程在进程退出时被操作系统终止、丢失写库。
         """
         if not self.cfg.get("on_close", True):
             return
@@ -450,7 +458,7 @@ class AutoTitler:
 
         if existing_event is not None:
             log.info("auto-titler close: waiting for in-flight worker for %s", session_id[:12])
-            existing_event.wait(timeout=15.0)
+            existing_event.wait()
             return
 
         try:
@@ -478,8 +486,10 @@ class AutoTitler:
         except Exception:
             src = None
         if src == SessionDB.TITLE_SOURCE_USER:
-            # 用户权威变化使任何 stale 候选失效
+            # 用户权威变化使任何 stale 候选失效并移出重试账本
             self._pending.pop(session_id, None)
+            with self._retry_lock:
+                self._failed_sessions.pop(session_id, None)
             return {"action": "skipped", "reason": "user title is authoritative"}
 
         try:
@@ -489,8 +499,10 @@ class AutoTitler:
 
         # NULL provenance（provenance 列出现前的老行）在 Hermes 里按 user 权威
         # 对待（hermes_state._title_rank：旧自动标题与当年手动 /title 无法区分），
-        # 已有标题时 llm 永远写不进去——这是官方保守设计，尊重它，不算失败。
+        # 已有标题时 llm 永远写不进去——这是官方保守设计，尊重它，不算失败，移出重试。
         if src is None and current:
+            with self._retry_lock:
+                self._failed_sessions.pop(session_id, None)
             return {"action": "skipped", "reason": "legacy title (NULL provenance) is protected"}
 
         recent, all_user, opening, earlier_summary = load_context_with_summary(
@@ -509,6 +521,9 @@ class AutoTitler:
             ),
         )
         if not recent:
+            # 无消息会话不可评估，移出重试账本防止无限重试
+            with self._retry_lock:
+                self._failed_sessions.pop(session_id, None)
             return {"action": "skipped", "reason": "no messages"}
 
         self._last_eval[session_id] = time.time()
@@ -576,6 +591,10 @@ class AutoTitler:
                 session_id[:12], attempts, delay,
             )
             return {"action": "failed", "reason": "model call failed"}
+        else:
+            # 正常执行成功（无论保持还是改名）：成功恢复，移出失败重试账本
+            with self._retry_lock:
+                self._failed_sessions.pop(session_id, None)
 
         # 评估成功推进：清除该会话的失败重试记录
         with self._retry_lock:

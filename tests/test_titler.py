@@ -1737,3 +1737,24 @@ def test_prepare_candidate_still_honors_explicit_max_title_length():
     assert cand is not None
     assert len(cand) <= 20
 
+
+def test_base_autotitler_generate_raises_not_implemented():
+    import pytest
+    from hermes_auto_titler.policy import _BaseAutoTitler
+    base = _BaseAutoTitler(None, {})
+    with pytest.raises(NotImplementedError, match="policy.AutoTitler"):
+        base._generate(None, [], [], [])
+
+
+def test_policy_prompt_soft_length_honors_explicit_max_title_length():
+    from types import SimpleNamespace
+    from hermes_auto_titler.policy import AutoTitler
+
+    calls = []
+    fake_llm = SimpleNamespace(complete=lambda **kw: calls.append(kw) or SimpleNamespace(text='{"action":"keep"}', usage={}))
+    t = AutoTitler(SimpleNamespace(llm=fake_llm), {**DEFAULTS, "max_title_length": 18})
+    t._generate("当前", [("user", "hi")], [], [("user", "hi")])
+    system = calls[0]["messages"][0]["content"]
+    assert "up to ~18 characters" in system
+
+

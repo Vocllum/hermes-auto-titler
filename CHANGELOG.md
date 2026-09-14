@@ -13,6 +13,7 @@
 - Make `scripts/review_sample.py` reuse the loaded production context configuration and support strategy overrides, so real-history prompt/model reviews match production sampling more closely.
 - Expand semantic acceptance matrix (`scripts/prompt_acceptance.py`) to 20 curated paired cases across full project lifecycles, and add step-by-step evolution simulator (`scripts/simulate_evolution.py`).
 - Add/extend regression coverage for N-round counting, candidate replacement, base-title invalidation, strategy thresholds, evidence-before-title ordering, rename-only regeneration, soft length bounds, and the v0.2 default.
+- Clean up dead code in base AutoTitler by delegating generation completely to policy, and align prompt soft-length guidance with explicit `max_title_length` configuration.
 
 ## 0.1.3 — 2026-09-12
 

@@ -719,13 +719,10 @@ class AutoTitler:
             # 来源在我们检查后变成了 user：永不覆盖用户标题
             if src == SessionDB.TITLE_SOURCE_USER:
                 return False
+
             # llm → llm：set_auto_title 对同级是 no-op（上游刻意防自我重命名），
-            # 只能走 set_session_title（临时记为 user）+ 恢复 llm 来源。恢复前
-            # 重新读库：若用户的新标题恰好在我们写入之后抢先落地，就不恢复来源，
-            # 保留用户标题与 user 权威。诚实边界：最后一次来源复核、
-            # set_session_title、标题重读与来源恢复不是同一个公开原子 API；用户
-            # 若恰好落在这些步骤之间，仍有极小竞态窗口。Hermes 目前没有公开的
-            # llm→llm CAS 写法，因此这里只缩窗，不宣称绝对保护或原子更新。
+            # 只能走 set_session_title（临时记为 user）+ 恢复 llm 来源。
+            # 为防止覆盖并发产生的 user 标题或造成 provenance 错配，必须确保写入前后 title/source 严格符合预期。
             if db.set_session_title(session_id, t):
                 try:
                     stored = db.get_session_title(session_id)

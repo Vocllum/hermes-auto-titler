@@ -38,7 +38,7 @@ class AutoTitler(_BaseAutoTitler):
 
         return super().evaluate(session_id, force=force, blind=blind)
 
-    def _commit_rename(self, db, session_id: str, title: str):
+    def _commit_rename(self, db, session_id: str, title: str, expected_title: Optional[str] = None):
         """Require exactly ``rename_confirmations`` follow-up endorsements."""
         pending = self._pending.get(session_id)
         needed = max(0, int(self.cfg.get("rename_confirmations", 0)))
@@ -56,7 +56,7 @@ class AutoTitler(_BaseAutoTitler):
                     "confirmations": confirmed,
                     "required": needed,
                 }
-        return super()._commit_rename(db, session_id, title)
+        return super()._commit_rename(db, session_id, title, expected_title=expected_title)
 
     def _generate(
         self,

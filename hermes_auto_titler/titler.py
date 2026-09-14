@@ -515,7 +515,7 @@ class AutoTitler:
                 return {"action": "keep"}
             if action == "approve" or (action == "rename" and candidate == proposed):
                 # 模型背书候选（显式 approve，或裁决时原样重复）→ 落库候选本身
-                return self._commit_rename(db, session_id, proposed)
+                return self._commit_rename(db, session_id, proposed, expected_title=current)
             if action == "rename" and candidate and candidate != current:
                 # 模型给出更好的新候选：替换待审，旧候选作废，并记录生成时的 current 快照作为 base_title
                 self._pending[session_id] = {"title": candidate, "base_title": current}
@@ -549,7 +549,7 @@ class AutoTitler:
             )
             return {"action": "pending", "candidate": candidate}
 
-        return self._commit_rename(db, session_id, candidate)
+        return self._commit_rename(db, session_id, candidate, expected_title=current)
 
     @staticmethod
     def _language_rule() -> str:
@@ -568,9 +568,9 @@ class AutoTitler:
             pass
         return "Write the title in the primary natural language of the user's messages."
 
-    def _commit_rename(self, db: SessionDB, session_id: str, title: str) -> Dict[str, Any]:
+    def _commit_rename(self, db: SessionDB, session_id: str, title: str, expected_title: Optional[str] = None) -> Dict[str, Any]:
         """实际写库 + 状态清理。title 必须是已 _prepare_candidate 的候选。"""
-        written = self._write(db, session_id, title)
+        written = self._write(db, session_id, title, expected_title=expected_title)
         if written:
             self._pending.pop(session_id, None)
             log.info("auto-titler %s: renamed -> %r", session_id[:12], written)
@@ -686,7 +686,7 @@ class AutoTitler:
                 return "legacy title (NULL provenance) is protected"
         return None
 
-    def _write(self, db: SessionDB, session_id: str, title: str) -> Optional[str]:
+    def _write(self, db: SessionDB, session_id: str, title: str, expected_title: Optional[str] = None) -> Optional[str]:
         max_len, max_cols = self._bounds()
         title = self._prepare_candidate(title)
         if not title:
@@ -699,9 +699,7 @@ class AutoTitler:
             return None
 
         def apply(t: str) -> bool:
-            # 每次实际写尝试前都重新核对权威性与写路径来源，不依赖进入 _write
-            # 时的旧快照：LLM 调用期间/上一次尝试之后用户可能 /title（或出现
-            # legacy NULL 标题）→ 优先保护，把「检查→写」窗口缩到最小。
+            # 每次实际写尝试前都重新核对权威性与写路径来源
             if self._protected_reason(db, session_id):
                 return False
             try:
@@ -720,9 +718,29 @@ class AutoTitler:
             if src == SessionDB.TITLE_SOURCE_USER:
                 return False
 
-            # llm → llm：set_auto_title 对同级是 no-op（上游刻意防自我重命名），
-            # 只能走 set_session_title（临时记为 user）+ 恢复 llm 来源。
-            # 为防止覆盖并发产生的 user 标题或造成 provenance 错配，必须确保写入前后 title/source 严格符合预期。
+            # llm → llm：执行真正的单事务原子 CAS，杜绝 TOCTOU 竞态。
+            # 直接在 SQLite 事务中基于进入 _write 前读取到的 expected 快照比较并写入：
+            # UPDATE sessions SET title = ?, title_source = ?
+            # WHERE id = ? AND title IS ? AND title_source = 'llm'
+            # 若用户在 LLM 推理期间手动改名（或外部写入改变了 title/source），更新匹配 0 行直接失败（返回 False），
+            # 绝对不覆盖用户手改标题，也杜绝了分步 write -> readback -> restore 之间的非原子漏洞。
+            expected = expected_title if expected_title is not None else db.get_session_title(session_id)
+            def _atomic_llm_cas(conn):
+                return conn.execute(
+                    "UPDATE sessions SET title = ?, title_source = ? "
+                    "WHERE id = ? AND title IS ? AND title_source = ?",
+                    (t, SessionDB.TITLE_SOURCE_LLM, session_id, expected, SessionDB.TITLE_SOURCE_LLM),
+                ).rowcount > 0
+
+            exec_write = getattr(db, "_execute_write", None)
+            if callable(exec_write):
+                try:
+                    return bool(exec_write(_atomic_llm_cas))
+                except Exception as e:
+                    log.warning("auto-titler %s: atomic llm CAS execution failed: %s", session_id[:12], e)
+                    return False
+
+            # 后备路径（极老宿主无 _execute_write 时）：严格两步 fail-closed
             if db.set_session_title(session_id, t):
                 try:
                     stored = db.get_session_title(session_id)

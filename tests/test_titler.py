@@ -353,11 +353,12 @@ def test_on_session_end_returns_promptly(recording_threads):
 
 
 def test_inflight_dedupe_prevents_duplicate_submission(recording_threads):
+    import threading
     db = FakeDB(messages=MSGS, title=None)
     t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 1})
     t.on_session_end(session_id="s1", completed=True)  # n=1 → 提交
     assert len(recording_threads.instances) == 1
-    t._inflight.add("s1")  # 模拟 worker 仍在飞行
+    t._inflight["s1"] = threading.Event()  # 模拟 worker 仍在飞行
     t.on_session_end(session_id="s1", completed=True)  # n=2 → in-flight 去重
     t.on_session_end(session_id="s1", completed=True)  # n=3
     assert len(recording_threads.instances) == 1
@@ -401,10 +402,14 @@ def test_finalize_skips_when_eval_in_flight():
     t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS, "every_n_turns": 1}, db=FakeDB(messages=MSGS, title=None))
     t.on_session_end(session_id="s1", completed=True)
     assert entered.wait(5)
+    # finalize 必须等待现有 in-flight 完成，由后台线程在 0.05s 后释放
+    def _do_release():
+        time.sleep(0.05)
+        release.set()
+    _th.Thread(target=_do_release, daemon=True).start()
     t.on_session_finalize(session_id="s1", platform="cli", reason="session_boundary")
-    release.set()
     _wait_inflight_clear(t, "s1")
-    assert len(llm.calls) == 1  # 关闭不重复 in-flight 评估
+    assert len(llm.calls) == 1  # 关闭不重复发起第二趟评估，且已等待第一趟安全完成
 
 
 def test_close_signal_then_finalize_does_not_double_call():
@@ -539,11 +544,13 @@ def test_collision_suffix_fits_display_width():
     assert display_width(r["title"]) <= 10
 
 
-def test_malformed_model_output_keeps():
+def test_malformed_model_output_records_failure_and_retries():
     db = FakeDB(messages=MSGS, title="Test 空转排查", source="llm")
     t, _ = make_titler(db, text="抱歉，我无法完成这个请求。")
     r = t.evaluate("s1", force=True)
-    assert r["action"] == "keep"
+    assert r["action"] == "failed"
+    assert "model call failed" in r.get("reason", "")
+    assert "s1" in t._failed_sessions
 
 
 def test_blind_untitled_keep_is_reported_as_failed():
@@ -668,9 +675,9 @@ def test_parse_decision_tolerates_markdown_fence():
     action, title = _parse_decision(text)
     assert action == "rename"
     assert title == "Test 空转排查"
-    # 非 JSON 自由文本：不猜，保持 keep（宁可不改不写错）
+    # 非 JSON 自由文本：返回 error 促发重试，不伪装成合法决策
     action2, title2 = _parse_decision("我认为应该 rename，标题：修显示器 HDR")
-    assert action2 == "keep"
+    assert action2 == "error"
     assert title2 is None
 
 
@@ -1750,27 +1757,64 @@ def test_base_autotitler_generate_raises_not_implemented():
         base._generate(None, [], [], [])
 
 
-def test_retry_failed_sessions_compensates_due_session(monkeypatch):
+def test_retry_backoff_cooldown_not_suppressed_by_last_eval(monkeypatch):
+    """Parallax Review [BLOCKER #1]: 真实失败后退避到期应真正发出调用，不被 _last_eval 节流阻断。"""
     db = FakeDB(messages=MSGS, title=None)
-    calls = []
+    attempts = []
 
-    class SuccessLlm:
+    class FlakyLlm:
         def complete(self, **kw):
-            calls.append(kw)
-            return SimpleNamespace(text='{"action":"rename","title":"补偿成功标题"}', usage={})
+            attempts.append(time.time())
+            if len(attempts) == 1:
+                raise RuntimeError("503 overloaded")
+            return SimpleNamespace(text='{"action":"rename","title":"重试成功标题"}', usage={})
 
-    t = AutoTitler(SimpleNamespace(llm=SuccessLlm()), {**DEFAULTS, "every_n_turns": 4}, db=db)
-    # 模拟 s1 之前由于网络错误进入了失败记录簿，且退避时间已过
-    t._failed_sessions["s1"] = {"attempts": 1, "next_retry_at": time.time() - 10}
+    t = AutoTitler(SimpleNamespace(llm=FlakyLlm()), {**DEFAULTS, "every_n_turns": 4}, db=db)
+    # 第 1 轮：真实调用失败
+    r1 = t.evaluate("s1", force=True)
+    assert r1["action"] == "failed"
+    assert "s1" in t._failed_sessions
+    # 关键断言：失败后 _last_eval 不应记录 s1，避免被 5 分钟常规节流锁死
+    assert "s1" not in t._last_eval
 
-    # 另一个 session s2 发生了普通非触发轮次（n=1, every=4）
-    t.on_session_end(session_id="s2", completed=True)
-    # 等待后台线程完成
+    # 模拟 30 秒后退避到期，捎带检查触发补偿重试
+    t._failed_sessions["s1"]["next_retry_at"] = time.time() - 1
+    t._retry_failed_sessions()
     time.sleep(0.05)
 
-    # 验证 s1 被触发补偿重试并成功出队
     assert "s1" not in t._failed_sessions
-    assert db.title == "补偿成功标题"
+    assert db.title == "重试成功标题"
+    assert len(attempts) == 2
+
+
+def test_finalize_waits_for_inflight_worker_completion():
+    """Parallax Review [BLOCKER #2]: finalize 必须等待已有 in-flight worker 完成，不能直接跳过丢失最后写库。"""
+    import threading
+    db = FakeDB(messages=MSGS, title="旧标题", source="derived")
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockedLlm:
+        def complete(self, **kw):
+            entered.set()
+            release.wait(timeout=5)
+            return SimpleNamespace(text='{"action":"rename","title":"终局成功标题"}', usage={})
+
+    t = AutoTitler(SimpleNamespace(llm=BlockedLlm()), {**DEFAULTS, "every_n_turns": 1}, db=db)
+    t.on_session_end(session_id="s1", completed=True)
+    assert entered.wait(timeout=5)
+
+    # 此时 worker 在飞行中。主线程 finalize 不应该抛弃，而是等待 worker 完成
+    def do_release():
+        time.sleep(0.05)
+        release.set()
+
+    threading.Thread(target=do_release, daemon=True).start()
+    t.on_session_finalize(session_id="s1")
+
+    assert db.title == "终局成功标题"
+
+
 
 
 def test_retry_failed_sessions_drops_user_title():

@@ -36,15 +36,7 @@ class AutoTitler(_BaseAutoTitler):
             if current != pending.get("base_title"):
                 self._pending.pop(session_id, None)
 
-        result = super().evaluate(session_id, force=force, blind=blind)
-        if result.get("action") == "pending":
-            pending = self._pending.get(session_id)
-            if pending is not None and "base_title" not in pending:
-                try:
-                    pending["base_title"] = self.db.get_session_title(session_id)
-                except Exception:
-                    pass
-        return result
+        return super().evaluate(session_id, force=force, blind=blind)
 
     def _commit_rename(self, db, session_id: str, title: str):
         """Require exactly ``rename_confirmations`` follow-up endorsements."""
@@ -223,6 +215,9 @@ class AutoTitler(_BaseAutoTitler):
         )
 
         action, title = _parse_decision(text)
+        if action == "error":
+            log.warning("auto-titler %s: model returned invalid decision payload: %r", (session_id or "-")[:12], text[:120])
+            return "error", None
         if action == "rename" and title:
             return "rename", title
         if action == "approve":

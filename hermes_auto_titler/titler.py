@@ -236,8 +236,9 @@ class AutoTitler:
         self._rename_times: Dict[str, List[float]] = {}
         # 失败重试登记簿：记录未成功命名的会话及重试元数据（用于后续轮次补偿重试）
         self._failed_sessions: Dict[str, Dict[str, Any]] = {}
-        # 同一会话同一时刻只允许一个进行中的模型评估（hook 并发去重）
-        self._inflight: set[str] = set()
+        self._retry_lock = threading.Lock()
+        # 同一会话同一时刻只允许一个进行中的模型评估（hook 并发去重），记录关联的完成 Event
+        self._inflight: Dict[str, threading.Event] = {}
         self._inflight_lock = threading.Lock()
 
     @property
@@ -286,7 +287,7 @@ class AutoTitler:
             and self._early_eligible(session_id)
         ):
             self._submit_eval(session_id)
-        self._retry_failed_sessions(exclude_session_id=session_id)
+        self._retry_failed_sessions()
 
     def on_session_finalize(self, **payload: Any) -> None:
         """真实会话关闭/终局（CLI 退出、TUI 关闭、gateway 过期、/new 切换）。"""
@@ -299,46 +300,53 @@ class AutoTitler:
             return
         self._current_session = session_id
         self._close_eval(session_id)
-        self._retry_failed_sessions(exclude_session_id=session_id)
+        self._retry_failed_sessions()
 
     # -- 评估调度 -----------------------------------------------------------
 
-    def _retry_failed_sessions(self, exclude_session_id: Optional[str] = None) -> None:
+    def _retry_failed_sessions(self) -> None:
         """捎带检查失败记录簿：重试因模型异常未能成功命名的会话。
 
         特性：
         - 天然去重：每个会话在 _failed_sessions 字典中仅占一条记录，不按轮次无限累加；
         - 指数退避：每次失败翻倍等待时长，避免服务商瘫痪时引发重试风暴；
+        - 全局背压：每轮调度最多申领少量任务（最多 2 个），避免惊群；
         - 保护校验：若会话已被用户手改标题（source=user）或已达到最大重试次数，则自动出队。
         """
-        if not self._failed_sessions:
-            return
-        now = time.time()
-        to_retry: List[str] = []
-        to_remove: List[str] = []
+        with self._retry_lock:
+            if not self._failed_sessions:
+                return
+            now = time.time()
+            to_retry: List[str] = []
+            to_remove: List[str] = []
 
-        for sid, meta in list(self._failed_sessions.items()):
-            if sid == exclude_session_id:
-                continue
-            # 超过最大重试次数（默认 5 次）则放弃本轮跟踪，避免永久堆积
-            if int(meta.get("attempts", 0)) >= 5:
-                to_remove.append(sid)
-                continue
-            # 尚未到达退避解禁时间点
-            if now < float(meta.get("next_retry_at", 0)):
-                continue
-            # 检查是否已不需要重试（例如用户手改）
-            try:
-                src = self.db.get_session_title_source(sid)
-                if src == SessionDB.TITLE_SOURCE_USER:
+            for sid, meta in list(self._failed_sessions.items()):
+                # 超过最大重试次数（默认 5 次）则放弃本轮跟踪，避免永久堆积
+                if int(meta.get("attempts", 0)) >= 5:
                     to_remove.append(sid)
                     continue
-            except Exception:
-                pass
-            to_retry.append(sid)
+                # 尚未到达退避解禁时间点
+                if now < float(meta.get("next_retry_at", 0)):
+                    continue
+                # 检查是否已不需要重试（例如会话已有了合法标题，或用户已手改）
+                try:
+                    src = self.db.get_session_title_source(sid)
+                    if src == SessionDB.TITLE_SOURCE_USER:
+                        to_remove.append(sid)
+                        continue
+                    cur_title = self.db.get_session_title(sid)
+                    # 若已成功落库了正式标题（非空且非 derived 临时截断），则无需重试
+                    if cur_title and src == SessionDB.TITLE_SOURCE_LLM:
+                        to_remove.append(sid)
+                        continue
+                except Exception:
+                    pass
+                to_retry.append(sid)
+                if len(to_retry) >= 2:  # 全局背压：每次最多 claim 2 个会话
+                    break
 
-        for sid in to_remove:
-            self._failed_sessions.pop(sid, None)
+            for sid in to_remove:
+                self._failed_sessions.pop(sid, None)
 
         for sid in to_retry:
             with self._inflight_lock:
@@ -388,14 +396,15 @@ class AutoTitler:
         执行。轮数/节流/去重计数器都是进程内的：进程重启后清零，属可接受
         的本地行为。
         """
+        event = threading.Event()
         with self._inflight_lock:
             if session_id in self._inflight:
                 return
-            self._inflight.add(session_id)
+            self._inflight[session_id] = event
         try:
             worker = threading.Thread(
                 target=_wrap_with_context(self._eval_worker),
-                args=(session_id,),
+                args=(session_id, event),
                 name=f"autotitler-eval-{session_id[:8]}",
                 daemon=True,
             )
@@ -408,41 +417,51 @@ class AutoTitler:
                 session_id[:12], e,
             )
             with self._inflight_lock:
-                self._inflight.discard(session_id)
+                self._inflight.pop(session_id, None)
+            event.set()
 
-    def _eval_worker(self, session_id: str) -> None:
+    def _eval_worker(self, session_id: str, event: threading.Event) -> None:
         try:
             self.evaluate(session_id)
         except Exception as e:
             log.warning("auto-titler background evaluate failed: %s", e)
         finally:
             with self._inflight_lock:
-                self._inflight.discard(session_id)
+                self._inflight.pop(session_id, None)
+            event.set()
 
     def _close_eval(self, session_id: str) -> None:
-        """真实关闭评估：正常节流（force=False）；已有 in-flight 评估时不重复。
+        """真实关闭评估：正常节流（force=False）；已有 in-flight 评估时等待其完成。
 
-        刻意保持同步：关闭是用户可见的终局动作，同步评估可能阻塞至 provider
-        timeout（最长 ~30s），但换取「关闭前标题已更新」的确定性；轮次评估
-        仍走异步 worker。
+        刻意保持同步：关闭是用户可见的终局动作，若已有 daemon 线程在执行，必须
+        等待其完成（最多等待 15s），避免进程直接退出导致守护线程被 kill。
         """
         if not self.cfg.get("on_close", True):
             return
+
+        existing_event = None
+        new_event = None
         with self._inflight_lock:
             if session_id in self._inflight:
-                log.debug(
-                    "auto-titler close: eval already in flight for %s, skipped",
-                    session_id[:12],
-                )
-                return
-            self._inflight.add(session_id)
+                existing_event = self._inflight[session_id]
+            else:
+                new_event = threading.Event()
+                self._inflight[session_id] = new_event
+
+        if existing_event is not None:
+            log.info("auto-titler close: waiting for in-flight worker for %s", session_id[:12])
+            existing_event.wait(timeout=15.0)
+            return
+
         try:
             self.evaluate(session_id, force=False)
         except Exception as e:
             log.warning("auto-titler close evaluate failed: %s", e)
         finally:
             with self._inflight_lock:
-                self._inflight.discard(session_id)
+                self._inflight.pop(session_id, None)
+            if new_event:
+                new_event.set()
 
     # -- 评估 ---------------------------------------------------------------
 
@@ -543,13 +562,15 @@ class AutoTitler:
             # 模型调用失败（网络中断/503/超时）：登记入失败重试字典，实施指数退避，
             # 并避免记录正常 _last_eval 锁死重试窗口。
             self._pending.pop(session_id, None)
-            meta = self._failed_sessions.get(session_id, {"attempts": 0})
-            attempts = int(meta.get("attempts", 0)) + 1
-            delay = min(30 * (2 ** (attempts - 1)), 600)  # 30s, 60s, 120s, 240s, 480s, max 600s
-            self._failed_sessions[session_id] = {
-                "attempts": attempts,
-                "next_retry_at": time.time() + delay,
-            }
+            self._last_eval.pop(session_id, None)
+            with self._retry_lock:
+                meta = self._failed_sessions.get(session_id, {"attempts": 0})
+                attempts = int(meta.get("attempts", 0)) + 1
+                delay = min(30 * (2 ** (attempts - 1)), 600)  # 30s, 60s, 120s, 240s, 480s, max 600s
+                self._failed_sessions[session_id] = {
+                    "attempts": attempts,
+                    "next_retry_at": time.time() + delay,
+                }
             log.warning(
                 "auto-titler %s: recorded failure (attempt %d/5, next retry in %ds)",
                 session_id[:12], attempts, delay,
@@ -557,7 +578,8 @@ class AutoTitler:
             return {"action": "failed", "reason": "model call failed"}
 
         # 评估成功推进：清除该会话的失败重试记录
-        self._failed_sessions.pop(session_id, None)
+        with self._retry_lock:
+            self._failed_sessions.pop(session_id, None)
 
         if review and proposed:
             if proposed == current:
@@ -569,8 +591,8 @@ class AutoTitler:
                 # 模型背书候选（显式 approve，或裁决时原样重复）→ 落库候选本身
                 return self._commit_rename(db, session_id, proposed)
             if action == "rename" and candidate and candidate != current:
-                # 模型给出更好的新候选：替换待审，旧候选作废
-                self._pending[session_id] = {"title": candidate}
+                # 模型给出更好的新候选：替换待审，旧候选作废，并记录生成时的 current 快照作为 base_title
+                self._pending[session_id] = {"title": candidate, "base_title": current}
                 log.info(
                     "auto-titler %s: pending (review) candidate=%r",
                     session_id[:12], candidate,
@@ -602,10 +624,10 @@ class AutoTitler:
             return {"action": "keep"}
 
         if review:
-            # 首次提出候选：挂起待审，不写库
-            self._pending[session_id] = {"title": candidate}
+            # 首次提出候选：挂起待审，不写库，同时捕获生成输入时的 current 快照作为 base_title
+            self._pending[session_id] = {"title": candidate, "base_title": current}
             log.info(
-                "auto-titler %s: pending candidate=%r", session_id[:12], candidate,
+                "auto-titler %s: pending candidate=%r base=%r", session_id[:12], candidate, current,
             )
             return {"action": "pending", "candidate": candidate}
 
@@ -822,14 +844,20 @@ class AutoTitler:
             if db.set_session_title(session_id, t):
                 try:
                     stored = db.get_session_title(session_id)
-                except Exception:
-                    stored = t
+                except Exception as e:
+                    log.warning("auto-titler %s: failed to readback title after write, failing closed: %s", session_id[:12], e)
+                    return False
                 if stored != t:
+                    log.warning("auto-titler %s: stored title %r != expected %r, aborting source recovery", session_id[:12], stored, t)
                     return False
                 try:
-                    db.set_session_title_source(session_id, SessionDB.TITLE_SOURCE_LLM)
-                except Exception:
-                    pass
+                    res_src = db.set_session_title_source(session_id, SessionDB.TITLE_SOURCE_LLM)
+                    if res_src is False:
+                        log.warning("auto-titler %s: set_session_title_source returned False, failing closed", session_id[:12])
+                        return False
+                except Exception as e:
+                    log.warning("auto-titler %s: exception during source recovery, failing closed: %s", session_id[:12], e)
+                    return False
                 return True
             return False
 
@@ -924,8 +952,11 @@ def _parse_decision(text: str) -> Tuple[str, Optional[str]]:
     for d in candidates:
         if not d:
             continue
-        action = str(d.get("action", "keep")).lower()
+        action = str(d.get("action", "")).lower()
         if action in ("keep", "approve", "rename"):
             title = str(d.get("title") or "").strip().strip('"').strip("'")
+            if action == "rename" and not title:
+                # rename 动作必须提供非空标题，否则视为非法决策
+                return "error", None
             return action, (title or None)
-    return "keep", None
+    return "error", None

@@ -14,7 +14,7 @@
 - Expand semantic acceptance matrix (`scripts/prompt_acceptance.py`) to 20 curated paired cases across full project lifecycles, and add step-by-step evolution simulator (`scripts/simulate_evolution.py`).
 - Add/extend regression coverage for N-round counting, candidate replacement, base-title invalidation, strategy thresholds, evidence-before-title ordering, rename-only regeneration, soft length bounds, and the v0.2 default.
 - Clean up dead code in base AutoTitler by delegating generation completely to policy, and align prompt soft-length guidance with explicit `max_title_length` configuration.
-- Implement bounded failed-session retry ledger (`_failed_sessions`): track un-titled sessions after model errors (503/timeout), apply exponential backoff, automatically compensate on subsequent turns across sessions, and pop entries on success or user-manual override.
+- Implement bounded failed-session retry ledger (`_failed_sessions`): track un-titled sessions after model errors (503/timeout), apply exponential backoff (30s-600s), evict `_last_eval` on error to avoid throttling locks, add global backpressure (max 2 claims per sweep), thread-safe retry state locks, fail-closed provenance CAS, wait on in-flight workers during finalize, and synchronously snapshot `base_title`.
 
 ## 0.1.3 — 2026-09-12
 

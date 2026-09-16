@@ -125,10 +125,13 @@ class AutoTitler:
         self._current_session: Optional[str] = None
         # 滞后机制：session_id -> {"title": 待审候选}（评审协议，见 evaluate）
         self._pending: Dict[str, Dict[str, Any]] = {}
-        # 频次窗口：session_id -> 实际改名时间戳列表（滑动 60 分钟）
         # 失败重试登记簿：记录未成功命名的会话及重试元数据（用于后续轮次补偿重试）
         self._failed_sessions: Dict[str, Dict[str, Any]] = {}
         self._retry_lock = threading.Lock()
+        # 可选的自动改名次数门控。与轮数、pending 等其他运行时状态一样，
+        # 当前只保存在插件进程内；0 表示关闭，不改变默认行为。
+        self._rename_counts: Dict[str, int] = {}
+        self._rename_count_lock = threading.RLock()
         # 结构化审计环形日志：固定容量（最多 50 条），供 /autotitler status 或排障审查
         self._audit_log: collections.deque = collections.deque(maxlen=50)
         # 同一会话同一时刻只允许一个进行中的模型评估（hook 并发去重），记录关联的完成 Event
@@ -188,7 +191,7 @@ class AutoTitler:
             return
         n = self._turns.get(session_id, 0) + 1
         self._turns[session_id] = n
-        every = max(1, int(self.cfg.get("every_n_turns", 4)))
+        every = max(1, int(self.cfg.get("every_n_turns", 2)))
         if n % every == 0:
             self._submit_eval(session_id)
         elif (
@@ -426,6 +429,18 @@ class AutoTitler:
                 self._failed_sessions.pop(session_id, None)
             return {"action": "skipped", "reason": "legacy title (NULL provenance) is protected"}
 
+        # 达到上限时在调用模型前短路，避免继续消耗标题模型额度。blind 是用户
+        # 显式的 rename-now/批量重生成路径，保留其旁路语义；首次无标题生成
+        # 也不应消耗“替换次数”。
+        limit_result = self._rename_limit_result(
+            session_id,
+            current,
+            blind=blind,
+        )
+        if limit_result is not None:
+            self._pending.pop(session_id, None)
+            return limit_result
+
         recent, all_user, opening, earlier_summary = load_context_with_summary(
             db,
             session_id,
@@ -515,7 +530,13 @@ class AutoTitler:
                 return {"action": "keep"}
             if action == "approve" or (action == "rename" and candidate == proposed):
                 # 模型背书候选（显式 approve，或裁决时原样重复）→ 落库候选本身
-                return self._commit_rename(db, session_id, proposed, expected_title=current)
+                return self._commit_rename(
+                    db,
+                    session_id,
+                    proposed,
+                    expected_title=current,
+                    bypass_limit=blind,
+                )
             if action == "rename" and candidate and candidate != current:
                 # 模型给出更好的新候选：替换待审，旧候选作废，并记录生成时的 current 快照作为 base_title
                 self._pending[session_id] = {"title": candidate, "base_title": current}
@@ -549,7 +570,13 @@ class AutoTitler:
             )
             return {"action": "pending", "candidate": candidate}
 
-        return self._commit_rename(db, session_id, candidate, expected_title=current)
+        return self._commit_rename(
+            db,
+            session_id,
+            candidate,
+            expected_title=current,
+            bypass_limit=blind,
+        )
 
     @staticmethod
     def _language_rule() -> str:
@@ -568,9 +595,61 @@ class AutoTitler:
             pass
         return "Write the title in the primary natural language of the user's messages."
 
-    def _commit_rename(self, db: SessionDB, session_id: str, title: str, expected_title: Optional[str] = None) -> Dict[str, Any]:
+    def _commit_rename(
+        self,
+        db: SessionDB,
+        session_id: str,
+        title: str,
+        expected_title: Optional[str] = None,
+        *,
+        bypass_limit: bool = False,
+    ) -> Dict[str, Any]:
         """实际写库 + 状态清理。title 必须是已 _prepare_candidate 的候选。"""
-        written = self._write(db, session_id, title, expected_title=expected_title)
+        # _do_evaluate() 已在模型调用前检查过一次；这里再检查一次，覆盖
+        # review/pending 和并发评估之间的窗口。锁只保护插件计数，不替代
+        # SessionDB 自己的写入 CAS。
+        if not bypass_limit:
+            current = expected_title
+            if current is None:
+                try:
+                    current = db.get_session_title(session_id)
+                except Exception:
+                    current = None
+            result = self._rename_limit_result(
+                session_id,
+                current,
+                blind=False,
+            )
+            if result is not None:
+                self._pending.pop(session_id, None)
+                return result
+
+        previous_title = expected_title
+        if previous_title is None:
+            try:
+                previous_title = db.get_session_title(session_id)
+            except Exception:
+                previous_title = None
+
+        if bypass_limit:
+            written = self._write(db, session_id, title, expected_title=expected_title)
+        else:
+            # 把“再次检查上限 → 写入 → 成功后计数”放在同一把进程锁内，
+            # 避免两个绕过 hook 去重的同步调用同时通过最后一道门。
+            with self._rename_count_lock:
+                result = self._rename_limit_result(
+                    session_id,
+                    previous_title,
+                    blind=False,
+                )
+                if result is not None:
+                    self._pending.pop(session_id, None)
+                    return result
+                written = self._write(db, session_id, title, expected_title=expected_title)
+                # 只统计“已有标题 → 新标题”的自动替换；首次生成不消耗额度。
+                # 写入成功后才递增，避免失败/冲突消耗额度。
+                if written and previous_title and previous_title != written:
+                    self._rename_counts[session_id] = self._rename_counts.get(session_id, 0) + 1
         if written:
             self._pending.pop(session_id, None)
             log.info("auto-titler %s: renamed -> %r", session_id[:12], written)
@@ -583,6 +662,34 @@ class AutoTitler:
             return {"action": "skipped", "reason": reason}
         log.warning("auto-titler %s: rename failed to write title %r", session_id[:12], title)
         return {"action": "failed"}
+
+    def _rename_limit_result(
+        self,
+        session_id: str,
+        current: Optional[str],
+        *,
+        blind: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """Return a skip result when automatic replacement reached its optional cap."""
+        if blind or not current:
+            return None
+        limit = max(0, int(self.cfg.get("max_renames_per_session", 0)))
+        if limit <= 0:
+            return None
+        with self._rename_count_lock:
+            count = self._rename_counts.get(session_id, 0)
+        if count < limit:
+            return None
+        log.info(
+            "auto-titler %s: automatic rename limit reached (%d/%d)",
+            session_id[:12], count, limit,
+        )
+        return {
+            "action": "skipped",
+            "reason": "max_renames_per_session reached",
+            "renames": count,
+            "limit": limit,
+        }
 
     # -- 模型生成 -----------------------------------------------------------
 

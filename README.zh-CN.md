@@ -44,6 +44,7 @@ Hermes 可以根据开场对话生成第一版标题，但会话会继续发展�
 | **与 Hermes 首标题协作** | 默认 `first_title_mode: builtin`，第一版标题交给 Hermes，插件负责后续维护；切到 `plugin` 才从第一轮开始接管。 |
 | **保守 / 激进策略** | `conservative` 只有明显、持续的失配才改；`aggressive` 在用户明确放弃旧目标或连续实质回合形成新方向后更快跟进，但单次子任务、状态检查和工具变化仍不算转题。 |
 | **N 轮复审门** | v0.2 默认 `rename_confirmations: 1`，即 llm→llm 候选还要再获得一次后续背书。设为 `0` 可改成一次判定直接写；更大的 N 要求 N 次后续背书，换候选后重新计数。 |
+| **可选改名上限** | `max_renames_per_session: 0` 默认关闭；设为 N 后，每个会话最多自动替换标题 N 次，用于控制长期会话的标题抖动与成本。首次无标题命名和显式 `rename-now` 不消耗额度。 |
 | **调用次数受控** | 轮数门控、单会话时间节流、来源检查、in-flight 去重和内部回合过滤，让多数前台轮次根本不触发标题模型。 |
 | **保守表面规范化** | 保留 repo 名、文件名、命令和其他 literal identifier；只在安全边界补中英文空格，并且只有当前会话给出大小写证据时才统一名称大小写。 |
 | **Profile 隔离 + 可审计** | SessionDB 句柄按 Hermes profile 分开缓存；真实模型调用以 `task=hermes_auto_titler` 记入 Hermes 用量统计。 |
@@ -54,7 +55,7 @@ Hermes 可以根据开场对话生成第一版标题，但会话会继续发展�
 ## 🔍 工作原理
 
 1. **决定第一版标题归谁** —— 默认由 Hermes 内建 `title_generation` 辅助任务生成第一版标题。`first_title_mode: plugin` 下，插件从第一个完整前台轮次开始评估，并在插件加载时关闭宿主内建标题器，避免双重生成。
-2. **触发与门控** —— 挂 `on_session_end` / `on_session_finalize`。只有完整前台轮次计入 `every_n_turns`；失败、被打断、cron、subagent、bg-review 都不计。周期评估放到 daemon worker，关闭/终局评估同步执行，并继续受 `min_interval_minutes` 约束。
+2. **触发与门控** —— 挂 `on_session_end` / `on_session_finalize`。只有完整前台轮次计入 `every_n_turns`（默认 `2`）；失败、被打断、cron、subagent、bg-review 都不计。周期评估放到 daemon worker，关闭/终局评估同步执行，并继续受 `min_interval_minutes` 约束。
 3. **构造意图上下文** —— 开头轮次 + 最近轮次（每个选中轮次只留用户消息和最后一条 assistant 回复）+ 首条与最近若干用户消息组成的受限轨迹。若压缩已经移除原始 opening，则把 earlier summary 单独作为历史锚点。交接包装和 replay 噪声会在采样前清理。
 4. **先推断主题，再比较标题** —— 辅助模型只返回严格 JSON。对话证据放在当前标题/候选标题之前，降低旧标题造成的锚定；同一条消息可能同时出现在 opening/recent/trajectory，提示词明确要求这种结构性重复不能算作“用户重复表达意图”。
 5. **应用策略阈值** —— `conservative` 在标题仍大体准确时倾向保留；`aggressive` 在用户明确替换旧目标，或多个实质用户回合形成持续的新方向时更快转题，但“最新一条消息”本身永远不构成充分证据。
@@ -146,7 +147,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | `true` | 总开关。若插件启动时就是 false，则没有注册 hook，之后改成 true 需要重启；已经加载后改成 false 会被 hook 内的开关立即拦住。 |
-| `every_n_turns` | `4` | 每 N 个完整前台轮次评估一次。 |
+| `every_n_turns` | `2` | 每 N 个完整前台轮次评估一次。 |
 | `first_title_mode` | `builtin` | `builtin` = 第一版标题归 Hermes；`plugin` = 插件从第 1 轮开始评估，并在插件加载时关闭宿主标题器。切换应按重启级配置处理。 |
 | `early_turn_eval` | `false` | 兼容旧配置保留。当前实际行为由 `first_title_mode` 控制：`plugin` 会提前评估，`builtin` 不会。 |
 | `on_close` | `true` | 真实关闭/终局时评估一次（同步、受时间节流）。 |
@@ -162,9 +163,10 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `strategy` | `conservative` | `conservative` = 只有明显、持续的失配才改；`aggressive` = 用户明确放弃旧目标或多个实质回合形成持续新方向后更快跟进，但不把单次子任务/工具变化当作转题。 |
 | `provider` / `model` | `""` / `""` | 都为空 = Hermes `title_generation` 辅助任务；填写任一项 = 插件自定义通道。 |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔。 |
-| `max_title_length` / `max_display_width` | `null` / `40` | `max_title_length: null` 不强加代码层字符数硬切，由提示词软目标（~12 汉字）与 `max_display_width` 显示列宽硬限制（中文=2 列）共同约束；`complete` 风格额外增加 12 列。 |
+| `max_title_length` / `max_display_width` | `null` / `40` | `max_title_length: null` 不强加代码层字符数硬切，由提示词保持标题简洁，再由 `max_display_width` 严格限制显示列宽；`complete` 风格额外增加 12 列。 |
 | `rename_confirmations` | `1` | v0.2 默认再要求 1 次后续背书；`0` = 一次判定后直接写；`N > 1` = 需要 N 次后续背书。若候选被替换则重新计数。 |
-| `renames_per_hour` | `0` | 单会话滑动窗口内“成功写入”的改名次数上限；`0` = 不限。 |
+| `max_renames_per_session` | `0` | 默认关闭自动替换次数上限；`N > 0` = 每个会话最多自动替换标题 N 次。首次无标题命名和显式 `rename-now` 不消耗次数；已有 `derived` 标题升级属于一次自动替换。计数只存在当前插件进程内。 |
+
 
 </details>
 
@@ -202,7 +204,7 @@ uv venv .venv && uv pip install --python .venv/bin/python pytest PyYAML
 <your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>
 ```
 
-`review_sample.py` 是 dry-run，并且现在会完整复用已加载的生产配置，包括 preview、用户轨迹和摘要预算。验证新模型或新 prompt 时，建议对同一批样本分别跑 `conservative` / `aggressive`。`retitle_all.py --dry-run` 不调用模型也不写标题；去掉该参数后会真实改写符合条件的自动标题。
+`review_sample.py` 是 dry-run，并且现在会完整复用已加载的生产配置，包括 preview、用户轨迹和摘要预算。`prompt_acceptance.py` 是隔离实验工具：它随机抽取真实历史会话，按真实用户轮次逐步重放相同前缀，在同一批输入上比较当前提示词与明确选择的精简、极简输入、详细变体，再由独立评分调用按覆盖度、具体性、忠实度、简洁度和语言一致性评分。未设置 `HERMES_AUTOTITLER_EXPERIMENT_*` 覆盖时，它直接使用 Hermes 的 `PluginLlm` 和 `title_generation` 路由；实验只读，不写 SessionDB，原标题不会进入生成或评分。验证策略时仍建议对同一批样本分别跑 `conservative` / `aggressive`。`retitle_all.py --dry-run` 不调用模型也不写库；去掉该参数后会真实改写符合条件的自动标题。
 
 ## 📄 许可证
 

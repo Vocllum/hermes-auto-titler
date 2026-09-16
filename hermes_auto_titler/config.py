@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 DEFAULTS: dict[str, Any] = {
     "enabled": True,
-    "every_n_turns": 4,
+    "every_n_turns": 2,
     "on_close": True,
     "early_turn_eval": False,
     # 首轮命名一键开关：builtin=插件首轮不抢（early 强制失效，首标题归内建；
@@ -35,12 +35,15 @@ DEFAULTS: dict[str, Any] = {
     "provider": "",
     "model": "",
     "min_interval_minutes": 5,
-    # 提示词软目标约 12 字符；None 表示不强加代码层字符数硬截断（由提示词与显示列宽约束）。
+    # None 表示不强加代码层字符数硬截断（由提示词与显示列宽约束）。
     "max_title_length": None,
     "max_display_width": 40,
     # 0 = 单次判定直接写；N>0 = 首次提出候选后，再要求 N 次后续背书。
     # 0.2 默认 1：降低单次误判导致的标题跳动；需要更快响应可显式改回 0。
     "rename_confirmations": 1,
+    # 0 = 不限制；N>0 = 每个插件进程内的会话最多自动替换 N 次。
+    # 手动 blind 重生成不受此门控，首次无标题生成也不消耗次数。
+    "max_renames_per_session": 0,
 }
 
 VALID_STRATEGIES = {"conservative", "aggressive"}
@@ -148,6 +151,8 @@ def coerce_value(key: str, raw: Any) -> Any:
         v = max(10, min(int(v), 100))
     elif key == "rename_confirmations":
         v = max(0, int(v))
+    elif key == "max_renames_per_session":
+        v = max(0, int(v))
     return v
 
 
@@ -172,7 +177,10 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
             data = {}
     if isinstance(data, dict):
         for k, v in data.items():
-            if v is None or k not in DEFAULTS:
+            if v is None:
+                continue
+            if k not in DEFAULTS:
+                log.warning("auto-titler config: unknown key %r ignored", k)
                 continue
             try:
                 cfg[k] = coerce_value(k, v)

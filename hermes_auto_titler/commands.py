@@ -51,6 +51,7 @@ def make_handler(titler) -> Callable[[str], str]:
                 f" | provider={c['provider'] or '(host default)'}"
                 f" | model={c['model'] or '(host default)'}"
                 f" | interval={c['min_interval_minutes']}m | max_len={c['max_title_length']}"
+                f" | max_renames={c.get('max_renames_per_session', 0)}"
                 f"{log_section}"
             )
 

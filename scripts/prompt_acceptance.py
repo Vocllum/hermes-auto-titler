@@ -1,559 +1,642 @@
-"""Semantic acceptance matrix for the title prompt.
+"""Real-session title prompt experiment.
 
-Runs curated synthetic conversations through the real configured title model.
-It does not read or write SessionDB. The goal is to catch semantic regressions that
-unit tests cannot: overfitting to the latest action, over-generalizing the topic,
-missing real pivots, or treating an incidental tool as the subject.
+This is an evaluation harness, not a synthetic acceptance test. It samples existing
+sessions without writing them, replays the real conversation one user turn at a
+time, and compares isolated prompt profiles on the same prefixes. An LLM judge
+scores the resulting titles against the visible prefix. The original session title
+is never shown to the generator or used as a lexical oracle.
 
 Examples:
-  <your-hermes-venv>/bin/python scripts/prompt_acceptance.py
-  <your-hermes-venv>/bin/python scripts/prompt_acceptance.py --strategy aggressive
-  <your-hermes-venv>/bin/python scripts/prompt_acceptance.py --both
-  <your-hermes-venv>/bin/python scripts/prompt_acceptance.py --both --strict
+  PYTHONPATH=/path/to/hermes-agent .venv/bin/python scripts/prompt_acceptance.py
+  PYTHONPATH=/path/to/hermes-agent .venv/bin/python scripts/prompt_acceptance.py --n 6 --seed 17
+  PYTHONPATH=/path/to/hermes-agent .venv/bin/python scripts/prompt_acceptance.py --variants minimal,concise,detailed --styles both
+  PYTHONPATH=/path/to/hermes-agent .venv/bin/python scripts/prompt_acceptance.py --output /tmp/title-experiment.jsonl
 
-PASS/WARN is intentionally lightweight. Read the emitted title and rationale for
-borderline cases; by default WARN does not fail the process. Use --strict only when
-you intentionally want the lexical checks to act as a gate.
+The transport is intentionally explicit and read-only: it talks to the configured
+OpenAI-compatible endpoint, while prompt construction and context sampling come
+from the real hermes-auto-titler code path.
 """
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
-from pathlib import Path
+import json
+import os
+import random
+import re
 import sys
-from typing import Iterable
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+from statistics import mean
+from types import SimpleNamespace
+from typing import Any, Iterable, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hermes_auto_titler.config import VALID_STRATEGIES, load_config
-from hermes_auto_titler.titler import AutoTitler
+from hermes_auto_titler.config import VALID_STRATEGIES, VALID_STYLES, load_config
+from hermes_auto_titler.messages import (
+    _sample_turns,
+    clean_captured_text,
+    is_summary,
+    is_system_noise,
+    message_text,
+    sample_user_messages,
+    smart_preview,
+)
+from hermes_auto_titler.policy import AutoTitler
 
 
-class Ctx:
-    def __init__(self):
-        from agent.plugin_llm import PluginLlm
-
-        self.llm = PluginLlm(plugin_id="hermes-auto-titler")
+VARIANTS = ("minimal", "concise", "detailed")
+INPUT_VARIANTS = ("current", "minimal")
+CONTEXTS = ("production", "lean")
+_SCORE_FIELDS = ("coverage", "specificity", "faithfulness", "brevity", "language")
 
 
 @dataclass(frozen=True)
-class Case:
-    name: str
-    purpose: str
-    current: str | None
-    opening: list[tuple[str, str]]
+class Sample:
+    session_id: str
+    original_title: str
+    turns: list[list[tuple[str, str]]]
+
+
+@dataclass(frozen=True)
+class Prefix:
+    number: int
+    turns: list[list[tuple[str, str]]]
     recent: list[tuple[str, str]]
     users: list[tuple[str, str]]
-    blind: bool = False
-    summary: str | None = None
-    expected_actions: set[str] = field(default_factory=lambda: {"keep", "rename"})
-    require_any: tuple[str, ...] = ()
-    forbid: tuple[str, ...] = ()
+    opening: list[tuple[str, str]]
 
 
-PROJECT_OPENING = [
-    ("user", "继续维护 hermes-auto-titler，重点是让长会话标题跟随真实主题。"),
-    ("assistant", "先审查长期意图提取和 review state。"),
-    ("user", "整个项目继续做，不要让具体工具或某次操作抢走标题。"),
-]
-PROJECT_RECENT = [
-    ("user", "CI 还剩 Opening context 这个断言失败，修一下测试。"),
-    ("assistant", "这是兼容标签断言，不影响核心主题。"),
-]
-PROJECT_USERS = [
-    ("user", "继续维护 hermes-auto-titler，重点是让长会话标题跟随真实主题。"),
-    ("user", "整个项目继续做，不要让具体工具或某次操作抢走标题。"),
-    ("user", "CI 还剩 Opening context 这个断言失败，修一下测试。"),
-]
+class HttpLlm:
+    """Small OpenAI-compatible client used only by this read-only experiment."""
+
+    def __init__(self, *, endpoint: str, model: str, api_key: str, timeout: float = 60.0):
+        self.endpoint = endpoint.rstrip("/") + "/chat/completions"
+        self.model = model
+        self.api_key = api_key
+        self.timeout = timeout
+        self.calls = 0
+
+    def complete(self, messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0,
+            # Title JSON must have enough completion budget for reasoning-capable
+            # routes; the production policy uses 64, but this harness measures
+            # prompt quality rather than production token-budget behavior.
+            "max_tokens": int(kwargs.get("max_tokens") or 256),
+        }
+        if kwargs.get("response_format"):
+            payload["response_format"] = kwargs["response_format"]
+        request = urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        self.calls += 1
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read(600).decode("utf-8", errors="replace")
+            raise RuntimeError(f"LLM endpoint returned HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"LLM endpoint unavailable: {exc.reason}") from exc
+        try:
+            data = json.loads(body)
+            text = data["choices"][0]["message"].get("content") or ""
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("LLM endpoint returned an unexpected completion shape") from exc
+        return SimpleNamespace(text=str(text), usage=data.get("usage") or {})
 
 
-CASES = [
-    Case(
-        name="project-over-latest-test",
-        purpose="A failing test is one implementation step inside an ongoing project topic.",
-        current="Hermes 自动标题维护",
-        opening=PROJECT_OPENING,
-        recent=PROJECT_RECENT,
-        users=PROJECT_USERS,
-        expected_actions={"keep"},
-        forbid=("Opening context", "pytest", "断言"),
-    ),
-    Case(
-        name="recover-from-too-narrow-title",
-        purpose="An automatic title captured from one implementation step should be pulled back to the durable project topic.",
-        current="Opening context 断言修复",
-        opening=PROJECT_OPENING,
-        recent=PROJECT_RECENT,
-        users=PROJECT_USERS,
-        expected_actions={"rename"},
-        require_any=("Hermes", "hermes-auto-titler", "自动标题"),
-        forbid=("Opening context", "pytest", "断言"),
-    ),
-    Case(
-        name="durable-concrete-issue",
-        purpose="A concrete issue should remain specific when that issue itself is the sustained goal.",
-        current=None,
-        blind=True,
-        opening=[
-            ("user", "Hindsight 的 PostgreSQL 开了 fsync=off，我要搞清楚这个设置的风险和性能影响。"),
-            ("assistant", "可以从 WAL、断电风险和写入延迟解释。"),
-        ],
-        recent=[
-            ("user", "继续围绕 fsync=off，看看容器重启和主机断电分别会怎样。"),
-            ("assistant", "这仍然是同一个 fsync 配置问题。"),
-            ("user", "最后给我判断 Hindsight 本地部署该不该开 fsync=off。"),
-        ],
-        users=[
-            ("user", "Hindsight 的 PostgreSQL 开了 fsync=off，我要搞清楚这个设置的风险和性能影响。"),
-            ("user", "继续围绕 fsync=off，看看容器重启和主机断电分别会怎样。"),
-            ("user", "最后给我判断 Hindsight 本地部署该不该开 fsync=off。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("fsync",),
-        forbid=("数据库问题", "软件配置"),
-    ),
-    Case(
-        name="tool-is-the-subject",
-        purpose="Do not strip a tool name when the tool itself is what the user is studying.",
-        current=None,
-        blind=True,
-        opening=[
-            ("user", "研究 Zen Browser 固定标签页的关闭语义，想让 FlowMouse 模拟它。"),
-            ("assistant", "需要区分普通标签和 pinned tab。"),
-        ],
-        recent=[
-            ("user", "重点还是 Zen Browser pinned tab：关闭后保留 pinned 状态但卸载页面。"),
-            ("assistant", "这是浏览器行为本身，不只是实现工具。"),
-        ],
-        users=[
-            ("user", "研究 Zen Browser 固定标签页的关闭语义，想让 FlowMouse 模拟它。"),
-            ("user", "重点还是 Zen Browser pinned tab：关闭后保留 pinned 状态但卸载页面。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("Zen", "固定标签", "pinned"),
-        forbid=("浏览器问题",),
-    ),
-    Case(
-        name="one-off-interruption",
-        purpose="A one-off explanatory question should not replace the active project topic.",
-        current="Hindsight 记忆导入",
-        opening=[
-            ("user", "继续把 Hermes 历史 session 导入 Hindsight，先处理批量 retain。"),
-            ("assistant", "可以按 source、raw fact、observation 分层。"),
-            ("user", "这几天主线都还是把历史文档导完。"),
-        ],
-        recent=[
-            ("user", "顺便问一句 PostgreSQL fsync=off 是什么意思？"),
-            ("assistant", "它会减少同步落盘但增加崩溃时的数据风险。"),
-            ("user", "明白，继续刚才 Hindsight 的批量导入。"),
-        ],
-        users=[
-            ("user", "继续把 Hermes 历史 session 导入 Hindsight，先处理批量 retain。"),
-            ("user", "这几天主线都还是把历史文档导完。"),
-            ("user", "顺便问一句 PostgreSQL fsync=off 是什么意思？"),
-            ("user", "明白，继续刚才 Hindsight 的批量导入。"),
-        ],
-        expected_actions={"keep"},
-        forbid=("fsync",),
-    ),
-    Case(
-        name="genuine-topic-pivot",
-        purpose="An explicit abandonment plus sustained new work should replace the old topic.",
-        current="Hermes 自动标题维护",
-        opening=[
-            ("user", "先继续 hermes-auto-titler 的 review 逻辑。"),
-            ("assistant", "可以。"),
-        ],
-        recent=[
-            ("user", "auto-titler 先到这里，不继续了。现在转去 FlowMouse 本地化。"),
-            ("assistant", "开始检查 i18n 条目。"),
-            ("user", "FlowMouse 里 Firefox/Zen 那批缺失翻译也一起补。"),
-            ("assistant", "继续审查本地化范围。"),
-            ("user", "这轮就围绕 FlowMouse 翻译 PR 做完。"),
-        ],
-        users=[
-            ("user", "先继续 hermes-auto-titler 的 review 逻辑。"),
-            ("user", "auto-titler 先到这里，不继续了。现在转去 FlowMouse 本地化。"),
-            ("user", "FlowMouse 里 Firefox/Zen 那批缺失翻译也一起补。"),
-            ("user", "这轮就围绕 FlowMouse 翻译 PR 做完。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("FlowMouse",),
-        forbid=("Hermes", "auto-titler"),
-    ),
-    Case(
-        name="literal-repo-identifier",
-        purpose="Preserve an exact repository identifier while abstracting away the current edit.",
-        current=None,
-        blind=True,
-        opening=[
-            ("user", "继续开发 hermes-auto-titler，这次重新审查提示词判断层级。"),
-            ("assistant", "可以把 topic abstraction 做成明确规则。"),
-        ],
-        recent=[
-            ("user", "现在只是改 policy.py 的一句话，项目主线还是 hermes-auto-titler。"),
-        ],
-        users=[
-            ("user", "继续开发 hermes-auto-titler，这次重新审查提示词判断层级。"),
-            ("user", "现在只是改 policy.py 的一句话，项目主线还是 hermes-auto-titler。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("hermes-auto-titler",),
-        forbid=("policy.py",),
-    ),
-    Case(
-        name="compaction-anchor-over-tail",
-        purpose="A compacted historical anchor should outrank a narrow recent implementation failure.",
-        current=None,
-        blind=True,
-        summary="长期主线：设计 Prism LLM gateway，把 CLI、原生 API 和多模型路由统一到一个小型网关。已经讨论 combo routing、缓存、Hermes 登录复用和多端接入。",
-        opening=[],
-        recent=[
-            ("user", "刚才 timeout case 失败了，先修 request retry。"),
-            ("assistant", "可以调整 retry path。"),
-        ],
-        users=[
-            ("user", "继续 Prism gateway，今天先修 timeout case。"),
-            ("user", "retry 修完后继续 combo routing。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("Prism",),
-        forbid=("timeout", "retry"),
-    ),
-    Case(
-        name="specific-not-vague",
-        purpose="Abstract above implementation details without collapsing into a generic category.",
-        current=None,
-        blind=True,
-        opening=[
-            ("user", "我们在设计一款基于 DAWproject 的协同 DAW，重点是多人协作和 AI 可操作参数。"),
-            ("assistant", "需要从工程模型、插件参数暴露和协作状态开始。"),
-        ],
-        recent=[
-            ("user", "今天先讨论 Bitwig 的工程结构作为参考，但产品仍然是自己的协同 DAW。"),
-            ("assistant", "Bitwig 只是架构参考。"),
-        ],
-        users=[
-            ("user", "我们在设计一款基于 DAWproject 的协同 DAW，重点是多人协作和 AI 可操作参数。"),
-            ("user", "今天先讨论 Bitwig 的工程结构作为参考，但产品仍然是自己的协同 DAW。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("DAW", "DAWproject"),
-        forbid=("软件开发", "AI 工具", "Bitwig 架构"),
-    ),
-    Case(
-        name="lifecycle-design-to-release",
-        purpose="An ongoing project topic must span design, implementation, bug-fixing, and release without shrinking into release details.",
-        current="微信打卡小程序开发",
-        opening=[
-            ("user", "启动微信打卡小程序的架构设计与开发，支持每日定位签到和打卡记录统计。"),
-            ("assistant", "我们先设计打卡数据结构和地理围栏判定逻辑。"),
-        ],
-        recent=[
-            ("user", "微信小程序审核已经过了，打卡功能上线，准备写 1.0.0 发布说明。"),
-            ("assistant", "可以梳理核心功能点和发布记录。"),
-        ],
-        users=[
-            ("user", "启动微信打卡小程序的架构设计与开发，支持每日定位签到和打卡记录统计。"),
-            ("user", "打卡页面和定位组件写完了，接下来对接云函数。"),
-            ("user", "测试发现跨时区打卡时间戳有偏移，正在修这个 bug。"),
-            ("user", "微信小程序审核已经过了，打卡功能上线，准备写 1.0.0 发布说明。"),
-        ],
-        expected_actions={"keep"},
-        forbid=("发布说明", "审核", "时区", "release"),
-    ),
-    Case(
-        name="bug-pullback-pair",
-        purpose="When current title was captured from a past transient bug, pull it back to the project topic.",
-        current="修复打卡时区偏移 Bug",
-        opening=[
-            ("user", "启动微信打卡小程序的架构设计与开发，支持每日定位签到和打卡记录统计。"),
-            ("assistant", "我们先设计打卡数据结构和地理围栏判定逻辑。"),
-        ],
-        recent=[
-            ("user", "微信小程序审核已经过了，打卡功能上线，准备写 1.0.0 发布说明。"),
-            ("assistant", "可以梳理核心功能点和发布记录。"),
-        ],
-        users=[
-            ("user", "启动微信打卡小程序的架构设计与开发，支持每日定位签到和打卡记录统计。"),
-            ("user", "打卡页面和定位组件写完了，接下来对接云函数。"),
-            ("user", "测试发现跨时区打卡时间戳有偏移，正在修这个 bug。"),
-            ("user", "微信小程序审核已经过了，打卡功能上线，准备写 1.0.0 发布说明。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("打卡", "小程序"),
-        forbid=("时区", "偏移", "Bug", "发布说明"),
-    ),
-    Case(
-        name="tool-as-means",
-        purpose="A tool used merely as a diagnostic means should not displace the actual problem subject.",
-        current="商城支付回调超时排查",
-        opening=[
-            ("user", "排查商城系统在高峰期的微信支付回调超时问题，订单状态无法及时更新。"),
-            ("assistant", "先检查回调接口耗时、数据库事务锁和网络延时。"),
-        ],
-        recent=[
-            ("user", "用 tcpdump 和 Wireshark 在网关抓了 8080 端口的回调包，分析是否有丢包或重传。"),
-            ("assistant", "抓包显示服务端在收到回调时发生了 TCP 乱序重传。"),
-        ],
-        users=[
-            ("user", "排查商城系统在高峰期的微信支付回调超时问题，订单状态无法及时更新。"),
-            ("user", "用 tcpdump 和 Wireshark 在网关抓了 8080 端口的回调包，分析是否有丢包或重传。"),
-        ],
-        expected_actions={"keep"},
-        forbid=("Wireshark", "tcpdump", "抓包"),
-    ),
-    Case(
-        name="multi-interruption-return",
-        purpose="Multiple consecutive quick side questions followed by returning to the main topic must keep the main title.",
-        current="用户鉴权系统重构",
-        opening=[
-            ("user", "我们开始重构用户鉴权系统，将 Session 迁移至 JWT + Redis 黑名单架构。"),
-            ("assistant", "好的，我们规划 Token 生成、刷新和双端校验逻辑。"),
-        ],
-        recent=[
-            ("user", "顺便问下 Docker buildx 怎么传多架构参数？"),
-            ("assistant", "可以使用 --platform linux/amd64,linux/arm64。"),
-            ("user", "那 nerdctl 怎么看镜像架构？"),
-            ("assistant", "可以使用 nerdctl image inspect。"),
-            ("user", "收到，回到鉴权系统重构，继续写 Redis 踢人与黑名单机制。"),
-        ],
-        users=[
-            ("user", "我们开始重构用户鉴权系统，将 Session 迁移至 JWT + Redis 黑名单架构。"),
-            ("user", "顺便问下 Docker buildx 怎么传多架构参数？"),
-            ("user", "那 nerdctl 怎么看镜像架构？"),
-            ("user", "收到，回到鉴权系统重构，继续写 Redis 踢人与黑名单机制。"),
-        ],
-        expected_actions={"keep"},
-        forbid=("Docker", "buildx", "nerdctl", "镜像"),
-    ),
-    Case(
-        name="genuine-multi-turn-pivot",
-        purpose="Explicit abandonment followed by sustained multi-turn work on a new topic must rename to the new topic.",
-        current="用户鉴权系统重构",
-        opening=[
-            ("user", "我们开始重构用户鉴权系统，将 Session 迁移至 JWT + Redis 黑名单架构。"),
-            ("assistant", "好的，规划鉴权迁移步骤。"),
-        ],
-        recent=[
-            ("user", "鉴权系统先完全不做了，搁置。现在全力做 Docker 容器镜像的多架构自动构建。"),
-            ("assistant", "转向容器镜像多架构构建配置。"),
-            ("user", "把 buildx 缓存和 GitLab CI 多架构 push 全配好。"),
-            ("assistant", "已配置 GitLab CI 多平台流水线。"),
-            ("user", "测试一下 arm64 和 amd64 镜像构建，验证自动推送。"),
-        ],
-        users=[
-            ("user", "我们开始重构用户鉴权系统，将 Session 迁移至 JWT + Redis 黑名单架构。"),
-            ("user", "鉴权系统先完全不做了，搁置。现在全力做 Docker 容器镜像的多架构自动构建。"),
-            ("user", "把 buildx 缓存和 GitLab CI 多架构 push 全配好。"),
-            ("user", "测试一下 arm64 和 amd64 镜像构建，验证自动推送。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("Docker", "镜像", "多架构", "构建"),
-        forbid=("鉴权", "JWT", "Session"),
-    ),
-    Case(
-        name="concrete-issue-not-generalized",
-        purpose="A concrete troubleshooting issue should remain specific and not collapse into generic system/config titles.",
-        current=None,
-        blind=True,
-        opening=[
-            ("user", "排查 M1 Mac 外接 4K 显示器开启 DDC/CI 后的持续闪屏黑屏问题。"),
-            ("assistant", "这可能是 macOS 显示器驱动与显示器固件的 DDC 通信冲突。"),
-        ],
-        recent=[
-            ("user", "测试了关闭 BetterDisplay 的 DDC 写入后完全不黑屏了，确诊是固件 DDC/CI 冲突。"),
-            ("assistant", "可以保留软件调光，禁用硬件 DDC 写入来彻底规避。"),
-        ],
-        users=[
-            ("user", "排查 M1 Mac 外接 4K 显示器开启 DDC/CI 后的持续闪屏黑屏问题。"),
-            ("user", "测试了关闭 BetterDisplay 的 DDC 写入后完全不黑屏了，确诊是固件 DDC/CI 冲突。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("DDC", "闪屏", "黑屏", "显示器"),
-        forbid=("硬件问题", "macOS 问题", "配置问题", "系统问题"),
-    ),
-    Case(
-        name="mixed-language-repo-command",
-        purpose="Preserve exact repository identifier in bilingual context without adopting raw command or filename.",
-        current=None,
-        blind=True,
-        opening=[
-            ("user", "给 faster-whisper 项目添加流式音频分块切片处理功能。"),
-            ("assistant", "可以在 audio 模块增加实时分片 buffer。"),
-        ],
-        recent=[
-            ("user", "运行 pytest tests/test_streaming.py -k test_slice 验证切片边界。"),
-            ("assistant", "流式切片测试用例全部通过。"),
-        ],
-        users=[
-            ("user", "给 faster-whisper 项目添加流式音频分块切片处理功能。"),
-            ("user", "运行 pytest tests/test_streaming.py -k test_slice 验证切片边界。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("faster-whisper",),
-        forbid=("test_streaming.py", "pytest", "音频处理", "软件开发"),
-    ),
-    Case(
-        name="narrow-acceptable-title-divergence",
-        purpose="Evaluate divergence between conservative and aggressive on a somewhat narrow but acceptable title.",
-        current="个人博客 Markdown 渲染",
-        opening=[
-            ("user", "开发个人独立博客系统，支持 Markdown 渲染和标签分类。"),
-            ("assistant", "设计文章模型与 Markdown 渲染流水线。"),
-        ],
-        recent=[
-            ("user", "博客文章渲染做完了，现在给博客添加友情链接展示页面。"),
-            ("assistant", "实现友链展示组件与数据配置。"),
-        ],
-        users=[
-            ("user", "开发个人独立博客系统，支持 Markdown 渲染和标签分类。"),
-            ("user", "博客文章渲染做完了，现在给博客添加友情链接展示页面。"),
-        ],
-        expected_actions={"keep", "rename"},
-        forbid=("软件开发", "网页设计"),
-    ),
-    Case(
-        name="aggressive-short-subtask-not-pivot",
-        purpose="Ensure aggressive strategy does not mistake a one-off temporary subtask script as a new topic.",
-        current="MySQL 迁移 PostgreSQL 方案",
-        opening=[
-            ("user", "推进生产数据库从 MySQL 全量迁移到 PostgreSQL 的架构方案。"),
-            ("assistant", "规划表结构转换、数据同步工具与停机切换窗口。"),
-        ],
-        recent=[
-            ("user", "先写个一次性 python 临时脚本把旧时间戳字段转成 ISO 字符串，导完就删。"),
-            ("assistant", "已生成临时转换脚本并在测试集执行完成。"),
-            ("user", "好的，继续回到 PostgreSQL 迁移主线，核对外键和索引。"),
-        ],
-        users=[
-            ("user", "推进生产数据库从 MySQL 全量迁移到 PostgreSQL 的架构方案。"),
-            ("user", "先写个一次性 python 临时脚本把旧时间戳字段转成 ISO 字符串，导完就删。"),
-            ("user", "好的，继续回到 PostgreSQL 迁移主线，核对外键和索引。"),
-        ],
-        expected_actions={"keep"},
-        forbid=("临时脚本", "时间戳", "Python 脚本"),
-    ),
-    Case(
-        name="assistant-proposed-tool-no-hijack",
-        purpose="A tool or solution suggested solely by the assistant must not hijack the session topic.",
-        current="网页首屏加载速度优化",
-        opening=[
-            ("user", "优化商城前端首页加载速度，首屏 5MB 太慢了，必须优化。"),
-            ("assistant", "我们先分析资源分布，排查大体积 JS 和未压缩图片。"),
-        ],
-        recent=[
-            ("assistant", "我建议引入 Webpack Bundle Analyzer 并迁移到 Rsbuild 进行打包重构。"),
-            ("user", "你看着用什么工具都行，只要把首屏资源体积压到 1MB 以内、加载时间进 1 秒。"),
-            ("assistant", "明白，目标是 1MB 首屏体积。"),
-        ],
-        users=[
-            ("user", "优化商城前端首页加载速度，首屏 5MB 太慢了，必须优化。"),
-            ("user", "你看着用什么工具都行，只要把首屏资源体积压到 1MB 以内、加载时间进 1 秒。"),
-        ],
-        expected_actions={"keep"},
-        forbid=("Webpack", "Rsbuild", "Bundle Analyzer"),
-    ),
-    Case(
-        name="summary-anchor-conflicting-tail",
-        purpose="When compaction summary establishes a sustained project, recent crash log should not overwrite the title.",
-        current=None,
-        blind=True,
-        summary="长期主线：重构音视频编辑器的多轨混音引擎，已实现多轨波形对齐、音量包络线计算和 VST3 插件宿主支持。",
-        opening=[],
-        recent=[
-            ("user", "单元测试抛出 `Segmentation fault in libasound.so`，排查 ALSA 音频 buffer 越界。"),
-            ("assistant", "检查 ALSA ring buffer 指针与环形队列边界。"),
-        ],
-        users=[
-            ("user", "多轨混音引擎持续开发，今天排查 libasound 的 buffer 越界。"),
-            ("user", "越界修完后继续推进 VST3 插件自动化测试。"),
-        ],
-        expected_actions={"rename"},
-        require_any=("混音", "音频", "多轨"),
-        forbid=("libasound", "ALSA", "Segmentation fault", "段错误"),
-    ),
-]
+class PluginLlmAdapter:
+    """Use Hermes' actual plugin route, including task/provider attribution."""
+
+    def __init__(self, llm: Any):
+        self.llm = llm
+        self.calls = 0
+
+    def complete(self, messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        self.calls += 1
+        response = self.llm.complete(messages, **kwargs)
+        return SimpleNamespace(
+            text=str(getattr(response, "text", "") or ""),
+            usage=getattr(response, "usage", {}) or {},
+        )
+
+    def complete_structured(self, *, messages: list[dict[str, Any]], **kwargs: Any) -> SimpleNamespace:
+        return self.complete(messages, **kwargs)
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Run semantic title-prompt acceptance cases")
-    parser.add_argument(
-        "--strategy",
-        choices=sorted(VALID_STRATEGIES),
-        default="conservative",
-        help="topic-shift strategy to test",
+class Ctx:
+    def __init__(self, llm: Any):
+        self.llm = llm
+
+
+def _host_route() -> tuple[str, str, str]:
+    """Return configured endpoint, model, and key environment variable name."""
+    endpoint = os.environ.get("HERMES_AUTOTITLER_EXPERIMENT_BASE_URL", "").strip()
+    model = os.environ.get("HERMES_AUTOTITLER_EXPERIMENT_MODEL", "").strip()
+    key_env = os.environ.get("HERMES_AUTOTITLER_EXPERIMENT_KEY_ENV", "").strip()
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        config = load_config_readonly() or {}
+        model_cfg = config.get("model") or {}
+        if isinstance(model_cfg, str):
+            model_cfg = {"default": model_cfg}
+        endpoint = endpoint or str(model_cfg.get("base_url") or "").strip()
+        model = model or str(model_cfg.get("default") or "").strip()
+        key_env = key_env or str(model_cfg.get("key_env") or "").strip()
+    except Exception:
+        pass
+    if not endpoint:
+        raise SystemExit("No endpoint configured; set HERMES_AUTOTITLER_EXPERIMENT_BASE_URL")
+    if not model:
+        raise SystemExit("No model configured; set HERMES_AUTOTITLER_EXPERIMENT_MODEL")
+    if not key_env:
+        key_env = "OPENAI_API_KEY"
+    return endpoint, model, key_env
+
+
+def _make_host_llm() -> tuple[Any, str]:
+    """Build the host-owned client when no raw endpoint override is requested."""
+    try:
+        from agent.plugin_llm import PluginLlm  # type: ignore[import-not-found]
+
+        return PluginLlmAdapter(PluginLlm(plugin_id="hermes-auto-titler")), "host"
+    except Exception as exc:
+        raise SystemExit(f"Hermes plugin LLM route unavailable: {exc}") from exc
+
+
+def _make_raw_llm(endpoint: str, model: str, api_key: str) -> HttpLlm:
+    return HttpLlm(endpoint=endpoint, model=model, api_key=api_key)
+
+
+def _call_count(client: Any) -> int:
+    return int(getattr(client, "calls", 0) or 0)
+
+
+def _flatten(turns: Sequence[Sequence[tuple[str, str]]]) -> list[tuple[str, str]]:
+    return [item for turn in turns for item in turn]
+
+
+def extract_turns(messages: Iterable[dict[str, Any]], *, preview_chars: int = 0) -> list[list[tuple[str, str]]]:
+    """Decode a real transcript into clean user turns plus the final assistant reply."""
+    pairs: list[tuple[str, str]] = []
+    for message in messages:
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        text = clean_captured_text(message_text(message.get("content")))
+        if text and not is_summary(text) and not is_system_noise(text):
+            pairs.append((role, text))
+
+    def preview(text: str) -> str:
+        return smart_preview(text, preview_chars) if preview_chars > 0 else text
+
+    return _sample_turns(pairs, preview)
+
+
+def build_prefixes(turns: list[list[tuple[str, str]]], raw_config: dict[str, Any], spec: str) -> list[Prefix]:
+    """Build unique chronological prefixes using the production context budgets."""
+    if not turns:
+        return []
+    requested: list[int] = []
+    for token in (part.strip().lower() for part in spec.split(",")):
+        if not token:
+            continue
+        if token == "all":
+            requested.append(len(turns))
+        else:
+            try:
+                requested.append(int(token))
+            except ValueError as exc:
+                raise SystemExit(f"Invalid --prefixes value: {token!r}") from exc
+    if not requested:
+        requested = [1, 2, 4, len(turns)]
+    points = sorted({max(1, min(len(turns), n)) for n in requested})
+
+    opening_k = max(0, int(raw_config.get("opening_turns", 2)))
+    recent_k = max(0, int(raw_config.get("recent_turns", 2)))
+    preview_k = max(0, int(raw_config.get("preview_chars", 400)))
+    user_preview_k = max(0, int(raw_config.get("user_message_preview_chars", 300)))
+    user_limit = int(raw_config.get("user_message_threshold", 40))
+    result: list[Prefix] = []
+    for number in points:
+        prefix_turns = turns[:number]
+        sampled = _sample_turns(_flatten(prefix_turns), lambda text: smart_preview(text, preview_k))
+        opening = _flatten(sampled[:opening_k])
+        recent = _flatten(sampled[-recent_k:]) if recent_k else []
+        users: list[tuple[str, str]] = []
+        if raw_config.get("include_all_user_messages", True):
+            users = [(role, text) for role, text in _flatten(prefix_turns) if role == "user"]
+            if user_preview_k > 0:
+                users = [(role, smart_preview(text, user_preview_k)) for role, text in users]
+            users = sample_user_messages(users, user_limit)
+        result.append(Prefix(number, prefix_turns, recent, users, opening))
+    return result
+
+
+def _session_candidates(db: Any, *, rng: random.Random, n: int, min_users: int, max_users: int, sample: str = "random") -> list[Sample]:
+    rows = list(db.list_sessions_rich(limit=5000, include_children=False, order_by_last_active=True))
+    if sample == "random":
+        rng.shuffle(rows)
+    else:
+        rows.sort(key=lambda row: str(row.get("last_active") or row.get("created_at") or ""), reverse=True)
+    # Skip user-owned titles in the experiment: the generator must be evaluated
+    # on sessions where an automatic title may actually be replaced.
+    selected: list[Sample] = []
+    for row in rows:
+        if len(selected) >= n:
+            break
+        sid = row.get("id")
+        if not sid:
+            continue
+        try:
+            source = db.get_session_title_source(str(sid))
+            if source == getattr(db, "TITLE_SOURCE_USER", "user"):
+                continue
+            messages = db.get_messages_as_conversation(sid, include_ancestors=True) or []
+            turns = extract_turns(messages)
+        except Exception:
+            continue
+        if not (min_users <= sum(1 for turn in turns for role, _ in turn if role == "user") <= max_users):
+            continue
+        if len(turns) < min_users:
+            continue
+        selected.append(Sample(str(sid), str(row.get("title") or ""), turns))
+    return selected
+
+
+def _sample_fingerprint(samples: Sequence[Sample]) -> list[str]:
+    return [sample.session_id for sample in samples]
+
+
+def _context_config(base: dict[str, Any], context: str) -> dict[str, Any]:
+    config = dict(base)
+    if context == "lean":
+        config.update({
+            "opening_turns": 1,
+            "recent_turns": 2,
+            "preview_chars": 100,
+            "include_all_user_messages": False,
+        })
+    return config
+
+
+def _experiment_config(
+    base: dict[str, Any], *, variant: str, input_variant: str, style: str, strategy: str
+) -> dict[str, Any]:
+    config = dict(base)
+    # This key is intentionally not a public config setting. It is an isolated
+    # harness selector consumed by policy.AutoTitler._generate only.
+    config["prompt_variant"] = variant
+    config["input_variant"] = input_variant
+    config["title_style"] = style
+    config["strategy"] = strategy
+    config["rename_confirmations"] = 0
+    return config
+
+
+def generate_title(titler: AutoTitler, prefix: Prefix) -> tuple[str, str | None]:
+    # Give reasoning-capable experimental routes room to finish the JSON. This
+    # intentionally does not alter the production ``max_tokens=64`` contract.
+    titler.cfg["experiment_max_tokens"] = 256
+    action, title = titler._generate(
+        None,
+        prefix.recent,
+        prefix.users,
+        prefix.opening,
+        blind=True,
+        session_id=None,
     )
-    parser.add_argument("--both", action="store_true", help="run every case under both strategies")
-    parser.add_argument("--case", action="append", dest="cases", help="run only named case(s)")
-    parser.add_argument("--strict", action="store_true", help="exit non-zero when any lexical check warns")
+    return action, title
+
+
+def _clip(text: str, limit: int = 900) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _json_object(text: str) -> Any:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def parse_score(text: str, candidate_count: int) -> list[dict[str, Any]]:
+    """Parse judge output and normalize each dimension to 1..5."""
+    data = _json_object(text)
+    raw = data.get("scores") if isinstance(data, dict) else data
+    if not isinstance(raw, list):
+        raise ValueError("judge response has no scores list")
+    by_index: dict[int, dict[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        values: dict[str, Any] = {"index": index}
+        for field in _SCORE_FIELDS:
+            try:
+                values[field] = max(1, min(5, int(round(float(item.get(field, 1))))))
+            except (TypeError, ValueError):
+                values[field] = 1
+        values["total"] = sum(values[field] for field in _SCORE_FIELDS)
+        values["note"] = _clip(str(item.get("note") or ""), 240)
+        by_index[index] = values
+    return [by_index.get(i, {"index": i, **{field: 1 for field in _SCORE_FIELDS}, "total": len(_SCORE_FIELDS), "note": "missing judge score"}) for i in range(1, candidate_count + 1)]
+
+
+def judge_titles(llm: Any, prefix: Prefix, candidates: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    transcript = "\n".join(
+        f"{role}: {_clip(text)}" for role, text in _flatten(prefix.turns)
+    )
+    labels = "\n".join(f"{i}. {title or '(empty)'}" for i, (_, title) in enumerate(candidates, 1))
+    system = (
+        "Evaluate candidate chat-session titles. Return JSON only in the form "
+        '{"scores":[{"index":1,"coverage":1,"specificity":1,"faithfulness":1,"brevity":1,"language":1,"note":""}]}.'
+        " Score every candidate from 1 to 5. Coverage: represents the visible durable subject and goal. "
+        "Specificity: useful for finding the session again without vague wording. Faithfulness: uses only evidence "
+        "in the visible prefix and does not overclaim. Brevity: works as a sidebar title. Language: matches the "
+        "user's language and preserves meaningful identifiers. Do not reward a title for mentioning a detail that "
+        "is merely an implementation step. Do not compare candidates to the original session title."
+    )
+    user = f"Visible prefix:\n{transcript}\n\nCandidates:\n{labels}"
+    response = llm.complete([
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ], temperature=0, max_tokens=max(512, 160 * len(candidates)), timeout=60, purpose="auto-title-experiment-judge")
+    return parse_score(response.text, len(candidates))
+
+
+def _with_retry(fn, retries: int = 1):
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception:
+            if attempt >= retries:
+                raise
+    raise RuntimeError("retry loop exhausted")  # pragma: no cover
+
+
+def aggregate_records(
+    records: Sequence[dict[str, Any]], *, group_by: str = "variant"
+) -> dict[str, dict[str, float | int]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        group = str(record.get(group_by) or "")
+        score = record.get("score") or {}
+        if (
+            group
+            and isinstance(score, dict)
+            and "total" in score
+            and record.get("status", "ok") == "ok"
+        ):
+            grouped.setdefault(group, []).append({**score, "title": str(record.get("title") or "")})
+    result: dict[str, dict[str, float | int]] = {}
+    for group, scores in grouped.items():
+        result[group] = {
+            "n": len(scores),
+            "mean_total": round(mean(float(s.get("total", 0)) for s in scores), 2),
+            "mean_title_chars": round(mean(len(str(s.get("title") or "")) for s in scores), 2),
+            **{f"mean_{field}": round(mean(float(s.get(field, 0)) for s in scores), 2) for field in _SCORE_FIELDS},
+        }
+    return result
+
+
+def _experiment_label(*, variant: str, input_variant: str, context: str, style: str, strategy: str) -> str:
+    return f"prompt={variant}|input={input_variant}|context={context}|style={style}|strategy={strategy}"
+
+
+def _selection(spec: str, allowed: Sequence[str], flag: str) -> list[str]:
+    values = [value.strip() for value in spec.split(",") if value.strip()]
+    unknown = set(values) - set(allowed)
+    if not values or unknown:
+        raise SystemExit(f"Unknown {flag} value(s): {', '.join(sorted(unknown)) or '(empty)'}; choose {', '.join(allowed)}")
+    return values
+
+
+def _evolution_changes(records: Sequence[dict[str, Any]]) -> int:
+    ordered = sorted(records, key=lambda record: int(record.get("prefix", 0)))
+    titles = [str(record.get("title") or "") for record in ordered if record.get("status") == "ok"]
+    return sum(before != after for before, after in zip(titles, titles[1:]))
+
+
+def _mean_evolution_changes(records: Sequence[dict[str, Any]]) -> float:
+    by_session: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        by_session.setdefault(str(record.get("session_id") or ""), []).append(record)
+    if not by_session:
+        return 0.0
+    return round(mean(_evolution_changes(group) for group in by_session.values()), 3)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Score isolated title prompts on random real-session prefixes")
+    parser.add_argument("--n", type=int, default=4, help="number of eligible real sessions")
+    parser.add_argument("--sample", choices=("random", "recent"), default="random", help="sample random sessions or newest eligible sessions")
+    parser.add_argument("--seed", type=int, default=17, help="random sampling seed")
+    parser.add_argument("--min-users", type=int, default=3, help="minimum real user turns per sampled session")
+    parser.add_argument("--max-users", type=int, default=80, help="maximum real user turns per sampled session")
+    parser.add_argument("--prefixes", default="1,2,4,all", help="chronological prefix sizes; use all for the final prefix")
+    parser.add_argument("--variants", default="minimal,concise,detailed", help="comma-separated prompt profiles")
+    parser.add_argument("--input-variants", default="current,minimal", help="comma-separated input layouts")
+    parser.add_argument("--contexts", default="production,lean", help="comma-separated context budget profiles")
+    parser.add_argument("--styles", choices=("concise", "complete", "both"), default="concise", help="title style to compare")
+    parser.add_argument("--strategies", default="conservative,aggressive", help="comma-separated decision strategies")
+    parser.add_argument("--output", help="optional JSONL output path")
+    parser.add_argument("--no-judge", action="store_true", help="generate titles but skip model scoring")
+    parser.add_argument("--judge-model", help="optional separate model for scoring; defaults to the generation model")
     return parser.parse_args()
 
 
-def contains_any(text: str, needles: Iterable[str]) -> bool:
-    folded = text.casefold()
-    return any(n.casefold() in folded for n in needles)
-
-
-def run_case(titler: AutoTitler, case: Case):
-    action, generated = titler._generate(
-        case.current,
-        case.recent,
-        case.users,
-        case.opening,
-        blind=case.blind,
-        earlier_summary=case.summary,
-        session_id=None,
-    )
-    effective = generated if action == "rename" and generated else (case.current or "")
-
-    problems = []
-    if action not in case.expected_actions:
-        problems.append(f"action={action!r}, expected {sorted(case.expected_actions)!r}")
-    if case.require_any and not contains_any(effective, case.require_any):
-        problems.append(f"missing one of {case.require_any!r}")
-    bad = [word for word in case.forbid if word.casefold() in effective.casefold()]
-    if bad:
-        problems.append(f"contains transient/vague term(s) {bad!r}")
-
-    verdict = "PASS" if not problems else "WARN"
-    print(f"\n[{verdict}] {case.name}")
-    print(f"  purpose : {case.purpose}")
-    print(f"  current : {case.current or '(none)'}")
-    print(f"  result  : {action}: {generated or '(none)'}")
-    print(f"  effective: {effective or '(empty)'}")
-    if problems:
-        for problem in problems:
-            print(f"  check   : {problem}")
-    return not problems
-
-
-def main():
+def main() -> int:
     args = parse_args()
-    selected = CASES
-    if args.cases:
-        wanted = set(args.cases)
-        selected = [case for case in CASES if case.name in wanted]
-        missing = wanted - {case.name for case in selected}
-        if missing:
-            raise SystemExit(f"unknown case(s): {', '.join(sorted(missing))}")
+    variants = _selection(args.variants, VARIANTS, "prompt variant")
+    input_variants = _selection(args.input_variants, INPUT_VARIANTS, "input variant")
+    contexts = _selection(args.contexts, CONTEXTS, "context profile")
+    strategies = _selection(args.strategies, tuple(VALID_STRATEGIES), "strategy")
+    styles = list(VALID_STYLES) if args.styles == "both" else [args.styles]
+    explicit_route = bool(
+        os.environ.get("HERMES_AUTOTITLER_EXPERIMENT_BASE_URL")
+        or os.environ.get("HERMES_AUTOTITLER_EXPERIMENT_MODEL")
+        or os.environ.get("HERMES_AUTOTITLER_EXPERIMENT_KEY_ENV")
+    )
+    if explicit_route:
+        endpoint, model, key_env = _host_route()
+        api_key = os.environ.get(key_env, "").strip()
+        if not api_key:
+            raise SystemExit(f"Environment variable {key_env} is not available; load Hermes credentials before running the experiment")
+        llm: Any = _make_raw_llm(endpoint, model, api_key)
+        judge_llm: Any = _make_raw_llm(
+            endpoint,
+            args.judge_model.strip() if args.judge_model else model,
+            api_key,
+        )
+        route_label = f"raw:{model}"
+    else:
+        llm, route_label = _make_host_llm()
+        judge_llm, _ = _make_host_llm()
+        endpoint, model = "host-owned", "title_generation"
 
-    strategies = ["conservative", "aggressive"] if args.both else [args.strategy]
-    overall = True
+    from hermes_state import SessionDB
 
-    for strategy in strategies:
-        cfg = load_config()
-        cfg["strategy"] = strategy
-        titler = AutoTitler(Ctx(), cfg, db=None)
-        route = f"{cfg.get('provider') or '(host default)'}/{cfg.get('model') or '(host default)'}"
-        print(f"\n=== strategy={strategy} route={route} cases={len(selected)} ===")
-        for case in selected:
-            overall = run_case(titler, case) and overall
+    db = SessionDB()
+    rng = random.Random(args.seed)
+    samples = _session_candidates(db, rng=rng, n=max(0, args.n), min_users=max(1, args.min_users), max_users=max(args.min_users, args.max_users), sample=args.sample)
+    if not samples:
+        raise SystemExit("No eligible real sessions found for the requested bounds")
+    base = load_config()
+    records: list[dict[str, Any]] = []
+    output = open(args.output, "w", encoding="utf-8") if args.output else None
+    failures = 0
+    try:
+        print(f"# real-session prompt experiment sessions={len(samples)} seed={args.seed} route={route_label} model={model} endpoint={endpoint}")
+        print(f"# prompts={','.join(variants)} inputs={','.join(input_variants)} contexts={','.join(contexts)} styles={','.join(styles)} strategies={','.join(strategies)} prefixes={args.prefixes}")
+        if output:
+            output.write(json.dumps({
+                "kind": "run",
+                "seed": args.seed,
+                "sample_fingerprint": _sample_fingerprint(samples),
+                "base_context_config": {key: base.get(key) for key in (
+                    "opening_turns", "recent_turns", "preview_chars", "include_all_user_messages",
+                    "user_message_threshold", "user_message_preview_chars", "max_title_length",
+                    "max_display_width",
+                )},
+                "variables": {"prompt": variants, "input": input_variants, "context": contexts,
+                              "style": styles, "strategy": strategies, "prefixes": args.prefixes},
+            }, ensure_ascii=False) + "\n")
+        for sample_index, sample in enumerate(samples, 1):
+            print(f"\n=== session {sample_index}/{len(samples)} id={sample.session_id} users={sum(1 for t in sample.turns for r, _ in t if r == 'user')} ===")
+            print(f"original_title (hidden from candidates): {_clip(sample.original_title, 140) or '(empty)'}")
+            sample_records: list[dict[str, Any]] = []
+            prefix_by_key: dict[tuple[str, int], Prefix] = {}
+            for context in contexts:
+                context_cfg = _context_config(base, context)
+                prefixes = build_prefixes(sample.turns, context_cfg, args.prefixes)
+                for prefix in prefixes:
+                    prefix_by_key[(context, prefix.number)] = prefix
+                    for style in styles:
+                        for strategy in strategies:
+                            for input_variant in input_variants:
+                                for variant in variants:
+                                    label = _experiment_label(
+                                        variant=variant, input_variant=input_variant, context=context,
+                                        style=style, strategy=strategy,
+                                    )
+                                    titler = AutoTitler(
+                                        Ctx(llm),
+                                        _experiment_config(
+                                            context_cfg, variant=variant, input_variant=input_variant,
+                                            style=style, strategy=strategy,
+                                        ),
+                                        db=None,
+                                    )
+                                    try:
+                                        action, title = _with_retry(lambda: generate_title(titler, prefix), retries=1)
+                                    except Exception as exc:
+                                        failures += 1
+                                        print(f"WARN {label} prefix={prefix.number}: generation failed: {exc}")
+                                        continue
+                                    record: dict[str, Any] = {
+                                        "kind": "result",
+                                        "session_id": sample.session_id,
+                                        "prefix": prefix.number,
+                                        "variant": variant,
+                                        "input_variant": input_variant,
+                                        "context": context,
+                                        "style": style,
+                                        "strategy": strategy,
+                                        "experiment": label,
+                                        "action": action,
+                                        "title": title or "",
+                                        "status": "ok" if action != "error" else "generation_error",
+                                    }
+                                    if action == "error":
+                                        failures += 1
+                                    records.append(record)
+                                    sample_records.append(record)
+                                    print(f"  generated prefix={prefix.number:<3} {label} title={title or '(empty)'}")
 
-    print("\nSemantic matrix complete. WARN means inspect the title; human review remains authoritative.")
-    raise SystemExit(2 if args.strict and not overall else 0)
+            if not args.no_judge:
+                # Score every candidate at the same chronological prefix together. Candidate
+                # order is shuffled deterministically so prompt profiles do not inherit a
+                # permanent position advantage. Context profile only changes what the generator
+                # saw; the judge always sees the full real prefix.
+                prefix_numbers = sorted({int(record["prefix"]) for record in sample_records})
+                for prefix_number in prefix_numbers:
+                    group = [r for r in sample_records if r["prefix"] == prefix_number and r.get("status") == "ok"]
+                    if not group:
+                        continue
+                    judge_prefix = max(
+                        (prefix for (context, number), prefix in prefix_by_key.items() if number == prefix_number),
+                        key=lambda prefix: len(_flatten(prefix.turns)),
+                    )
+                    shuffled = list(group)
+                    random.Random(f"{args.seed}:{sample.session_id}:{prefix_number}").shuffle(shuffled)
+                    try:
+                        scored = _with_retry(
+                            lambda: judge_titles(judge_llm, judge_prefix, [(r["experiment"], str(r["title"])) for r in shuffled]),
+                            retries=1,
+                        )
+                    except Exception as exc:
+                        failures += 1
+                        print(f"WARN prefix={prefix_number}: judge failed: {exc}")
+                        continue
+                    for record, score in zip(shuffled, scored):
+                        record["score"] = score
+                    print(f"  scored prefix={prefix_number} candidates={len(shuffled)}")
+
+            for label in sorted({str(record["experiment"]) for record in sample_records}):
+                evolution = [record for record in sample_records if record["experiment"] == label]
+                chain = " → ".join(f"{record['prefix']}:{record['title'] or '(empty)'}" for record in sorted(evolution, key=lambda record: int(record["prefix"])))
+                print(f"  evolution changes={_evolution_changes(evolution)} {label} :: {chain}")
+            if output:
+                for record in sample_records:
+                    output.write(json.dumps(record, ensure_ascii=False) + "\n")
+                output.flush()
+    finally:
+        if output:
+            output.close()
+        db.close()
+
+    summary = aggregate_records(records, group_by="experiment")
+    print(f"\n=== aggregate generation_calls={_call_count(llm)} judge_calls={_call_count(judge_llm)} ===")
+    if summary:
+        for label, metrics in sorted(summary.items(), key=lambda item: float(item[1]["mean_total"]), reverse=True):
+            subset = [record for record in records if record.get("experiment") == label]
+            print(f"{label} mean_changes={_mean_evolution_changes(subset)} " + " ".join(f"{key}={value}" for key, value in metrics.items()))
+    elif args.no_judge:
+        print("No judge scores requested; inspect generated titles or rerun without --no-judge.")
+    else:
+        print("No scores were returned; the transport or judge response needs inspection.")
+    if failures:
+        print(f"failures={failures} (excluded from quality aggregates)")
+        return 2
+    if not args.no_judge and not summary:
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

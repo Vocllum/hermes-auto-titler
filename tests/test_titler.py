@@ -723,8 +723,9 @@ def test_short_derived_title_is_provisional_and_forces_model_upgrade():
     t, ctx = make_titler(db, text=_dec("keep"))
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
-    assert "provisional first-line preview" in system
-    assert "action must be rename" in system
+    assert "Return exactly this JSON shape:" in system
+    assert '{"action":"rename","title":"<short title>"}' in system
+    assert "Generate a replacement title" in system
 
 
 def test_generate_uses_display_language_for_title_instruction(monkeypatch):
@@ -767,17 +768,15 @@ def test_generate_blind_omits_current_title_and_forces_rename():
     assert (action, title) == ("rename", "新标题")
     system = ctx.llm.calls[0]["messages"][0]["content"]
     user_prompt = ctx.llm.calls[0]["messages"][1]["content"]
-    assert "action must be rename" in system
-    assert "truncated auto-generated" not in system  # 不是 derived 截断文案
+    assert "Return exactly this JSON shape:" in system
+    assert '{"action":"rename","title":"<short title>"}' in system
+    assert "Generate a replacement title" in system
+    assert "truncated auto-generated" not in system
     assert "durable subject" in system
-    assert "Counterfactual test" in system
-    assert "language code: zh" in system or "natural language" in system
-    assert "Do not guess uncertain names" in system
-    assert "natural phrasing" in system.lower()
-    assert "identifiers exact" in system
-    assert "当前标题：" not in user_prompt  # 原标题不喂给模型
+    assert "identifiers exactly" in system
+    assert "当前标题：" not in user_prompt
     assert "开头内容" in user_prompt
-    assert "Intended outcome" in system or "intended outcome" in system
+    assert "Current title:" not in user_prompt
 
 
 def test_default_limit_preserves_literal_repository_identifier_and_intent():
@@ -1065,7 +1064,7 @@ def test_config_command_rejects_invalid_and_accepts_new_keys(monkeypatch):
     assert "值无效" in h("config enabled maybe")  # 非法 bool 明确拒绝，不静默变 False
     assert t.cfg["enabled"] is True
     assert "值无效" in h("config every_n_turns abc")
-    assert t.cfg["every_n_turns"] == 4
+    assert t.cfg["every_n_turns"] == 2
     h("config early_turn_eval true")
     assert t.cfg["early_turn_eval"] is True
     assert saved and saved[-1]["early_turn_eval"] is True
@@ -1654,22 +1653,23 @@ def test_on_pre_llm_call_ignores_internal_and_user_titled(recording_threads):
 # -- 提示词防漂移规范 ------------------------------------------------------------
 
 def test_prompt_contains_stability_rules_on_normal_eval():
-    # 日常评估和盲改都使用精简中文提示词；盲改只允许 rename。
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t, ctx = make_titler(db)
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
-    assert "keep if the current title accurately summarizes" in system
+    assert '{"action":"keep"}' in system
+    assert '{"action":"rename","title":"<short title>"}' in system
     assert "durable subject" in system
-    assert "Counterfactual test" in system
     assert "Return JSON only" in system
+    assert '"keep"|"rename"' not in system
 
     db2 = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t2, ctx2 = make_titler(db2)
     t2.evaluate("s1", force=True, blind=True)
     blind_system = ctx2.llm.calls[0]["messages"][0]["content"]
-    assert 'Format: {"action":"rename","title":"..."}' in blind_system
-    assert "action must be rename" in blind_system
+    assert "Return exactly this JSON shape:" in blind_system
+    assert '{"action":"rename","title":"<short title>"}' in blind_system
+    assert "Generate a replacement title" in blind_system
 
 
 def test_prompt_conservative_rule_prefers_keep_when_uncertain():
@@ -1677,7 +1677,8 @@ def test_prompt_conservative_rule_prefers_keep_when_uncertain():
     t, ctx = make_titler(db)
     t.evaluate("s1", force=True)
     system = ctx.llm.calls[0]["messages"][0]["content"]
-    assert "keep when both are reasonable" in system
+    assert "clear, durable mismatch" in system
+    assert "wording-only improvement is insufficient" in system
 
 
 # -- 评审协议解析与契约 ------------------------------------------------------------
@@ -1724,7 +1725,7 @@ def test_retry_backoff_cooldown_not_suppressed_by_last_eval(monkeypatch):
                 raise RuntimeError("503 overloaded")
             return SimpleNamespace(text='{"action":"rename","title":"重试成功标题"}', usage={})
 
-    t = AutoTitler(SimpleNamespace(llm=FlakyLlm()), {**DEFAULTS, "every_n_turns": 4}, db=db)
+    t = AutoTitler(SimpleNamespace(llm=FlakyLlm()), {**DEFAULTS, "every_n_turns": 2}, db=db)
     # 第 1 轮：真实调用失败
     r1 = t.evaluate("s1", force=True)
     assert r1["action"] == "failed"
@@ -1790,7 +1791,7 @@ def test_policy_prompt_soft_length_honors_explicit_max_title_length():
     t = AutoTitler(SimpleNamespace(llm=fake_llm), {**DEFAULTS, "max_title_length": 18})
     t._generate("当前", [("user", "hi")], [], [("user", "hi")])
     system = calls[0]["messages"][0]["content"]
-    assert "up to ~18 characters" in system
+    assert "up to about 18 characters" in system
 
 
 def test_retry_candidate_selection_skips_inflight_preventing_starvation():

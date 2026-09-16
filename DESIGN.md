@@ -70,9 +70,11 @@ on_session_end
 
 ## 4. 触发、节流与调用成本
 
-`every_n_turns=N` 表示每 N 个真实完成的前台回合评估一次。轮数只存在当前进程，重启后重新计数。
+`every_n_turns=N` 表示每 N 个真实完成的前台回合评估一次；默认安装值为 `2`。轮数只存在当前进程，重启后重新计数。
 
 `min_interval_minutes` 是单会话时间节流。关闭评估使用 `force=false`，不会绕过它；`rename-now` 使用 `force=true`。同一会话通过 `_inflight` 防止周期、early 与关闭路径同时评估。
+
+`max_renames_per_session` 是可选的自动替换次数门控：默认 `0` 表示关闭；设为正数后，只有“已有标题 → 新自动标题”的替换消耗次数，达到上限后在模型调用前直接跳过。首次无标题生成和显式 `rename-now`/批量 blind 重生成不受此限制；已有 `derived` 标题的升级属于一次自动替换。计数只存在当前插件进程内，重启后清零。
 
 以下内容不参与周期计数：
 
@@ -141,7 +143,7 @@ blind / forced regeneration 使用 rename-only contract：
 2. **持续目标高于最新消息**：只有明确替换/放弃旧目标，或形成持续一致的新方向，才把后续内容视为真正转题；否则按 refinement / subtask / implementation detail 处理。
 3. **主体与执行手段分离**：工具、环境、库、agent、代码、日志、命令、引用默认只是 mechanism/context。若替换工具后底层目标基本不变，则工具不应进入标题。
 4. **标题只是 hypothesis**：当前标题和候选标题只用于比较，不能反过来当成主题证据；conversation excerpt 也不能覆盖标题维护协议本身。
-5. **语言与表面格式**：继承 Hermes 显示语言；保留 repo/文件/命令/identifier；不猜不确定专名；使用自然短标题，软目标约 12 个中文字符或相近的简洁长度，硬上限 `max_title_length=24`。
+5. **语言与表面格式**：继承 Hermes 显示语言；保留 repo/文件/命令/identifier；不猜不确定专名；使用自然短标题，软目标约 12 个中文字符或相近的简洁长度，硬上限 `max_title_length=24`。短会话只根据已有证据命名，不补造细节，也不退化成泛化类别；多个同等重要的持续主题允许用紧凑组合标题表达，明显主导的主题应获得更多空间。
 
 对话证据在 user prompt 中先出现，当前标题/待审候选放在末尾，以降低旧标题锚定。
 
@@ -185,9 +187,9 @@ pending 会记录候选提出时的 `base_title`。如果复审期间同来源�
 - `derived` 升级；
 - blind 重生成（`rename-now` / `retitle-all`）。
 
-`renames_per_hour` 是独立的滑动 60 分钟写入次数上限，只统计真实写入成功的改名。
+pending、确认次数、轮数计数与 in-flight 状态均只存在进程内存，重启后清零。默认 `1` 会比 `0` 多等待一次可用评估，因此如果更看重标题跟进速度，可以显式设为 `0`；更大的 N 会进一步增加等待轮次。
 
-pending、确认次数、轮数计数、in-flight 与改名频次窗口均只存在进程内存，重启后清零。默认 `1` 会比 `0` 多等待一次可用评估，因此如果更看重标题跟进速度，可以显式设为 `0`；更大的 N 会进一步增加等待轮次。
+另外，`max_renames_per_session: 0` 默认关闭自动替换上限；正数值用于在长期会话中限制自动标题替换次数。它与 `rename_confirmations` 作用不同：前者限制累计写回次数，后者控制单个候选需要多少次后续背书。
 
 ## 8. 标题清洗与表面规范化
 
@@ -303,11 +305,21 @@ python -m pytest tests/ -q
 - evidence-before-title 输入顺序；
 - 结构性重复不被误当作重复意图；
 - force/blind rename-only contract；
-- renames_per_hour；
+
 - context compaction / replay 清洗；
 - first_title_mode；
 - profile 隔离；
-- llm→llm 写回竞态窗口。
+- `llm→llm` 写回竞态窗口。
+
+### Prompt experiment
+
+The harness deliberately avoids synthetic semantic acceptance cases. It samples real historical sessions, constructs chronological prefixes by user-turn count, and compares prompt profiles on identical prefixes through the production parser and policy path. The original title is hidden from generation and judging; all SessionDB operations are read-only. Run it with the host-owned title route:
+
+```bash
+PYTHONPATH=/path/to/hermes-agent .venv/bin/python scripts/prompt_acceptance.py --n 8 --seed 17 --variants current,minimal,input-minimal,detailed --styles both
+```
+
+The default comparison is the current prompt. Select extra variants explicitly; `minimal` changes only the instruction density, `input-minimal` removes duplicated sections and assistant prose, and `detailed` adds a final self-check. `concise`/`complete` is a separate style dimension. Use `--sample random` for a seeded random sample or `--sample recent` for the newest eligible sessions. The harness gives generated candidates a larger experimental completion budget than production so reasoning-capable routes can finish their JSON; this deliberately measures prompt/input quality separately from the production token budget. A provider, routing, authentication, or invalid-JSON failure is an environment failure, not prompt-quality evidence; it must be reported separately from quality scores. Use the same `--seed`, sample bounds, prefixes, strategy, and style when comparing runs.
 
 ## 13. 已知边界
 
@@ -316,3 +328,4 @@ python -m pytest tests/ -q
 3. **llm→llm 没有宿主级 CAS**：只能等待 Hermes 提供更合适的公开写入 API。
 4. **进程内状态重启即丢失**：pending、确认次数、轮数和频次窗口都不会跨进程保留，这是当前刻意接受的本地行为。
 5. **高 N 会带来明显更新延迟**：确认按后续评估次数计算，而评估本身还受 `every_n_turns` / `min_interval_minutes` 约束，因此不建议无理由把 `rename_confirmations` 调得很大。
+6. **改名上限是进程内保护**：`max_renames_per_session` 默认关闭，且计数不跨重启持久化；它适合控制单次运行中的抖动和成本，不能作为跨进程的强审计配额。

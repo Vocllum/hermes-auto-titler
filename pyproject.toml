@@ -1,6 +1,6 @@
 [project]
 name = "hermes-auto-titler"
-version = "0.2.0"
+version = "0.2.0-beta.4"
 description = "Topic-aware session re-titling for Hermes Agent"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

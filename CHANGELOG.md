@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+## 0.2.0-beta.4 — 2026-09-16
+
+- Add opt-in `max_renames_per_session` (default `0` / off). When set to N, a session may receive at most N automatic title replacements in the current plugin process; the counter is checked before the model call. First untitled naming and explicit blind regeneration (`rename-now` / `retitle-all`) do not consume the cap, and a failed write does not.
+- Change the new-install evaluation cadence to `every_n_turns: 2`.
+- Replace the production title prompt with a concise profile and a valid JSON contract: keep returns `{"action":"keep"}`, rename returns `{"action":"rename","title":"..."}`, and review mode may also return `{"action":"approve"}`. Experimental `minimal` / `detailed` prompt densities remain harness-only.
+- Replace synthetic prompt-acceptance cases with a read-only real-session experiment: seeded sampling, chronological prefixes, isolated prompt/input/context/strategy cells, title-evolution traces, and separate judge scores. Failed generations are excluded from quality averages.
+- Document the optional rename cap and keep anti-jitter on confirmation rounds plus interval cooldown.
+
 ## 0.2.0 — 2026-09-14
 
 - Reframe title generation around long-horizon Session Identity: a topic shift alone is never sufficient reason to erase a historically substantial main thread; late work is incorporated as an extension, secondary topic, or phase evolution (umbrella or dual-subject) unless earlier work was explicitly abandoned or minor.
@@ -16,7 +26,7 @@
 - Clean up dead code in base AutoTitler by delegating generation completely to policy, and align prompt soft-length guidance with explicit `max_title_length` configuration.
 - Add `pre_llm_call` lifecycle hook: eagerly triggers title evaluation on the very first turn when user submits their opening message, eliminating the un-titled blank period during long tool-calling loops.
 - Eliminate over-engineered pseudo-NLP regex casing heuristics (`_name_hints`, `_canonicalize_name_case`, `_normalize_mixed_script_spacing`), trusting the LLM's system prompt contract for identifier casing.
-- Remove redundant `renames_per_hour` sliding-window limiter, keeping anti-jitter strictly focused on confirmation rounds and interval cooldown.
+- Remove the redundant hourly rename sliding-window limiter, keeping anti-jitter strictly focused on confirmation rounds and interval cooldown.
 - Implement bounded failed-session retry ledger (`_failed_sessions`): track un-titled sessions after model errors (503/timeout), apply exponential backoff (30s-600s), evict `_last_eval` on error to avoid throttling locks, add global backpressure (max 2 claims per sweep), thread-safe retry state locks, fail-closed provenance CAS, wait on in-flight workers during finalize, and synchronously snapshot `base_title`.
 
 ## 0.1.3 — 2026-09-12

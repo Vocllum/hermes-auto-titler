@@ -44,6 +44,7 @@ Hermes can name a session from its opening exchange. But conversations evolve; t
 | **Native first-title coexistence** | `first_title_mode: builtin` (default) leaves the first title to Hermes and maintains it later. `plugin` lets this plugin own the first title too. |
 | **Conservative / aggressive policy** | `conservative` requires a clear durable mismatch. `aggressive` follows explicit abandonment or a sustained new direction sooner, while still rejecting one-off subtasks, status checks, and tool changes as topic shifts. |
 | **N-round review gate** | The v0.2 default is `rename_confirmations: 1`: an llm→llm candidate needs one later endorsement. `0` opts into immediate writes; larger values require N later endorsements and restart the count when the candidate changes. |
+| **Optional rename cap** | `max_renames_per_session: 0` is off by default. Set N to allow at most N automatic title replacements per session, limiting long-session churn and cost. Initial naming and explicit `rename-now` do not consume the cap. |
 | **Call-efficient by design** | Turn cadence, per-session time throttling, provenance checks, in-flight dedup, and internal-turn exclusion prevent most foreground turns from making a model call. |
 | **Conservative surface cleanup** | Preserves literal identifiers, adds safe CJK↔Latin spacing, and only normalizes name casing when the current conversation provides evidence for that casing. |
 | **Profile-isolated and auditable** | SessionDB handles are cached per Hermes profile, and real model calls are recorded under `task=hermes_auto_titler`. |
@@ -54,7 +55,7 @@ Hermes can name a session from its opening exchange. But conversations evolve; t
 ## 🔍 How it works
 
 1. **Choose first-title ownership** — by default Hermes handles the first title through its built-in `title_generation` auxiliary task. In `first_title_mode: plugin`, this plugin evaluates from the first completed turn and disables the competing host title generator at plugin load.
-2. **Trigger and gate** — hooks `on_session_end` / `on_session_finalize`. Completed foreground turns count toward `every_n_turns`; failed/interrupted turns and cron/subagent/bg-review work do not. Periodic evals run in a daemon worker; close/finalize evals run synchronously and still honor `min_interval_minutes`.
+2. **Trigger and gate** — hooks `on_session_end` / `on_session_finalize`. Completed foreground turns count toward `every_n_turns` (default `2`); failed/interrupted turns and cron/subagent/bg-review work do not. Periodic evals run in a daemon worker; close/finalize evals run synchronously and still honor `min_interval_minutes`.
 3. **Build intent context** — opening turns + recent turns (each selected turn keeps the user message and last assistant reply) + a capped first-and-recent user trajectory. If compaction removed the original opening, the earlier summary becomes a separate historical anchor. Handoff wrappers and replay noise are removed before sampling.
 4. **Infer before comparing** — the auxiliary model returns strict JSON. Conversation evidence is presented before the current/proposed title to reduce anchoring; explicit/repeated user intent has higher evidential weight than summaries or assistant text. Structural duplication across input sections is explicitly not counted as repeated intent.
 5. **Apply the selected strategy** — `conservative` keeps a broadly accurate title unless there is a material durable mismatch. `aggressive` follows an explicit replacement of the old goal or a sustained coherent new direction sooner, but recency alone is never enough.
@@ -146,7 +147,7 @@ model: "your-model"         # any model your Hermes setup can reach
 | Key | Default | What it does |
 |---|---|---|
 | `enabled` | `true` | Master switch. If the plugin started disabled, enabling it requires a restart because no hooks were registered; disabling an already-loaded plugin takes effect through the hook guard. |
-| `every_n_turns` | `4` | Evaluate every N completed foreground turns. |
+| `every_n_turns` | `2` | Evaluate every N completed foreground turns. |
 | `first_title_mode` | `builtin` | `builtin` = Hermes owns first-title generation; `plugin` = plugin evaluates from turn 1 and disables the host title generator at plugin load. Treat changes as restart-time ownership changes. |
 | `early_turn_eval` | `false` | Legacy compatibility key. Current behavior is controlled by `first_title_mode`: `plugin` enables early evaluation; `builtin` does not. |
 | `on_close` | `true` | Evaluate on real session finalize/close (synchronous, throttled). |
@@ -162,9 +163,10 @@ model: "your-model"         # any model your Hermes setup can reach
 | `strategy` | `conservative` | `conservative` = rename only for a material durable mismatch; `aggressive` = follow explicit abandonment or a sustained new direction sooner, while still ignoring one-off subtasks/tool changes. |
 | `provider` / `model` | `""` / `""` | Both empty = Hermes `title_generation` auxiliary task; set either to select a plugin custom route. |
 | `min_interval_minutes` | `5` | Minimum interval between evaluations of one session. |
-| `max_title_length` / `max_display_width` | `null` / `40` | `max_title_length: null` avoids hard character slicing in code; length is guided softly by prompt (~12 CJK characters) and strictly capped by `max_display_width` columns. `complete` style adds 12 display columns. |
+| `max_title_length` / `max_display_width` | `null` / `40` | `max_title_length: null` avoids hard character slicing in code; the prompt keeps titles brief and `max_display_width` strictly caps display columns. `complete` style adds 12 display columns. |
 | `rename_confirmations` | `1` | Default: require one later endorsement before llm→llm writeback. `0` = immediate write after one decision; `N > 1` = require N later endorsements. Replacing the pending candidate restarts the count. |
-| `renames_per_hour` | `0` | Per-session sliding-window successful-rename cap (`0` = unlimited). |
+| `max_renames_per_session` | `0` | Automatic replacement cap is off by default. `N > 0` allows at most N automatic title replacements per session. Initial naming and explicit `rename-now` do not consume it; upgrading an existing `derived` title counts as a replacement. The counter is process-local. |
+
 
 </details>
 
@@ -199,10 +201,11 @@ uv venv .venv && uv pip install --python .venv/bin/python pytest PyYAML
 <your-hermes-checkout>/venv/bin/python scripts/integration_check.py
 <your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20
 <your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20 --strategy aggressive
+<your-hermes-checkout>/venv/bin/python scripts/prompt_acceptance.py --n 8 --seed 17 --output /tmp/title-experiment.jsonl
 <your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>
 ```
 
-`review_sample.py` is dry-run and now mirrors the loaded production context configuration, including preview, trajectory, and summary budgets. Use the same sample with both strategies when validating a new model or prompt. `retitle_all.py --dry-run` makes no model calls and does not write titles; without `--dry-run`, it really rewrites eligible automatic titles.
+`review_sample.py` is dry-run and now mirrors the loaded production context configuration, including preview, trajectory, and summary budgets. `prompt_acceptance.py` is the isolated experiment harness: it randomly samples real non-user-titled sessions, replays chronological prefixes (for example 1, 2, 4, and final), runs the current prompt plus explicitly selected minimal, input-minimal, or detailed variants against the same prefixes, and scores candidate titles with a separate judge call when configured. With no raw endpoint override it uses Hermes' own `PluginLlm` route and the configured `title_generation` task; a raw OpenAI-compatible route is available only through explicit `HERMES_AUTOTITLER_EXPERIMENT_*` environment overrides. It never writes SessionDB; the original title is hidden from generation and judging. `retitle_all.py --dry-run` makes no model calls and writes nothing; without `--dry-run`, it really rewrites eligible automatic titles.
 
 ## 📄 License
 

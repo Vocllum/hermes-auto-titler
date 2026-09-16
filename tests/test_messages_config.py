@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hermes_auto_titler.config import (
@@ -405,9 +407,8 @@ def test_load_context_user_message_limits():
 def test_config_load_defaults_and_override(tmp_path):
     cfg = load_config(path=tmp_path / "missing.yaml")
     assert cfg["enabled"] is True
-    assert cfg["every_n_turns"] == 4
+    assert cfg["every_n_turns"] == 2
     assert cfg["strategy"] == "conservative"
-    # 18 字符的显式仓库名 hermes-auto-titler 必须能原样存活，
     # 另留少量中文意图空间；12 字符仍只是软目标。
     if cfg["max_title_length"] is not None:
         p = tmp_path / "config.yaml"
@@ -422,7 +423,7 @@ def test_config_load_defaults_and_override(tmp_path):
     cfg2 = load_config(path=p)
     assert cfg2["strategy"] == "aggressive"
     assert cfg2["max_title_length"] == 30
-    assert cfg2["every_n_turns"] == 4  # 未覆盖的键保持默认
+    assert cfg2["every_n_turns"] == 2  # 未覆盖的键保持默认
 
     save_config(cfg2, path=p)
     cfg3 = load_config(path=p)
@@ -445,6 +446,21 @@ def test_config_has_new_keys(tmp_path):
     assert cfg["early_turn_eval"] is False
     assert cfg["first_title_mode"] == "builtin"
     assert cfg["retitle_summary_chars"] == 12000
+
+
+def test_config_example_matches_runtime_defaults(tmp_path, caplog):
+    example = Path(__file__).resolve().parent.parent / "config.yaml.example"
+    data = yaml.safe_load(example.read_text(encoding="utf-8"))
+    assert set(data) <= set(DEFAULTS)
+    assert data["every_n_turns"] == 2
+    assert "renames_per_hour" not in data
+
+    legacy = tmp_path / "config.yaml"
+    legacy.write_text("renames_per_hour: 6\n", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        cfg = load_config(legacy)
+    assert cfg["every_n_turns"] == 2
+    assert "unknown key 'renames_per_hour' ignored" in caplog.text
 
 
 def test_disable_builtin_title_generation_updates_host_config(monkeypatch):
@@ -478,12 +494,12 @@ def test_disable_builtin_title_generation_creates_missing_sections(monkeypatch):
 def test_config_coerces_bool_and_int_strings(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text(
-        "enabled: \"true\"\nevery_n_turns: \"4\"\nearly_turn_eval: \"false\"\non_close: \"on\"\n",
+        "enabled: \"true\"\nevery_n_turns: \"2\"\nearly_turn_eval: \"false\"\non_close: \"on\"\n",
         encoding="utf-8",
     )
     cfg = load_config(path=p)
     assert cfg["enabled"] is True
-    assert cfg["every_n_turns"] == 4
+    assert cfg["every_n_turns"] == 2
     assert cfg["early_turn_eval"] is False
     assert cfg["on_close"] is True
 
@@ -496,7 +512,7 @@ def test_config_invalid_values_fall_back_to_defaults(tmp_path):
         encoding="utf-8",
     )
     cfg = load_config(path=p)
-    assert cfg["every_n_turns"] == 4  # 非法整数回退默认，不崩溃
+    assert cfg["every_n_turns"] == 2  # 非法整数回退默认，不崩溃
     assert cfg["enabled"] is True  # 非法 bool 回退默认，不静默变 False
     assert cfg["strategy"] == "conservative"  # 非法枚举回退默认
     assert cfg["title_style"] == "concise"
@@ -510,10 +526,10 @@ def test_config_yaml_list_does_not_crash(tmp_path):
     p.write_text("- just\n- a\n- list\n", encoding="utf-8")
     cfg = load_config(path=p)
     assert cfg["enabled"] is True
-    assert cfg["every_n_turns"] == 4
+    assert cfg["every_n_turns"] == 2
 
 
-# -- 滞后机制配置：rename_confirmations / renames_per_hour ----------------------
+# -- 滞后机制配置：rename_confirmations ------------------------------------------
 
 def test_rename_confirmations_defaults_and_clamps(tmp_path):
     p = tmp_path / "config.yaml"
@@ -543,6 +559,22 @@ def test_rename_confirmations_defaults_and_clamps(tmp_path):
     p.write_text("rename_confirmations: 1.5\n", encoding="utf-8")
     cfg = load_config(path=p)
     assert cfg["rename_confirmations"] == DEFAULTS["rename_confirmations"]
+
+
+def test_max_renames_per_session_defaults_off_and_clamps(tmp_path):
+    p = tmp_path / "config.yaml"
+
+    cfg = load_config(path=tmp_path / "missing.yaml")
+    assert cfg["max_renames_per_session"] == 0
+
+    p.write_text("max_renames_per_session: 3\n", encoding="utf-8")
+    assert load_config(path=p)["max_renames_per_session"] == 3
+
+    p.write_text("max_renames_per_session: -2\n", encoding="utf-8")
+    assert load_config(path=p)["max_renames_per_session"] == 0
+
+    p.write_text("max_renames_per_session: 1.5\n", encoding="utf-8")
+    assert load_config(path=p)["max_renames_per_session"] == DEFAULTS["max_renames_per_session"]
 
 
 # -- 配置加固：数值布尔 / NaN / inf / 非字符串 model / 负长度 -------------------

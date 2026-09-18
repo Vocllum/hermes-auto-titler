@@ -16,9 +16,10 @@ DEFAULTS: dict[str, Any] = {
     "every_n_turns": 2,
     "on_close": True,
     "early_turn_eval": False,
-    # 首轮命名一键开关：builtin=插件首轮不抢（early 强制失效，首标题归内建；
-    # 正常轮次/关闭评估不受影响）；plugin=插件第 1 轮就接管（等价 early_turn_eval=true）。
-    "first_title_mode": "builtin",
+    # 首轮命名一键开关：plugin（默认）=插件第 1 轮强制接管（开局立即异步生成，
+    # 并在插件加载时关闭宿主内置 title_generation，防止竞态冲突）；
+    # builtin=首轮归内建（插件首轮不抢，只做后续轮次演进与关闭评估）。
+    "first_title_mode": "plugin",
     "recent_turns": 2,
     "opening_turns": 2,
     "ignore_model_messages": False,
@@ -44,6 +45,9 @@ DEFAULTS: dict[str, Any] = {
     # 0 = 不限制；N>0 = 每个插件进程内的会话最多自动替换 N 次。
     # 手动 blind 重生成不受此门控，首次无标题生成也不消耗次数。
     "max_renames_per_session": 0,
+    # 可选的自定义提示词片段，追加到 system prompt 末尾。留空则无影响。
+    # 可用于注入个人偏好，如 "标题使用英文" 或 "永远包含项目名前缀"。
+    "custom_instructions": "",
 }
 
 VALID_STRATEGIES = {"conservative", "aggressive"}
@@ -99,6 +103,8 @@ def coerce_value(key: str, raw: Any) -> Any:
             if not isinstance(raw, str):
                 raise ValueError(f"not a string: {raw!r}")
             v = raw
+        elif key == "custom_instructions":
+            v = str(raw) if raw is not None else ""
         elif isinstance(default, int):
             if isinstance(raw, bool):  # YAML true/false 不是合法整数
                 raise ValueError(f"not an integer: {raw!r}")

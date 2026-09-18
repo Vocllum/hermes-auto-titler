@@ -189,6 +189,11 @@ class AutoTitler(_BaseAutoTitler):
         else:
             system = concise_system
 
+        # Optional user-defined instructions appended verbatim.
+        custom = str(self.cfg.get("custom_instructions") or "").strip()
+        if custom:
+            system = f"{system}\n{custom}"
+
         # Conversation evidence comes before title hypotheses to reduce anchoring.
         # English labels form the protocol; a few Chinese aliases remain only on
         # compressed/review labels for backwards-compatible diagnostics/tests.
@@ -255,6 +260,7 @@ class AutoTitler(_BaseAutoTitler):
             text = getattr(res, "text", "") or ""
         except Exception as e:
             log.warning("auto-titler LLM call failed: %s", e)
+            self._last_generate_error = str(e)
             return "error", None
 
         self._record_usage(session_id, res)

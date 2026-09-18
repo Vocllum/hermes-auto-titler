@@ -280,6 +280,29 @@ def test_production_prompt_fallback_is_concise():
     assert llm_default.calls[-1]["messages"][0]["content"] == llm_concise.calls[-1]["messages"][0]["content"]
 
 
+def test_custom_instructions_appended_to_system_prompt():
+    _, llm, t = make()
+    t.cfg["custom_instructions"] = "Always use English for titles."
+    t.evaluate("s1", force=True)
+    system = llm.calls[-1]["messages"][0]["content"]
+    assert system.endswith("Always use English for titles.")
+
+
+def test_custom_instructions_empty_does_not_modify_prompt():
+    _, llm_plain, t_plain = make()
+    t_plain.cfg["custom_instructions"] = ""
+    t_plain.evaluate("s1", force=True)
+
+    _, llm_none, t_none = make()
+    t_none.cfg["custom_instructions"] = "   "
+    t_none.evaluate("s1", force=True)
+
+    plain_system = llm_plain.calls[-1]["messages"][0]["content"]
+    none_system = llm_none.calls[-1]["messages"][0]["content"]
+    assert plain_system == none_system
+    assert not plain_system.endswith("\n")
+
+
 def test_force_rename_contract_is_rename_only():
     _, llm, t = make(confirmations=0, title="临时标题", source="derived")
     t.evaluate("s1", force=True)

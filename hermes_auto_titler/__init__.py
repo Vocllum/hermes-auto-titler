@@ -33,7 +33,7 @@ def register(ctx) -> None:
     cfg = load_config()
     titler = AutoTitler(ctx, cfg)
     if cfg.get("enabled", True):
-        if cfg.get("first_title_mode", "builtin") == "plugin":
+        if cfg.get("first_title_mode", "plugin") == "plugin":
             try:
                 changed = disable_builtin_title_generation()
                 log.info(
@@ -43,7 +43,7 @@ def register(ctx) -> None:
             except Exception:
                 log.warning(
                     "hermes-auto-titler could not disable built-in title generation; "
-                    "plugin takeover may race the host titleer",
+                    "plugin takeover may race the host titler",
                     exc_info=True,
                 )
         ctx.register_hook("pre_llm_call", titler.on_pre_llm_call)
@@ -51,6 +51,7 @@ def register(ctx) -> None:
         # 真实会话关闭/终局（CLI 退出、TUI 关闭、gateway 过期、/new）走 lifecycle
         # hook：正常节流（force=False），且不重复进行中的自动评估
         ctx.register_hook("on_session_finalize", titler.on_session_finalize)
+        titler.start_retry_loop()
     ctx.register_command(
         "autotitler",
         make_handler(titler),

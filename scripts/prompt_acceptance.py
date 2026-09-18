@@ -278,6 +278,38 @@ def _session_candidates(db: Any, *, rng: random.Random, n: int, min_users: int, 
     return selected
 
 
+def _sessions_by_id(db: Any, session_ids: Sequence[str], *, min_users: int, max_users: int) -> list[Sample]:
+    selected: list[Sample] = []
+    for sid in session_ids:
+        try:
+            source = db.get_session_title_source(str(sid))
+            if source == getattr(db, "TITLE_SOURCE_USER", "user"):
+                continue
+            messages = db.get_messages_as_conversation(sid, include_ancestors=True) or []
+            turns = extract_turns(messages)
+        except Exception:
+            continue
+        if not (min_users <= sum(1 for turn in turns for role, _ in turn if role == "user") <= max_users):
+            continue
+        title = ""
+        try:
+            title = str(db.get_session_title(sid) or "")
+        except Exception:
+            pass
+        selected.append(Sample(str(sid), title, turns))
+    return selected
+
+
+def _fingerprint_from_output(path: str) -> list[str]:
+    with open(path, encoding="utf-8") as handle:
+        first = handle.readline()
+    data = json.loads(first)
+    ids = data.get("sample_fingerprint") or []
+    if not isinstance(ids, list) or not ids:
+        raise SystemExit(f"No sample_fingerprint in {path}")
+    return [str(item) for item in ids]
+
+
 def _sample_fingerprint(samples: Sequence[Sample]) -> list[str]:
     return [sample.session_id for sample in samples]
 
@@ -467,6 +499,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", help="optional JSONL output path")
     parser.add_argument("--no-judge", action="store_true", help="generate titles but skip model scoring")
     parser.add_argument("--judge-model", help="optional separate model for scoring; defaults to the generation model")
+    parser.add_argument("--session-ids", default="", help="comma-separated session ids; pin the sample instead of shuffling")
+    parser.add_argument("--reuse-fingerprint", help="JSONL run file whose sample_fingerprint should be reused")
     return parser.parse_args()
 
 
@@ -502,8 +536,15 @@ def main() -> int:
     from hermes_state import SessionDB
 
     db = SessionDB()
-    rng = random.Random(args.seed)
-    samples = _session_candidates(db, rng=rng, n=max(0, args.n), min_users=max(1, args.min_users), max_users=max(args.min_users, args.max_users), sample=args.sample)
+    if args.reuse_fingerprint:
+        pinned_ids = _fingerprint_from_output(args.reuse_fingerprint)
+        samples = _sessions_by_id(db, pinned_ids, min_users=max(1, args.min_users), max_users=max(args.min_users, args.max_users))
+    elif args.session_ids.strip():
+        pinned_ids = [item.strip() for item in args.session_ids.split(",") if item.strip()]
+        samples = _sessions_by_id(db, pinned_ids, min_users=max(1, args.min_users), max_users=max(args.min_users, args.max_users))
+    else:
+        rng = random.Random(args.seed)
+        samples = _session_candidates(db, rng=rng, n=max(0, args.n), min_users=max(1, args.min_users), max_users=max(args.min_users, args.max_users), sample=args.sample)
     if not samples:
         raise SystemExit("No eligible real sessions found for the requested bounds")
     base = load_config()

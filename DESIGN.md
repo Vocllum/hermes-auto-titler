@@ -61,8 +61,8 @@ on_session_end
 
 `first_title_mode` 决定谁负责第一版标题：
 
-- `builtin`（默认）：首轮交给 Hermes 内建 `title_generation`；插件从正常周期/关闭评估开始维护；
-- `plugin`：插件从第一个完整前台轮次开始评估，并在**插件加载时**通过 Hermes 配置 API 把宿主 `auxiliary.title_generation.enabled` 设为 `false`，避免两个标题器竞争。
+- `plugin`（默认）：插件从第 1 轮开始接管标题评估，并在**插件加载时**通过 Hermes 配置 API 把宿主 `auxiliary.title_generation.enabled` 设为 `false`，避免两个标题器竞争；
+- `builtin`：首轮交给 Hermes 内建 `title_generation`；插件从正常周期/关闭评估开始维护。
 
 `early_turn_eval` 只为兼容旧配置保留；当前实际 early 行为由 `first_title_mode` 决定。
 

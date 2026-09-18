@@ -115,6 +115,24 @@ def _audit_input_shape(
     )
 
 
+_CAPACITY_MARKERS = (
+    "429",
+    "503",
+    "overloaded",
+    "quota",
+    "rate limit",
+    "ratelimit",
+    "no available targets",
+    "resource_exhausted",
+    "too many requests",
+)
+
+
+def _is_capacity_error(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(marker in lowered for marker in _CAPACITY_MARKERS)
+
+
 class AutoTitler:
     def __init__(self, ctx, cfg: dict[str, Any], db: SessionDB | None = None):
         self.ctx = ctx
@@ -234,7 +252,9 @@ class AutoTitler:
             if not self._failed_sessions:
                 return
             for sid, meta in list(self._failed_sessions.items()):
-                if int(meta.get("attempts", 0)) >= 5:
+                attempts = int(meta.get("attempts", 0))
+                capacity = bool(meta.get("capacity"))
+                if attempts >= 5 and not capacity:
                     expired.append(sid)
                 elif now >= float(meta.get("next_retry_at", 0)):
                     candidates.append(sid)
@@ -274,14 +294,76 @@ class AutoTitler:
             log.info("auto-titler retry: triggering compensation eval for %s", sid[:12])
             self._submit_eval(sid)
 
-    def _early_enabled(self) -> bool:
-        """首轮命名一键开关：plugin=插件第 1 轮接管；builtin=首轮归内建。
+    def _requeue_untitled_sessions(self) -> None:
+        """Recover untitled/derived sessions after restart so a quota outage can drain later."""
+        try:
+            rows = self.db.list_sessions_rich(
+                limit=200, include_children=False, order_by_last_active=True
+            )
+        except TypeError:
+            try:
+                rows = self.db.list_sessions_rich(limit=200, include_children=False)
+            except Exception:
+                return
+        except Exception:
+            return
+        now = time.monotonic()
+        queued = 0
+        with self._retry_lock:
+            for row in rows or []:
+                sid = str((row or {}).get("id") or "")
+                if not sid or sid in self._failed_sessions:
+                    continue
+                try:
+                    src = self.db.get_session_title_source(sid)
+                    title = self.db.get_session_title(sid)
+                except Exception:
+                    continue
+                if src == SessionDB.TITLE_SOURCE_USER:
+                    continue
+                if src is None and title:
+                    continue
+                if title and src == SessionDB.TITLE_SOURCE_LLM:
+                    continue
+                if title and src != SessionDB.TITLE_SOURCE_DERIVED:
+                    continue
+                self._failed_sessions[sid] = {
+                    "attempts": 0,
+                    "next_retry_at": now,
+                    "capacity": True,
+                }
+                queued += 1
+        if queued:
+            log.info("auto-titler retry: requeued %d untitled/derived session(s)", queued)
 
-        plugin 等价旧 early_turn_eval=true；builtin 下 early_turn_eval 被强制
-        视为关闭（首标题只走内建 title_generation，正常轮次/关闭评估不变）。
-        未知值保守按 builtin 处理（不抢首轮）。
-        """
-        return str(self.cfg.get("first_title_mode", "builtin")) == "plugin"
+    def start_retry_loop(self) -> None:
+        """Independent sweep so quota recovery does not wait for the next user turn."""
+        existing = getattr(self, "_retry_thread", None)
+        if existing is not None and existing.is_alive():
+            return
+        self._retry_stop = threading.Event()
+
+        def run() -> None:
+            try:
+                self._requeue_untitled_sessions()
+            except Exception:
+                log.warning("auto-titler untitled requeue failed", exc_info=True)
+            while not self._retry_stop.wait(30.0):
+                try:
+                    self._retry_failed_sessions()
+                except Exception:
+                    log.warning("auto-titler retry sweep failed", exc_info=True)
+
+        self._retry_thread = threading.Thread(
+            target=_wrap_with_context(run),
+            name="autotitler-retry",
+            daemon=True,
+        )
+        self._retry_thread.start()
+
+    def _early_enabled(self) -> bool:
+        """首轮命名开关：plugin（默认）=插件第 1 轮强制接管；builtin=首轮让给内建。"""
+        return str(self.cfg.get("first_title_mode", "plugin")).lower() == "plugin"
 
     def _early_eligible(self, session_id: str) -> bool:
         """early_turn_eval 的来源门：只对无标题或 derived 来源的会话提前评估。
@@ -504,17 +586,23 @@ class AutoTitler:
             # 并避免记录正常 _last_eval 锁死重试窗口。
             self._pending.pop(session_id, None)
             self._last_eval.pop(session_id, None)
+            err = getattr(self, "_last_generate_error", "") or ""
+            capacity = _is_capacity_error(err)
             with self._retry_lock:
                 meta = self._failed_sessions.get(session_id, {"attempts": 0})
                 attempts = int(meta.get("attempts", 0)) + 1
-                delay = min(30 * (2 ** (attempts - 1)), 600)  # 30s, 60s, 120s, 240s, 480s, max 600s
+                delay = min(30 * (2 ** (attempts - 1)), 600)
                 self._failed_sessions[session_id] = {
                     "attempts": attempts,
                     "next_retry_at": time.monotonic() + delay,
+                    "capacity": capacity or bool(meta.get("capacity")),
                 }
             log.warning(
-                "auto-titler %s: recorded failure (attempt %d/5, next retry in %ds)",
-                session_id[:12], attempts, delay,
+                "auto-titler %s: recorded failure (attempt %d%s, next retry in %ds)",
+                session_id[:12],
+                attempts,
+                ", capacity" if capacity or meta.get("capacity") else "/5",
+                delay,
             )
             return {"action": "failed", "reason": "model call failed"}
 

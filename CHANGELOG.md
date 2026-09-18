@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.0-beta.5 — 2026-09-19
+
+- **Default `first_title_mode` to `plugin`**: the plugin now owns first-title generation from turn 1 out of the box, and disables the host's built-in `auxiliary.title_generation` at plugin load to eliminate race conditions. Explicit `builtin` remains available for users who prefer Hermes to own the opening title.
+- **Capacity-aware retry queue**: distinguish capacity/quota errors (429, 503, overloaded, quota, rate limit) from non-recoverable failures. Capacity errors are retried indefinitely with exponential backoff instead of being dropped after 5 attempts. Non-capacity errors still expire after 5 attempts.
+- **Startup requeue**: on plugin load, scan SessionDB for untitled or derived-only sessions and automatically re-enqueue them, so quota outages spanning a restart are self-healing.
+- **Background retry daemon**: a lightweight 30-second polling thread retries failed sessions independently of user turns, ensuring quota recovery is not blocked on the next conversation.
+- **`custom_instructions` config slot**: optional user-defined text appended verbatim to the title-generation system prompt. Use for personal preferences such as `"Always use English for titles"` or `"Prefix every title with [Project]"`. Empty by default (no effect).
+- Fix `titleer` → `titler` typo in init warning message.
+- Align all fallback defaults and documentation to `plugin` as the canonical `first_title_mode` default.
+- Display `failed_queue` depth in `/autotitler status`.
+
 ## 0.2.0-beta.4 — 2026-09-16
 
 - Add opt-in `max_renames_per_session` (default `0` / off). When set to N, a session may receive at most N automatic title replacements in the current plugin process; the counter is checked before the model call. First untitled naming and explicit blind regeneration (`rename-now` / `retitle-all`) do not consume the cap, and a failed write does not.

@@ -3,7 +3,7 @@ enabled: true
 every_n_turns: 2
 on_close: true
 early_turn_eval: false  # 旧键（保留兼容）：当前实际行为由 first_title_mode 决定
-first_title_mode: builtin  # builtin=首轮归内建；plugin=插件第1轮接管，并在插件加载时关闭宿主标题器。切换后建议检查宿主设置并重启
+# first_title_mode: plugin  # plugin（默认，插件全权接管第1轮开局并关闭宿主内建器）| builtin（首轮归内建，插件首轮不动作）
 recent_turns: 2
 opening_turns: 2
 ignore_model_messages: false
@@ -25,3 +25,4 @@ max_title_length: null
 max_display_width: 40
 rename_confirmations: 1  # 默认再确认1次；0=一次判定直接写；N>0=候选需再获得N次后续背书；换候选后重新计数
 max_renames_per_session: 0  # 0=关闭自动改名上限；N>0=每会话最多自动替换N次；首次命名和手动 rename-now 不计入
+# custom_instructions: ""  # 可选，追加到 system prompt 末尾的自定义指令（如 "标题使用英文" 或 "始终包含项目名前缀"）

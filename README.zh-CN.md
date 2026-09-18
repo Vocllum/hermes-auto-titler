@@ -41,10 +41,11 @@ Hermes 可以根据开场对话生成第一版标题，但会话会继续发展�
 | **长会话意图追踪** | 组合开头轮次、最近轮次、受上限约束的用户消息轨迹，以及原始 opening 被压缩后留下的历史摘要。长消息使用首部 + 尾部提取，避免把末尾真正的指令截掉。 |
 | **意图感知捕获** | 过滤 Hermes 压缩交接包装、系统噪声、相邻重复 replay，以及 cron/subagent/后台执行，避免这些内容抢走标题主题。 |
 | **证据优先判定** | 先根据对话证据独立推断持续主题，再比较当前标题/待审标题。明确或重复的用户目标权重最高；assistant 内容可以解释用户意图，但不能单独创造新主题。 |
-| **与 Hermes 首标题协作** | 默认 `first_title_mode: builtin`，第一版标题交给 Hermes，插件负责后续维护；切到 `plugin` 才从第一轮开始接管。 |
+| **与 Hermes 首标题协作** | 默认 `first_title_mode: plugin`，插件装上即全权接管第 1 轮与后续维护（第 1 回合用户输入即刻异步生成，并自动关闭宿主内建，彻底避免竞态）；若需首轮交给宿主内置则可显式设为 `builtin`。 |
 | **保守 / 激进策略** | `conservative` 只有明显、持续的失配才改；`aggressive` 在用户明确放弃旧目标或连续实质回合形成新方向后更快跟进，但单次子任务、状态检查和工具变化仍不算转题。 |
 | **N 轮复审门** | v0.2 默认 `rename_confirmations: 1`，即 llm→llm 候选还要再获得一次后续背书。设为 `0` 可改成一次判定直接写；更大的 N 要求 N 次后续背书，换候选后重新计数。 |
 | **可选改名上限** | `max_renames_per_session: 0` 默认关闭；设为 N 后，每个会话最多自动替换标题 N 次，用于控制长期会话的标题抖动与成本。首次无标题命名和显式 `rename-now` 不消耗额度。 |
+| **自定义提示词插槽** | `custom_instructions` 将用户指定的文本追加到标题生成 system prompt 末尾，可用于个人偏好如语言或前缀约定。默认空（无影响）。 |
 | **调用次数受控** | 轮数门控、单会话时间节流、来源检查、in-flight 去重和内部回合过滤，让多数前台轮次根本不触发标题模型。 |
 | **保守表面规范化** | 保留 repo 名、文件名、命令和其他 literal identifier；只在安全边界补中英文空格，并且只有当前会话给出大小写证据时才统一名称大小写。 |
 | **Profile 隔离 + 可审计** | SessionDB 句柄按 Hermes profile 分开缓存；真实模型调用以 `task=hermes_auto_titler` 记入 Hermes 用量统计。 |
@@ -148,7 +149,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 |---|---|---|
 | `enabled` | `true` | 总开关。若插件启动时就是 false，则没有注册 hook，之后改成 true 需要重启；已经加载后改成 false 会被 hook 内的开关立即拦住。 |
 | `every_n_turns` | `2` | 每 N 个完整前台轮次评估一次。 |
-| `first_title_mode` | `builtin` | `builtin` = 第一版标题归 Hermes；`plugin` = 插件从第 1 轮开始评估，并在插件加载时关闭宿主标题器。切换应按重启级配置处理。 |
+| `first_title_mode` | `plugin` | `plugin` = 插件从第 1 轮开始评估，并在插件加载时关闭宿主标题器；`builtin` = 第一版标题归 Hermes。切换应按重启级配置处理。 |
 | `early_turn_eval` | `false` | 兼容旧配置保留。当前实际行为由 `first_title_mode` 控制：`plugin` 会提前评估，`builtin` 不会。 |
 | `on_close` | `true` | 真实关闭/终局时评估一次（同步、受时间节流）。 |
 | `recent_turns` / `opening_turns` | `2` / `2` | 上下文窗口按真实用户轮计；每个选中轮次保留用户消息 + 最后一条 assistant 回复。 |
@@ -166,6 +167,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `max_title_length` / `max_display_width` | `null` / `40` | `max_title_length: null` 不强加代码层字符数硬切，由提示词保持标题简洁，再由 `max_display_width` 严格限制显示列宽；`complete` 风格额外增加 12 列。 |
 | `rename_confirmations` | `1` | v0.2 默认再要求 1 次后续背书；`0` = 一次判定后直接写；`N > 1` = 需要 N 次后续背书。若候选被替换则重新计数。 |
 | `max_renames_per_session` | `0` | 默认关闭自动替换次数上限；`N > 0` = 每个会话最多自动替换标题 N 次。首次无标题命名和显式 `rename-now` 不消耗次数；已有 `derived` 标题升级属于一次自动替换。计数只存在当前插件进程内。 |
+| `custom_instructions` | `""` | 可选，追加到标题生成 system prompt 末尾的自定义指令。如 `"标题使用英文"` 或 `"始终包含项目名前缀"`。留空则无影响。 |
 
 
 </details>

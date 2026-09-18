@@ -251,7 +251,8 @@ def test_throttle_skips_frequent_evaluations():
 
 def test_every_n_turns_trigger(recording_threads):
     db = FakeDB(messages=MSGS, title=None)
-    t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3})
+    # 显式 builtin 让插件首轮避让，测试单纯的 every_n_turns 节奏
+    t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "first_title_mode": "builtin"})
     t.on_session_end(session_id="s1", completed=True)
     assert len(recording_threads.instances) == 0  # 第 1 轮不评估
     t.on_session_end(session_id="s1", completed=True)
@@ -403,7 +404,7 @@ def test_finalize_respects_on_close_disabled():
 
 
 def test_first_title_mode_builtin_suppresses_early(recording_threads):
-    # builtin：即使旧 early_turn_eval=true，首轮也不抢（首标题归内建）
+    # builtin：明确配置 builtin 时插件首轮不抢（交回内建）
     db = FakeDB(messages=MSGS, title=None)
     t, _ = make_titler(db, text=_dec("keep"), cfg={
         "every_n_turns": 3, "early_turn_eval": True, "first_title_mode": "builtin",
@@ -415,26 +416,23 @@ def test_first_title_mode_builtin_suppresses_early(recording_threads):
     assert len(recording_threads.instances) == 1
 
 
-def test_first_title_mode_plugin_takes_first_turn(recording_threads):
-    # plugin：第 1 轮就接管（等价旧 early=true）
+def test_first_title_mode_plugin_default_takes_first_turn(recording_threads):
+    # 默认 plugin：第 1 轮就接管
     db = FakeDB(messages=MSGS, title=None)
-    t, _ = make_titler(db, text=_dec("keep"), cfg={
-        "every_n_turns": 3, "early_turn_eval": False, "first_title_mode": "plugin",
-    })
-    t.on_session_end(session_id="s1", completed=True)  # n=1 < 3 → 提交
-    run_recorded(recording_threads)
+    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3})
+    t.on_session_end(session_id="s1", completed=True)  # n=1 < 3 → 接管提交
     assert len(recording_threads.instances) == 1
 
 
 def test_first_title_mode_config_validation(tmp_path):
     from hermes_auto_titler.config import DEFAULTS, load_config
 
-    assert DEFAULTS["first_title_mode"] == "builtin"
+    assert DEFAULTS["first_title_mode"] == "plugin"
     p = tmp_path / "config.yaml"
-    p.write_text("first_title_mode: plugin\n", encoding="utf-8")
-    assert load_config(path=p)["first_title_mode"] == "plugin"
+    p.write_text("first_title_mode: builtin\n", encoding="utf-8")
+    assert load_config(path=p)["first_title_mode"] == "builtin"
     p.write_text("first_title_mode: bogus\n", encoding="utf-8")
-    assert load_config(path=p)["first_title_mode"] == "builtin"  # 非法回退默认
+    assert load_config(path=p)["first_title_mode"] == "plugin"  # 非法回退默认
 
 
 def test_early_turn_eval_submits_early_turns(recording_threads):
@@ -479,7 +477,7 @@ def test_early_turns_still_throttled_by_min_interval(recording_threads):
 
 def test_early_turn_eval_off_keeps_old_cadence(recording_threads):
     db = FakeDB(messages=MSGS, title=None)
-    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "early_turn_eval": False})
+    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "early_turn_eval": False, "first_title_mode": "builtin"})
     t.on_session_end(session_id="s1", completed=True)
     t.on_session_end(session_id="s1", completed=True)
     assert len(recording_threads.instances) == 0
@@ -1087,6 +1085,7 @@ def test_register_registers_hooks_and_command(monkeypatch):
             cmds.append(name)
 
     monkeypatch.setattr(pkg, "load_config", lambda: {**DEFAULTS, "enabled": True})
+    monkeypatch.setattr(pkg.AutoTitler, "start_retry_loop", lambda self: None)
     pkg.register(FakeCtx())
     assert "on_session_end" in hooks
     assert "on_session_finalize" in hooks
@@ -1635,14 +1634,14 @@ def test_user_race_during_confirmation_clears_pending():
 
 def test_on_pre_llm_call_triggers_eager_evaluation_for_new_session(recording_threads):
     db = FakeDB(messages=MSGS, title=None, source=None)
-    t, ctx = make_titler(db, cfg={"first_title_mode": "plugin", "early_turn_eval": True})
+    t, ctx = make_titler(db)  # 默认即 plugin 接管
     t.on_pre_llm_call(session_id="s1")
     assert len(recording_threads.instances) == 1
 
 
 def test_on_pre_llm_call_ignores_internal_and_user_titled(recording_threads):
     db = FakeDB(messages=MSGS, title="用户标题", source="user")
-    t, ctx = make_titler(db, cfg={"first_title_mode": "plugin", "early_turn_eval": True})
+    t, ctx = make_titler(db)
     t.on_pre_llm_call(session_id="s1")
     assert len(recording_threads.instances) == 0
 
@@ -1824,3 +1823,63 @@ def test_evaluate_evicts_failed_session_on_non_model_skips():
     assert res["action"] == "skipped"
     assert res["reason"] == "no messages"
     assert "s_empty" not in t._failed_sessions
+
+
+def test_capacity_failure_is_not_dropped_after_five_attempts():
+    db = FakeDB(messages=MSGS, title=None)
+    t = AutoTitler(SimpleNamespace(llm=FakeLlm('{"action":"keep"}')), {**DEFAULTS}, db=db)
+    t._failed_sessions["s1"] = {
+        "attempts": 5,
+        "next_retry_at": time.monotonic() - 1,
+        "capacity": True,
+    }
+    submitted = []
+    t._submit_eval = lambda sid: submitted.append(sid)
+    t._retry_failed_sessions()
+    assert submitted == ["s1"]
+    assert "s1" in t._failed_sessions
+
+
+def test_non_capacity_failure_expires_after_five_attempts():
+    db = FakeDB(messages=MSGS, title=None)
+    t = AutoTitler(SimpleNamespace(llm=FakeLlm('{"action":"keep"}')), {**DEFAULTS}, db=db)
+    t._failed_sessions["s1"] = {
+        "attempts": 5,
+        "next_retry_at": time.monotonic() - 1,
+        "capacity": False,
+    }
+    submitted = []
+    t._submit_eval = lambda sid: submitted.append(sid)
+    t._retry_failed_sessions()
+    assert submitted == []
+    assert "s1" not in t._failed_sessions
+
+
+def test_overloaded_model_error_is_queued_as_capacity():
+    db = FakeDB(messages=MSGS, title=None)
+
+    class BoomLlm:
+        def complete(self, **kw):
+            raise RuntimeError("Error code: 503 - No available targets for combo: Mercury")
+
+    t = AutoTitler(SimpleNamespace(llm=BoomLlm()), {**DEFAULTS}, db=db)
+    r = t.evaluate("s1", force=True)
+    assert r["action"] == "failed"
+    assert t._failed_sessions["s1"]["capacity"] is True
+
+
+def test_requeue_untitled_sessions_from_db_survives_restart():
+    db = FakeDB(messages=MSGS, title=None, source=None, sessions=[
+        {"id": "untitled", "title": ""},
+        {"id": "named", "title": "已有标题"},
+        {"id": "manual", "title": "手改"},
+    ])
+    titles = {"untitled": None, "named": "已有标题", "manual": "手改"}
+    sources = {"untitled": None, "named": "llm", "manual": "user"}
+    db.get_session_title = lambda sid: titles[sid]
+    db.get_session_title_source = lambda sid: sources[sid]
+    t = AutoTitler(SimpleNamespace(llm=FakeLlm('{"action":"keep"}')), {**DEFAULTS}, db=db)
+    t._requeue_untitled_sessions()
+    assert "untitled" in t._failed_sessions
+    assert "named" not in t._failed_sessions
+    assert "manual" not in t._failed_sessions

@@ -41,10 +41,11 @@ Hermes can name a session from its opening exchange. But conversations evolve; t
 | **Long-horizon intent tracking** | Combines opening turns, recent turns, a capped user-message trajectory, and compaction summaries when the original opening is gone. Long messages use head+tail extraction so late instructions are not lost. |
 | **Intent-aware capture** | Filters Hermes compaction handoffs, system noise, adjacent replay duplicates, and internal cron/subagent/background turns before they can distort the title. |
 | **Evidence-first judgment** | Infers the durable subject from conversation evidence before comparing the current/proposed title. Explicit and repeated user goals outrank summaries; assistant text cannot create a new subject on its own. |
-| **Native first-title coexistence** | `first_title_mode: builtin` (default) leaves the first title to Hermes and maintains it later. `plugin` lets this plugin own the first title too. |
+| **Native first-title coexistence** | `first_title_mode: plugin` (default) takes over from turn 1 (`pre_llm_call`) and disables host built-in title generation on startup to eliminate race conditions. Explicit `builtin` remains available if you prefer the host to own the opening title. |
 | **Conservative / aggressive policy** | `conservative` requires a clear durable mismatch. `aggressive` follows explicit abandonment or a sustained new direction sooner, while still rejecting one-off subtasks, status checks, and tool changes as topic shifts. |
 | **N-round review gate** | The v0.2 default is `rename_confirmations: 1`: an llm→llm candidate needs one later endorsement. `0` opts into immediate writes; larger values require N later endorsements and restart the count when the candidate changes. |
 | **Optional rename cap** | `max_renames_per_session: 0` is off by default. Set N to allow at most N automatic title replacements per session, limiting long-session churn and cost. Initial naming and explicit `rename-now` do not consume the cap. |
+| **Custom prompt slot** | `custom_instructions` appends user-defined text to the title-generation system prompt. Use for personal preferences like language or prefix conventions. Empty by default (no effect). |
 | **Call-efficient by design** | Turn cadence, per-session time throttling, provenance checks, in-flight dedup, and internal-turn exclusion prevent most foreground turns from making a model call. |
 | **Conservative surface cleanup** | Preserves literal identifiers, adds safe CJK↔Latin spacing, and only normalizes name casing when the current conversation provides evidence for that casing. |
 | **Profile-isolated and auditable** | SessionDB handles are cached per Hermes profile, and real model calls are recorded under `task=hermes_auto_titler`. |
@@ -148,7 +149,7 @@ model: "your-model"         # any model your Hermes setup can reach
 |---|---|---|
 | `enabled` | `true` | Master switch. If the plugin started disabled, enabling it requires a restart because no hooks were registered; disabling an already-loaded plugin takes effect through the hook guard. |
 | `every_n_turns` | `2` | Evaluate every N completed foreground turns. |
-| `first_title_mode` | `builtin` | `builtin` = Hermes owns first-title generation; `plugin` = plugin evaluates from turn 1 and disables the host title generator at plugin load. Treat changes as restart-time ownership changes. |
+| `first_title_mode` | `plugin` | `plugin` = plugin evaluates from turn 1 and disables the host title generator at plugin load; `builtin` = Hermes owns first-title generation. Treat changes as restart-time ownership changes. |
 | `early_turn_eval` | `false` | Legacy compatibility key. Current behavior is controlled by `first_title_mode`: `plugin` enables early evaluation; `builtin` does not. |
 | `on_close` | `true` | Evaluate on real session finalize/close (synchronous, throttled). |
 | `recent_turns` / `opening_turns` | `2` / `2` | Context windows in real user turns; each selected turn keeps the user message + last assistant reply. |
@@ -166,6 +167,7 @@ model: "your-model"         # any model your Hermes setup can reach
 | `max_title_length` / `max_display_width` | `null` / `40` | `max_title_length: null` avoids hard character slicing in code; the prompt keeps titles brief and `max_display_width` strictly caps display columns. `complete` style adds 12 display columns. |
 | `rename_confirmations` | `1` | Default: require one later endorsement before llm→llm writeback. `0` = immediate write after one decision; `N > 1` = require N later endorsements. Replacing the pending candidate restarts the count. |
 | `max_renames_per_session` | `0` | Automatic replacement cap is off by default. `N > 0` allows at most N automatic title replacements per session. Initial naming and explicit `rename-now` do not consume it; upgrading an existing `derived` title counts as a replacement. The counter is process-local. |
+| `custom_instructions` | `""` | Optional text appended verbatim to the end of the title-generation system prompt. Use for personal preferences such as `"Always use English for titles"` or `"Prefix every title with [Project]"`. Empty = no effect. |
 
 
 </details>

@@ -2,10 +2,6 @@
 
 <img src="docs/banner.svg" alt="hermes-auto-titler — 会话标题跟着整段对话走，而不只看开场提示" width="100%"/>
 
-# hermes-auto-titler
-
-**会话标题跟着整段对话走——而不只看开场提示。**
-
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-plugin-1f6feb)![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)
 
 *为 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 提供面向主题的会话标题持续维护：保护用户手改标题，并追踪长会话中的真实意图。*

@@ -2,10 +2,6 @@
 
 <img src="docs/banner.svg" alt="hermes-auto-titler — session titles that follow the conversation, not just the opening prompt" width="100%"/>
 
-# hermes-auto-titler
-
-**Session titles that follow the conversation — not just the opening prompt.**
-
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-plugin-1f6feb)![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)
 
 *Topic-aware session title maintenance for [Hermes Agent](https://github.com/NousResearch/hermes-agent), with provenance-safe writes and long-horizon intent tracking.*

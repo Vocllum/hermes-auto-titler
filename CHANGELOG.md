@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.2.0-beta.5 — 2026-09-19
+## 0.2.0 — 2026-09-19
 
 - **Default `first_title_mode` to `plugin`**: the plugin now owns first-title generation from turn 1 out of the box, and disables the host's built-in `auxiliary.title_generation` at plugin load to eliminate race conditions. Explicit `builtin` remains available for users who prefer Hermes to own the opening title.
 - **Capacity-aware retry queue**: distinguish capacity/quota errors (429, 503, overloaded, quota, rate limit) from non-recoverable failures. Capacity errors are retried indefinitely with exponential backoff instead of being dropped after 5 attempts. Non-capacity errors still expire after 5 attempts.

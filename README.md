@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/banner.png" alt="hermes-auto-titler — session titles that follow the conversation, not just the opening prompt" width="100%"/>
+<img src="docs/banner.png" alt="hermes-auto-titler — session titles that follow the conversation, not just the first message" width="100%"/>
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-plugin-1f6feb)![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)
 
@@ -12,9 +12,9 @@
 
 ---
 
-Hermes can name a session from its opening exchange. But conversations evolve; their titles often don't. A chat that begins with *"what's the vLLM quant format?"* can turn into a two-day deployment project while the sidebar label remains anchored to the opening prompt.
+Hermes can name a session from its opening exchange. But conversations evolve; their titles often don't. A chat that begins with *"how do i fix the thing with..."* can turn into an urgent Redis memory leak investigation and production deploy, while the sidebar label remains anchored to the first message.
 
-**hermes-auto-titler** maintains that label across the session lifecycle. It periodically checks whether an auto-generated title still represents the user's durable subject and intended outcome, updates it when the conversation genuinely changes direction, and never overwrites a title you set yourself.
+**hermes-auto-titler** maintains session labels across their entire lifecycle. It periodically evaluates whether an auto-generated title still reflects the user's durable intent, updates the label when the conversation genuinely changes direction, and never overwrites titles you set yourself.
 
 ```text
 ┌─ SESSIONS ────────────────────────────────────────────────┐
@@ -33,41 +33,41 @@ Hermes can name a session from its opening exchange. But conversations evolve; t
 
 | | |
 |---|---|
-| **Provenance-safe** | Enforces `derived < llm < user`. `derived` = Hermes' deterministic fallback from the first message; `llm` = model-generated; `user` = yours, **never overwritten**. Old titles with no provenance (pre-provenance rows) are treated as user-set and protected too. |
-| **Long-horizon intent tracking** | Combines opening turns, recent turns, a capped user-message trajectory, and compaction summaries when the original opening is gone. Long messages use head+tail extraction so late instructions are not lost. |
-| **Intent-aware capture** | Filters Hermes compaction handoffs, system noise, adjacent replay duplicates, and internal cron/subagent/background turns before they can distort the title. |
-| **Evidence-first judgment** | Infers the durable subject from conversation evidence before comparing the current/proposed title. Explicit and repeated user goals outrank summaries; assistant text cannot create a new subject on its own. |
-| **Native first-title coexistence** | `first_title_mode: plugin` (default) takes over from turn 1 (`pre_llm_call`) and disables host built-in title generation on startup to eliminate race conditions. Explicit `builtin` remains available if you prefer the host to own the opening title. |
-| **Conservative / aggressive policy** | `conservative` requires a clear durable mismatch. `aggressive` follows explicit abandonment or a sustained new direction sooner, while still rejecting one-off subtasks, status checks, and tool changes as topic shifts. |
-| **N-round review gate** | The v0.2 default is `rename_confirmations: 1`: an llm→llm candidate needs one later endorsement. `0` opts into immediate writes; larger values require N later endorsements and restart the count when the candidate changes. |
-| **Optional rename cap** | `max_renames_per_session: 0` is off by default. Set N to allow at most N automatic title replacements per session, limiting long-session churn and cost. Initial naming and explicit `rename-now` do not consume the cap. |
+| **Provenance-safe** | Enforces `derived < llm < user`. `derived` = Hermes' deterministic fallback from the first message; `llm` = model-generated; `user` = yours, **never overwritten**. Legacy titles without recorded provenance are treated as user-set and protected. |
+| **Long-horizon intent tracking** | Synthesizes opening turns, recent turns, a bounded user-message trajectory, and historical compaction summaries when the original opening is evicted. Long messages use head+tail extraction to preserve late instructions. |
+| **Intent-aware capture** | Filters compaction handoffs, system noise, adjacent replay duplicates, and internal cron, subagent, or background turns before they can distort the title. |
+| **Evidence-first judgment** | Infers the durable subject from conversation evidence before comparing against current or proposed titles. Explicit, repeated user goals carry highest weight; assistant responses cannot introduce new topics independently. |
+| **First-turn takeover or coexistence** | `first_title_mode: plugin` (default) evaluates from turn 1 (`pre_llm_call`) and disables host built-in title generation at startup to eliminate race conditions. Set to `builtin` if you prefer the host to own initial title creation. |
+| **Conservative / aggressive policy** | `conservative` requires a clear, durable mismatch before renaming. `aggressive` detects explicit goal abandonment or sustained new directions sooner, while still treating one-off subtasks, status checks, and tool changes as transient noise. |
+| **N-round review gate** | With `rename_confirmations: 1` (default), an automatic title candidate requires one follow-up endorsement before writeback. Set to `0` for immediate updates, or N to require N consecutive endorsements (resetting if the candidate changes). |
+| **Optional rename cap** | `max_renames_per_session: 0` disables the cap. Setting N allows at most N automatic replacements per session, preventing title churn in long-running chats. Initial naming and manual `rename-now` do not consume the cap. |
 | **Custom prompt slot** | `custom_instructions` appends user-defined text to the title-generation system prompt. Use for personal preferences like language or prefix conventions. Empty by default (no effect). |
-| **Call-efficient by design** | Turn cadence, per-session time throttling, provenance checks, in-flight dedup, and internal-turn exclusion prevent most foreground turns from making a model call. |
-| **Conservative surface cleanup** | Preserves literal identifiers, adds safe CJK↔Latin spacing, and only normalizes name casing when the current conversation provides evidence for that casing. |
-| **Profile-isolated and auditable** | SessionDB handles are cached per Hermes profile, and real model calls are recorded under `task=hermes_auto_titler`. |
+| **Call-efficient by design** | Turn-cadence gating, per-session rate throttling, provenance checks, in-flight deduplication, and internal-turn filtering ensure that most foreground turns make no model calls. |
+| **Conservative surface cleanup** | Preserves literal identifiers (commands, paths, code symbols), adds proper CJK–Latin spacing, and only adjusts letter casing when supported by direct conversation evidence. |
+| **Profile-isolated and auditable** | SessionDB connections are isolated per Hermes profile, and all title-generation calls are logged under `task=hermes_auto_titler` in usage metrics. |
 
 > ⚠️ **Privacy / data flow — read before enabling**
-> The plugin sends selected conversation text to the title model: opening/recent excerpts, a sampled user-message trajectory, compacted history summaries when applicable, and attachment filename placeholders. Scope is controlled by `opening_turns`, `recent_turns`, `preview_chars`, `include_all_user_messages`, `user_message_threshold`, `user_message_preview_chars`, `summary_preview_chars`, and `retitle_summary_chars`. Calls count against the selected provider's usage and billing.
+> The plugin transmits selected conversation excerpts to the title model: opening and recent turns, a sampled user-message trajectory, compacted history summaries when present, and attachment filename placeholders. Sampling limits are governed by `opening_turns`, `recent_turns`, `preview_chars`, `include_all_user_messages`, `user_message_threshold`, `user_message_preview_chars`, `summary_preview_chars`, and `retitle_summary_chars`. Model requests count toward your provider's usage and billing.
 
 ## 🔍 How it works
 
-1. **Choose first-title ownership** — by default Hermes handles the first title through its built-in `title_generation` auxiliary task. In `first_title_mode: plugin`, this plugin evaluates from the first completed turn and disables the competing host title generator at plugin load.
-2. **Trigger and gate** — hooks `on_session_end` / `on_session_finalize`. Completed foreground turns count toward `every_n_turns` (default `2`); failed/interrupted turns and cron/subagent/bg-review work do not. Periodic evals run in a daemon worker; close/finalize evals run synchronously and still honor `min_interval_minutes`.
-3. **Build intent context** — opening turns + recent turns (each selected turn keeps the user message and last assistant reply) + a capped first-and-recent user trajectory. If compaction removed the original opening, the earlier summary becomes a separate historical anchor. Handoff wrappers and replay noise are removed before sampling.
-4. **Infer before comparing** — the auxiliary model returns strict JSON. Conversation evidence is presented before the current/proposed title to reduce anchoring; explicit/repeated user intent has higher evidential weight than summaries or assistant text. Structural duplication across input sections is explicitly not counted as repeated intent.
-5. **Apply the selected strategy** — `conservative` keeps a broadly accurate title unless there is a material durable mismatch. `aggressive` follows an explicit replacement of the old goal or a sustained coherent new direction sooner, but recency alone is never enough.
-6. **Optionally review a rename** — with `rename_confirmations: N`, an llm→llm rename becomes a pending candidate and must receive N later endorsements before writeback. A different replacement candidate restarts the count. Untitled/derived upgrades and explicit blind regeneration bypass this gate.
-7. **Write safely** — provenance is re-checked before every write attempt. Pending reviews are invalidated if their base automatic title changes. Conflict titles get a suffix that still fits character/display-width limits; successful automatic writes retain `llm` provenance so a later user title remains authoritative.
+1. **First-title ownership** — By default, Hermes creates initial titles via its built-in `title_generation` task. With `first_title_mode: plugin` (default), this plugin evaluates from turn 1 and automatically disables the host's competing title generator at startup to prevent race conditions. Set to `builtin` if you prefer the host to handle the initial title.
+2. **Triggering and cadence gating** — Hooks into `on_session_end` and `on_session_finalize`. Only completed foreground turns count toward `every_n_turns` (default `2`); failed/interrupted turns and cron, subagent, or background tasks are excluded. Periodic evaluations run asynchronously in a daemon worker, while session close/finalize evaluations run synchronously (still respecting `min_interval_minutes`).
+3. **Context construction** — Extracts opening turns, recent turns (pairing each user prompt with the final assistant response), and a bounded trajectory of earliest and latest user prompts. When history compaction has evicted the opening exchange, earlier compaction summaries serve as historical anchors. Protocol handoff wrappers and prompt replays are stripped before sampling.
+4. **Evidence-first evaluation** — The auxiliary model outputs structured JSON. Conversation evidence is presented ahead of the current title to avoid anchoring bias. Explicit and repeated user intent carries the highest weight; assistant responses provide supporting context but cannot introduce new topics independently. Structural overlap between sampled sections is explicitly discounted.
+5. **Strategy evaluation** — `conservative` maintains the existing title unless a significant, durable topic shift occurs. `aggressive` adapts quickly when the user explicitly abandons an earlier objective or pursues a sustained new direction, though recent turns alone remain insufficient to trigger a rename.
+6. **Multi-round confirmation gate** — Under `rename_confirmations: N`, proposed `llm` → `llm` renames are held as pending candidates until confirmed across N subsequent evaluations. If a different candidate is proposed, the counter resets. Initial titling, `derived` upgrades, and manual `/autotitler rename-now` commands bypass this gate.
+7. **Safe writeback** — Provenance is re-validated immediately before writing to SessionDB. Pending candidates are invalidated if the underlying title changes. Suffixes for duplicate titles respect width constraints, and writes carry `llm` provenance so user-specified titles are never overwritten.
 
 <details>
 <summary><b>Design decisions worth knowing</b></summary>
 
-- **Why maintenance instead of better first-message naming?** The opening exchange cannot describe work that has not happened yet. Long-running sessions need a label that can be reconsidered as intent develops.
-- **Why sample the trajectory instead of sending the raw transcript?** The title model needs durable intent, not tool chatter. The plugin keeps opening/recent evidence and a bounded first+latest user trajectory, while preserving the head and tail of long messages.
-- **Why infer the subject before showing title hypotheses?** Existing labels are useful comparison targets but poor evidence. Putting conversation evidence first reduces anchoring on an outdated title while preserving conservative write decisions.
-- **Why synchronous close evals?** A title written after the session is closed may never be seen. Close evaluation can block up to the provider timeout (~30 s), but it gives the final visible boundary a chance to land the title before teardown.
-- **Why default to one review endorsement?** A single rename decision can be plausible but transient. One later endorsement is a modest guard against title churn; set `rename_confirmations: 0` if you prefer faster title updates. Higher values deliberately trade responsiveness for more review depth.
-- **Known limitation:** Hermes exposes no atomic compare-and-swap for same-source title writes, so llm→llm updates retain a very small race window. The plugin narrows and detects it rather than claiming it cannot happen.
+- **Why continuous maintenance instead of better first-message titling?** An opening exchange cannot anticipate where a conversation leads. Long-running sessions require titles that evolve alongside the user's actual objectives.
+- **Why sample intent trajectory instead of passing full transcripts?** The title model requires durable intent rather than tool execution noise. The plugin preserves opening and recent context alongside a bounded trajectory of key user prompts, using head+tail extraction to retain critical instructions in long messages.
+- **Why infer the subject before inspecting current titles?** Existing titles make good comparison baselines but poor evidence. Analyzing conversation evidence first avoids premature anchoring on outdated labels while preserving conservative write thresholds.
+- **Why evaluate synchronously on session close?** Titles written after session termination may never surface in the UI. While synchronous evaluation on close can block up to the provider timeout (~30 s), it ensures the final session state is captured before process teardown.
+- **Why require one review endorsement by default?** A single rename trigger can reflect a temporary detour rather than a permanent pivot. Requiring one subsequent endorsement provides a sensible defense against title flutter; set `rename_confirmations: 0` for immediate updates, or increase N for stricter stability.
+- **Known limitation:** Hermes does not provide an atomic compare-and-swap API for session titles, leaving a narrow race window during concurrent writes. The plugin mitigates and detects these collisions rather than assuming they cannot occur.
 
 </details>
 
@@ -126,7 +126,7 @@ model: "your-model"         # any model your Hermes setup can reach
 - The selected channel is used only for title evaluation; your main conversation keeps its own model.
 - `/autotitler status` shows the plugin's configured route. When it says `(host default)`, inspect Hermes' `auxiliary.title_generation` configuration to see the host-resolved provider/model.
 
-**Model guidance.** The task is intentionally designed to work with a small, inexpensive instruction-following model. Prefer reliable JSON output, multilingual intent tracking, and instruction adherence over deep reasoning. Start with Hermes' normal auxiliary title route. Before assuming a very weak model is sufficient, run `scripts/review_sample.py` on your own history: if it shows topic drift, malformed JSON, or poor multilingual naming—especially on long/compacted sessions—move the title route to a stronger model.
+**Model guidance.** The plugin is designed to run efficiently on small, fast instruction-following models. Prioritize consistent JSON output, multilingual comprehension, and strong prompt adherence over large reasoning capacity. Start with Hermes' normal auxiliary title route. Before deploying an ultra-light model, evaluate `scripts/review_sample.py` against your own session history. If you observe topic drift, invalid JSON, or degraded multilingual titles on long or compacted sessions, switch to a more capable auxiliary model.
 
 **Requirements:** Python ≥ 3.11 · a recent Hermes Agent.
 
@@ -165,7 +165,6 @@ model: "your-model"         # any model your Hermes setup can reach
 | `max_renames_per_session` | `0` | Automatic replacement cap is off by default. `N > 0` allows at most N automatic title replacements per session. Initial naming and explicit `rename-now` do not consume it; upgrading an existing `derived` title counts as a replacement. The counter is process-local. |
 | `custom_instructions` | `""` | Optional text appended verbatim to the end of the title-generation system prompt. Use for personal preferences such as `"Always use English for titles"` or `"Prefix every title with [Project]"`. Empty = no effect. |
 
-
 </details>
 
 ## 🕹️ Commands
@@ -177,19 +176,19 @@ model: "your-model"         # any model your Hermes setup can reach
 /autotitler retitle-all [--dry-run] [--limit N] [--min-messages N]   # bulk blind regeneration
 ```
 
-Most config keys affect the loaded plugin immediately. `enabled` can require restart when hooks were not registered at startup, and `first_title_mode` should be treated as a restart-time ownership setting as described above.
+Most configuration options take effect immediately. Changing `enabled` requires a restart if hooks were not registered during startup, and `first_title_mode` should be treated as a startup ownership switch as noted above.
 
-`rename-now` uses blind regeneration: the current title is not shown to the model, the model must return a replacement, and review confirmation is bypassed. `retitle-all --dry-run` makes no model calls and writes nothing; without `--dry-run`, user-authored titles are skipped and eligible automatic titles are regenerated.
+`rename-now` performs blind regeneration: the current title is withheld from the model to eliminate anchoring bias, and the confirmation gate is bypassed. `retitle-all --dry-run` simulates bulk updates without making API calls or modifying data. When executed without `--dry-run`, user-defined titles are preserved and only eligible automatic titles are regenerated.
 
 ## 💰 Cost
 
-**Per-eval input is bounded, not fixed.** Opening/recent messages use `preview_chars=400` by default; the user trajectory keeps up to 40 messages at up to 300 characters each; a normal compaction summary can add up to 1200 characters. Short sessions are much smaller, but the old 1–3K-character estimate is not a reliable upper bound for current defaults.
+**Input size per evaluation is bounded, not fixed.** Opening and recent turns use `preview_chars=400` by default; the user trajectory retains up to 40 messages at up to 300 characters each; and active compaction summaries can add up to 1,200 characters. While short conversations consume far fewer tokens, long sessions with full trajectories can exceed typical 1–3K character baselines.
 
-The plugin requests `max_tokens=64`, but some OpenAI-compatible routes do not enforce that value on the wire. One measured acceptance run recorded **597 input / 1639 output tokens** because the model continued internal generation beyond the requested cap. Budget against your actual provider behavior rather than treating 64 as a hard provider limit.
+The plugin requests `max_tokens=64`, but certain OpenAI-compatible providers may not strictly enforce output limits upstream. For example, during benchmark acceptance runs, an unconstrained model produced **597 input / 1,639 output tokens** due to internal reasoning tokens before emitting JSON. Account for your specific provider's token accounting rather than assuming 64 output tokens is a hard global ceiling.
 
-**Call frequency is the main cost control:** turn-cadence gating (`every_n_turns`), time throttling (`min_interval_minutes`), provenance checks, in-flight dedup, and exclusion of cron/subagent/interrupted turns mean most turns make no title-model call. Every real call is recorded in Hermes usage stats under `task=hermes_auto_titler`.
+**Cadence gating is the primary cost guard:** turn-interval checks (`every_n_turns`), per-session cooldowns (`min_interval_minutes`), provenance validation, in-flight request deduplication, and filtering out background/subagent turns prevent redundant invocations. Every invocation is logged to Hermes usage metrics under `task=hermes_auto_titler`.
 
-A small auxiliary model is the intended cost profile, but validate it on your own sessions rather than choosing by price alone; long or compacted conversations are the useful stress cases.
+A lightweight auxiliary model matches the intended cost profile, but verify suitability against your own transcripts—particularly long, compacted sessions.
 
 ## 🧪 Development
 
@@ -203,7 +202,11 @@ uv venv .venv && uv pip install --python .venv/bin/python pytest PyYAML
 <your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>
 ```
 
-`review_sample.py` is dry-run and now mirrors the loaded production context configuration, including preview, trajectory, and summary budgets. `prompt_acceptance.py` is the isolated experiment harness: it randomly samples real non-user-titled sessions, replays chronological prefixes (for example 1, 2, 4, and final), runs the current prompt plus explicitly selected minimal, input-minimal, or detailed variants against the same prefixes, and scores candidate titles with a separate judge call when configured. With no raw endpoint override it uses Hermes' own `PluginLlm` route and the configured `title_generation` task; a raw OpenAI-compatible route is available only through explicit `HERMES_AUTOTITLER_EXPERIMENT_*` environment overrides. It never writes SessionDB; the original title is hidden from generation and judging. `retitle_all.py --dry-run` makes no model calls and writes nothing; without `--dry-run`, it really rewrites eligible automatic titles.
+`review_sample.py` runs in dry-run mode and mirrors the active production context configuration, including preview lengths, trajectory limits, and compaction summary budgets.
+
+`prompt_acceptance.py` is an isolated experimental harness: it samples real non-user-titled sessions, replays chronological conversation prefixes (e.g., turns 1, 2, 4, and final), evaluates prompt variants against identical prefixes, and optionally scores generated titles using a separate LLM judge. By default, it operates via Hermes' `PluginLlm` bridge using the configured `title_generation` task; raw OpenAI-compatible endpoints can be configured via `HERMES_AUTOTITLER_EXPERIMENT_*` environment variables. It operates strictly in read-only mode against SessionDB, concealing existing titles during generation and judging.
+
+`retitle_all.py --dry-run` previews bulk regeneration without invoking models or writing database updates. Executing without `--dry-run` applies updates to eligible automatic titles.
 
 ## 📄 License
 

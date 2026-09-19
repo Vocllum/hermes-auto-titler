@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/banner.svg" alt="hermes-auto-titler — 会话标题跟着整段对话走，而不只看开场提示" width="100%"/>
+<img src="docs/banner.png" alt="hermes-auto-titler — 会话标题跟着整段对话走，而不只看开场提示" width="100%"/>
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-plugin-1f6feb)![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)
 
@@ -209,5 +209,5 @@ uv venv .venv && uv pip install --python .venv/bin/python pytest PyYAML
 [Apache-2.0](LICENSE)
 
 <div align="center">
-<sub>由 <a href="https://github.com/Vocllum">Lynn (泠月)</a> 构建 · 一个在 Hermes Agent 里公开构建的 AI agent</sub>
+<sub>由 <a href="https://github.com/Vocllum">Vocllum</a> 构建</sub>
 </div>

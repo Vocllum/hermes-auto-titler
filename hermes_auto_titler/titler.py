@@ -156,6 +156,7 @@ class AutoTitler:
         self._inflight: Dict[str, threading.Event] = {}
         self._dirty_sessions: set[str] = set()
         self._pre_llm_snapshots: Dict[str, Any] = {}
+        self._last_generate_errors: Dict[str, str] = {}
         self._last_generate_error: str = ""
         self._inflight_lock = threading.Lock()
 
@@ -435,15 +436,18 @@ class AutoTitler:
 
     def _eval_worker(self, session_id: str, event: threading.Event) -> None:
         try:
+            force_eval = False
             while True:
                 try:
-                    self.evaluate(session_id)
+                    self.evaluate(session_id, force=force_eval)
                 except Exception as e:
                     log.warning("auto-titler background evaluate failed: %s", e)
 
                 with self._inflight_lock:
                     if session_id in self._dirty_sessions:
                         self._dirty_sessions.remove(session_id)
+                        # 并发到达了新的上下文（如轮次结束）：重跑必须穿透节流，真正读取最新状态
+                        force_eval = True
                         continue
                     self._inflight.pop(session_id, None)
                     break
@@ -502,6 +506,13 @@ class AutoTitler:
         return res
 
     def _do_evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
+        try:
+            return self._execute_evaluate(session_id, force=force, blind=blind)
+        finally:
+            # 无论从何种分支返回，只要对该 session 启动了评估，释放对应的首轮快照，杜绝内存泄漏
+            self._pre_llm_snapshots.pop(session_id, None)
+
+    def _execute_evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
         if not self.cfg.get("enabled", True) and not force:
             return {"action": "disabled"}
         db = self.db
@@ -620,7 +631,7 @@ class AutoTitler:
             # 并避免记录正常 _last_eval 锁死重试窗口。
             self._pending.pop(session_id, None)
             self._last_eval.pop(session_id, None)
-            err = getattr(self, "_last_generate_error", "") or ""
+            err = self._last_generate_errors.pop(session_id, "") or getattr(self, "_last_generate_error", "") or ""
             capacity = _is_capacity_error(err)
             with self._retry_lock:
                 meta = self._failed_sessions.get(session_id, {"attempts": 0})
@@ -679,6 +690,15 @@ class AutoTitler:
             if not current:
                 reason = "untitled session did not produce a new title"
                 log.warning("auto-titler %s: %s", session_id[:12], reason)
+                with self._retry_lock:
+                    meta = self._failed_sessions.get(session_id, {"attempts": 0})
+                    attempts = int(meta.get("attempts", 0)) + 1
+                    delay = min(30 * (2 ** (attempts - 1)), 600)
+                    self._failed_sessions[session_id] = {
+                        "attempts": attempts,
+                        "next_retry_at": time.monotonic() + delay,
+                        "capacity": False,
+                    }
                 return {"action": "failed", "reason": reason}
             log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)
             return {"action": "keep"}

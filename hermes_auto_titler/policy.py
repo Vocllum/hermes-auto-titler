@@ -240,7 +240,10 @@ class AutoTitler(_BaseAutoTitler):
                 lines.append(f"Proposed title / 候选标题：{proposed}")
         user_prompt = "\n".join(lines)
 
+        sid_key = session_id or ""
         self._last_generate_error = ""
+        if hasattr(self, "_last_generate_errors"):
+            self._last_generate_errors[sid_key] = ""
 
         try:
             res = self.ctx.llm.complete(
@@ -264,6 +267,8 @@ class AutoTitler(_BaseAutoTitler):
         except Exception as e:
             log.warning("auto-titler LLM call failed: %s", e)
             self._last_generate_error = str(e)
+            if hasattr(self, "_last_generate_errors"):
+                self._last_generate_errors[sid_key] = str(e)
             return "error", None
 
         self._record_usage(session_id, res)

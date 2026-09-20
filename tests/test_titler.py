@@ -333,11 +333,12 @@ def test_inflight_dedupe_prevents_duplicate_submission(recording_threads):
     t.on_session_end(session_id="s1", completed=True)  # n=1 → 提交
     assert len(recording_threads.instances) == 1
     t._inflight["s1"] = threading.Event()  # 模拟 worker 仍在飞行
-    t.on_session_end(session_id="s1", completed=True)  # n=2 → in-flight 去重
-    t.on_session_end(session_id="s1", completed=True)  # n=3
-    assert len(recording_threads.instances) == 1
+    t.on_session_end(session_id="s1", completed=True)  # n=2 → in-flight 标记 dirty
+    t.on_session_end(session_id="s1", completed=True)  # n=3 → 继续合并
+    assert len(recording_threads.instances) == 1  # 只有一个后台工作线程
     run_recorded(recording_threads)
-    assert len(ctx.llm.calls) == 1
+    # 合并补跑验证：n=1 跑一次，随后检测到 dirty 合并补跑一次最新状态（共 2 次，不盲目丢弃最新上下文）
+    assert len(ctx.llm.calls) == 2
 
 
 def test_async_worker_evaluates_and_dedupes():
@@ -353,10 +354,11 @@ def test_async_worker_evaluates_and_dedupes():
     assert time.time() - started < 2
     assert not release.is_set()
     assert entered.wait(5)  # worker 已进入模型调用
-    t.on_session_end(session_id="s1", completed=True)  # n=2：in-flight → 不重复
+    t.on_session_end(session_id="s1", completed=True)  # n=2：in-flight 期间到达，标记 dirty
     release.set()
     _wait_inflight_clear(t, "s1")
-    assert len(llm.calls) == 1
+    # n=1 执行完毕后检测到 dirty 自动合并补跑一次，总计 2 次
+    assert len(llm.calls) == 2
 
 
 def test_finalize_evaluates_once_throttled():

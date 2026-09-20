@@ -2,14 +2,6 @@
 
 ## Unreleased
 
-## 0.2.1 — 2026-09-21
-
-- **Prevent title drift on long conversations**: adopt stratified trajectory sampling and strip code blocks/tool logs from assistant context, reducing token usage by ~27% while keeping titles anchored to the primary topic across transient questions.
-- **Durable state persistence (`state.json`)**: persist pending candidate titles and retry queues across process restarts via atomic writes, strictly validating `base_title` to protect user-authored titles.
-- **Fix teardown title loss**: disallow external network calls and enforce a bounded wait during session termination, preventing final titles from being aborted by host shutdown deadlines.
-- **Fix lifecycle concurrency**: resolve race conditions during rapid message bursts and consolidate duplicate close events into single queued intents.
-- **Documentation & copy polish**: streamline plugin descriptions and bilingual documentation.
-
 ## 0.2.0 — 2026-09-19
 
 - **Default `first_title_mode` to `plugin`**: the plugin now owns first-title generation from turn 1 out of the box, and disables the host's built-in `auxiliary.title_generation` at plugin load to eliminate race conditions. Explicit `builtin` remains available for users who prefer Hermes to own the opening title.

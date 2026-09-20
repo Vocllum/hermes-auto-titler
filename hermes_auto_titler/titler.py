@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover
         from pathlib import Path
         return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 
-from .messages import display_width, load_context_with_summary, truncate_to_width
+from .messages import ContextStats, display_width, load_context_with_summary, truncate_to_width
 
 log = logging.getLogger(__name__)
 
@@ -523,7 +523,7 @@ class AutoTitler:
             self._pending.pop(session_id, None)
             return limit_result
 
-        recent, all_user, opening, earlier_summary = load_context_with_summary(
+        recent, all_user, opening, earlier_summary, stats = load_context_with_summary(
             db,
             session_id,
             int(self.cfg.get("recent_turns", 2)),
@@ -538,6 +538,7 @@ class AutoTitler:
                 else int(self.cfg.get("summary_preview_chars", 1200))
             ),
         )
+
         if not recent:
             # 无消息会话不可评估，移出重试账本防止无限重试
             with self._retry_lock:
@@ -571,6 +572,7 @@ class AutoTitler:
             current, recent, all_user, opening,
             force_rename=force_rename, blind=blind, proposed=proposed,
             earlier_summary=earlier_summary, session_id=session_id,
+            stats=stats,
         )
         log.info(
             "auto-titler %s: captured current=%r input=%s",
@@ -792,6 +794,7 @@ class AutoTitler:
         proposed: Optional[str] = None,
         earlier_summary: Optional[str] = None,
         session_id: Optional[str] = None,
+        stats: Optional["ContextStats"] = None,
     ) -> Tuple[str, Optional[str]]:
         raise NotImplementedError("Title decision policy must be provided by policy.AutoTitler")
 

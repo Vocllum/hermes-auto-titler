@@ -23,12 +23,13 @@ DEFAULTS: dict[str, Any] = {
     "recent_turns": 2,
     "opening_turns": 2,
     "ignore_model_messages": False,
-    "preview_chars": 400,
+    # 每条消息预览上限：设为 120 字符（约 1~2 句话），使 Assistant 与 User 消息保持对称精炼
+    "preview_chars": 120,
     "include_all_user_messages": True,
     "user_message_threshold": 40,
     "user_message_preview_chars": 300,
     # 压缩摘要进入标题评估的截断长度（日常评估用；盲改走 retitle_summary_chars）。
-    # 100 字符只够摘要标题行，中文主线常被截掉导致模型无法锚定主题。
+    # 1200 字符足以覆盖 Goal + 核心 Constraints，无需更长。
     "summary_preview_chars": 1200,
     "retitle_summary_chars": 12000,
     "title_style": "concise",

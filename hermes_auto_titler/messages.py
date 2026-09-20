@@ -7,7 +7,18 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+
+@dataclass
+class ContextStats:
+    """话题持续性与可见消息覆盖统计，辅助标题评估模型判断主线。"""
+
+    total_user_msgs: int = 0           # 全部可见用户消息数
+    total_visible_pairs: int = 0       # 压缩后可见的 (role, text) 对数
+    has_compaction: bool = False        # 是否经历过上下文压缩
+    total_turns: int = 0               # 压缩后可见的真实用户轮数
 
 
 def char_cols(ch: str) -> int:
@@ -114,6 +125,47 @@ _HANDOFF_REPLAY_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+_TOOL_SYNTAX_RE = re.compile(r"\[(?:tool|terminal|patch|read_file|search_files|write_file)[^\]]*\]", re.IGNORECASE)
+
+
+def clean_assistant_dialog(text: str) -> str:
+    """剔除代码块和工具调用标记，提取纯净的自然语言对白与任务状态结论。"""
+    if not text:
+        return ""
+    t = _CODE_BLOCK_RE.sub(" [代码] ", text)
+    t = _TOOL_SYNTAX_RE.sub("", t)
+    lines = [line.strip() for line in t.splitlines() if line.strip()]
+    return " ".join(lines)
+
+
+def _extract_compaction_summary(text: str) -> Optional[str]:
+    """从 ``[CONTEXT COMPACTION — REFERENCE ONLY]`` 包装中提取摘要正文。
+
+    Hermes 的上下文压缩把整段摘要包裹在一个长指令前导段里。前导段以
+    ``avoid repeating it:`` 结尾，摘要正文在其后；``--- END OF CONTEXT
+    SUMMARY ---`` 之前。提取这段正文供标题评估使用。
+    """
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not t.lstrip().lower().startswith("[context compaction"):
+        return None
+    # 找到前导段结尾
+    marker = "avoid repeating it:"
+    idx = t.lower().find(marker)
+    if idx < 0:
+        return None
+    body_start = idx + len(marker)
+    # 找到结束标记
+    end_match = _HANDOFF_END_RE.search(t)
+    body_end = end_match.start() if end_match else len(t)
+    body = t[body_start:body_end].strip()
+    if not body:
+        return None
+    # 清洗掉 Hermes 写给主 Agent 的框架级行为指令，避免误导标题模型偏向尾部
+    body = re.sub(r"(?i)historical only;\s*newer protected-tail messages after this summary win\.?", "", body)
+    body = re.sub(r"(?i)respond ONLY to the latest user message.*?\n", "", body)
+    return body.strip() if body.strip() else None
+
 
 def clean_captured_text(text: str) -> Optional[str]:
     """Remove Hermes handoff wrappers while preserving the real user turn.
@@ -208,12 +260,18 @@ def _sample_turns(
     user_text: Optional[str] = None
     assistant_text: Optional[str] = None
 
+    def _apply_preview(role: str, text: str) -> str:
+        try:
+            return preview(role, text)
+        except TypeError:
+            return preview(text)
+
     def flush() -> None:
         if user_text is None:
             return
-        turn = [("user", preview(user_text))]
+        turn = [("user", _apply_preview("user", user_text))]
         if assistant_text is not None:
-            turn.append(("assistant", preview(assistant_text)))
+            turn.append(("assistant", _apply_preview("assistant", assistant_text)))
         turns.append(turn)
 
     for role, text in pairs:
@@ -243,13 +301,16 @@ def load_context_with_summary(
     List[Tuple[str, str]],
     List[Tuple[str, str]],
     Optional[str],
+    ContextStats,
 ]:
-    """返回 (recent, all_user, opening, earlier_summary)。
+    """返回 (recent, all_user, opening, earlier_summary, stats)。
 
     earlier_summary 只在可见消息中没有真实 opening、且存在压缩摘要时提供；
     它永远不进入 opening、recent 或用户意图轨迹。summary_chars>0 时用它
     截断摘要（retitle 盲改场景：模型没有当前标题锚点，需要更长摘要来恢复
     Subject）；0 = 沿用 preview_chars。提示强度由调用方决定。
+
+    stats 包含话题持续性与可见消息覆盖统计，用于辅助模型判断主线。
     """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
@@ -262,7 +323,16 @@ def load_context_with_summary(
             continue
         if ignore_model_messages and role == "assistant":
             continue
-        text = clean_captured_text(message_text(m.get("content")))
+        raw_text = message_text(m.get("content"))
+        # 优先检测 [CONTEXT COMPACTION] 包装的压缩摘要：clean_captured_text
+        # 会把它当作 handoff wrapper 丢弃（只保留末尾跟随的真实用户消息），
+        # 但摘要正文本身包含主线信息，标题评估需要它。
+        compaction_body = _extract_compaction_summary(raw_text)
+        if compaction_body:
+            summaries.append(compaction_body)
+            saw_summary = True
+            # 不 continue——继续走 clean_captured_text 提取末尾可能的真实用户消息
+        text = clean_captured_text(raw_text)
         if not text:
             continue
         if is_summary(text):
@@ -281,7 +351,9 @@ def load_context_with_summary(
             continue
         pairs.append((role, text))
 
-    def preview(text: str) -> str:
+    def preview(role: str, text: str) -> str:
+        if role == "assistant":
+            text = clean_assistant_dialog(text)
         if preview_chars <= 0 or len(text) <= preview_chars:
             return text
         parts = [p.strip() for p in _SENT_RE.split(text) if p.strip()]
@@ -307,7 +379,15 @@ def load_context_with_summary(
     if user_message_preview_chars > 0:
         users = [(r, smart_preview(t, user_message_preview_chars)) for r, t in users]
     users = sample_user_messages(users, user_message_threshold)
-    return recent, (users if include_all_user else []), opening, earlier_summary
+
+    # 话题持续性统计
+    stats = ContextStats(
+        total_user_msgs=sum(1 for r, _ in pairs if r == "user"),
+        total_visible_pairs=len(pairs),
+        has_compaction=saw_summary,
+        total_turns=len(turns),
+    )
+    return recent, (users if include_all_user else []), opening, earlier_summary, stats
 
 
 def load_context(
@@ -322,7 +402,7 @@ def load_context(
     user_message_preview_chars: int = 0,
 ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
     """兼容旧调用：返回 (recent, all_user, opening)，不暴露摘要弱提示。"""
-    recent, all_user, opening, _ = load_context_with_summary(
+    recent, all_user, opening, _, _stats = load_context_with_summary(
         db,
         session_id,
         recent_turns,

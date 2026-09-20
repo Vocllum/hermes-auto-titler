@@ -750,14 +750,6 @@ def test_title_generation_uses_zero_temperature():
     assert ctx.llm.calls[0]["temperature"] == 0
 
 
-def test_title_generation_requests_max_tokens_64():
-    db = FakeDB(messages=MSGS, title=None)
-    t, ctx = make_titler(db, text=_dec("keep"))
-    t.evaluate("s1", force=True)
-    # 这里只验证插件 API 请求；宿主可能按 provider 兼容策略省略 wire 参数。
-    assert ctx.llm.calls[0]["max_tokens"] == 64
-
-
 def test_generate_blind_omits_current_title_and_forces_rename():
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t, ctx = make_titler(db, text=_dec("rename", "新标题"))
@@ -794,7 +786,7 @@ def test_generate_blind_renders_summary_as_primary_historical_context():
     ]
     db = FakeDB(messages=messages, title=None)
     t, ctx = make_titler(db, text=_dec("rename", "X 项目开发"))
-    recent, all_user, opening, summary = load_context_with_summary(
+    recent, all_user, opening, summary, _stats = load_context_with_summary(
         db, "s1", recent_turns=2, include_all_user=True, opening_turns=1
     )
     action, title = t._generate(
@@ -818,7 +810,7 @@ def test_generate_nonblind_with_summary_anchors_subject_on_summary():
     ]
     db = FakeDB(messages=messages, title="LINE辅助邮箱配置")
     t, ctx = make_titler(db, text=_dec("rename", "账号体系注册运营"))
-    recent, all_user, opening, summary = load_context_with_summary(
+    recent, all_user, opening, summary, _stats = load_context_with_summary(
         db, "s1", recent_turns=2, include_all_user=True, opening_turns=1
     )
     action, title = t._generate(

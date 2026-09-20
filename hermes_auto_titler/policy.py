@@ -9,7 +9,10 @@ Keeps title judgment and review semantics separate from lifecycle / DB plumbing:
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from .messages import ContextStats
 
 from .titler import (
     AutoTitler as _BaseAutoTitler,
@@ -83,6 +86,7 @@ class AutoTitler(_BaseAutoTitler):
         proposed: Optional[str] = None,
         earlier_summary: Optional[str] = None,
         session_id: Optional[str] = None,
+        stats: Optional["ContextStats"] = None,
     ) -> Tuple[str, Optional[str]]:
         cfg_len = self.cfg.get("max_title_length")
         max_title_len = int(cfg_len) if cfg_len is not None else 24
@@ -150,11 +154,14 @@ class AutoTitler(_BaseAutoTitler):
         concise_system = (
             "Maintain a concise sidebar title for this chat. Return JSON only, with no explanation.\n"
             f"{contract}\n{decision}\n{style_req}\nStrategy: {strategy}. {strategy_rule}\n"
-            "Judge the conversation before the current or proposed title. The user's sustained goals are the strongest evidence; "
-            "assistant text may clarify them but cannot create a subject. Prefer the durable subject over a transient latest turn, "
-            "one-off subtask, tool, error, command, or implementation detail. A tool or detail remains the subject when the user is "
-            "explicitly working on it. Use only visible evidence and do not invent details. If several durable subjects remain important, "
-            "combine them only when useful for identifying the session.\n"
+            "The title must capture the durable subject and core identity of this conversation as a whole, "
+            "not merely the latest subtask. The current title serves as the incumbent identity: keep it unless "
+            "there is a clear, durable mismatch. User messages are the primary evidence of intent; assistant "
+            "messages provide evidence of completed outcomes. Recency alone is not evidence of a phase shift: "
+            "do not replace the incumbent subject merely because a topic appears repeatedly near the end. "
+            "Rename only when: (a) refining the title to better capture the durable subject, or (b) the prior "
+            "goal is clearly completed/ended, and a persistent new workstream has become the main subject. "
+            "Disregard incidental tool traces, code blocks, and transient troubleshooting.\n"
             f"{language_rule} Preserve important product names, repository names, filenames, commands, and identifiers exactly. "
             f"Keep the title natural, specific, and {len_hint}; use no surrounding quotes or trailing punctuation."
         )
@@ -253,7 +260,6 @@ class AutoTitler(_BaseAutoTitler):
                     }
                 ),
                 temperature=0,
-                max_tokens=int(self.cfg.get("experiment_max_tokens") or 64),
                 timeout=30,
                 purpose="auto-title",
             )

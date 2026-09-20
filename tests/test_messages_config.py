@@ -155,7 +155,7 @@ def test_load_context_filters_system_noise():
         {"role": "user", "content": "[Recent Summary (d0, node 1)] ## 当前状态"},
     ]
     db = FakeDB(conv)
-    recent, all_user, opening, summary = load_context_with_summary(
+    recent, all_user, opening, summary, _stats = load_context_with_summary(
         db, "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     roles_texts = [t for _, t in recent]
@@ -198,7 +198,7 @@ def test_load_context_deduplicates_replayed_adjacent_user_messages():
         {"role": "assistant", "content": "已处理"},
         {"role": "user", "content": "同一个请求"},
     ]
-    _, all_user, opening, _ = load_context_with_summary(
+    _, all_user, opening, _, _stats = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     assert all_user == [("user", "同一个请求"), ("user", "同一个请求")]
@@ -217,7 +217,7 @@ def test_load_context_summary_hint_only_when_opening_is_missing():
         {"role": "user", "content": "[Recent Summary (d0, node 5)] # 更早的历史"},
         {"role": "user", "content": "m2"},
     ]
-    _, all_user, opening, summary = load_context_with_summary(
+    _, all_user, opening, summary, _stats = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     # 摘要永远不进入 opening；最早摘要单独作为弱提示
@@ -233,7 +233,7 @@ def test_load_context_summary_hint_only_when_opening_is_missing():
         {"role": "user", "content": "[Session Arc Summary (d1, node 2)] 压缩摘要"},
         {"role": "user", "content": "后续消息"},
     ]
-    _, _, op2, summary2 = load_context_with_summary(
+    _, _, op2, summary2, _stats = load_context_with_summary(
         FakeDB(real_opening), "s1", recent_turns=2, include_all_user=True, opening_turns=1
     )
     assert summary2 is None
@@ -248,7 +248,7 @@ def test_load_context_recognizes_durable_summary_prefix():
         {"role": "assistant", "content": "a1"},
         {"role": "user", "content": "m2"},
     ]
-    _, all_user, opening, summary = load_context_with_summary(
+    _, all_user, opening, summary, _stats = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     assert opening[0] == ("user", "m1")
@@ -261,7 +261,7 @@ def test_load_context_summary_hint_truncated():
         {"role": "user", "content": "[Recent Summary (d0, node 1)] " + "y" * 500},
         {"role": "user", "content": "m1"},
     ]
-    _, _, opening, summary = load_context_with_summary(
+    _, _, opening, summary, _stats = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
         preview_chars=200,
     )
@@ -276,14 +276,14 @@ def test_load_context_summary_hint_summary_chars_override():
         {"role": "user", "content": "m1"},
     ]
     # summary_chars>0 时摘要按它截断，而不是 preview_chars
-    _, _, _, summary = load_context_with_summary(
+    _, _, _, summary, _stats = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
         preview_chars=200, summary_chars=400,
     )
     assert summary is not None and len(summary) <= 401
     assert summary.endswith("…")
     # summary_chars=0（默认）沿用 preview_chars
-    _, _, _, summary2 = load_context_with_summary(
+    _, _, _, summary2, _stats = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
         preview_chars=200,
     )

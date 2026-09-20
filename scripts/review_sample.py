@@ -91,7 +91,7 @@ def main():
     for i, (row, tsrc) in enumerate(picked, 1):
         sid = row["id"]
         current = row.get("title") or ""
-        recent, all_user, opening, earlier_summary = load_context_with_summary(
+        recent, all_user, opening, earlier_summary, _stats = load_context_with_summary(
             db,
             sid,
             recent_turns=int(cfg.get("recent_turns", 2)),

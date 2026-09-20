@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.1 — 2026-09-21
+
+- **Long-session title tracking**: evaluate opening intent, topic shifts, and late instructions to track genuine conversation progress, preventing titles from drifting due to transient follow-ups or tool logs.
+- **Compaction support and noise filtering**: correctly handle Hermes compaction summaries while removing code blocks and tool logs from title evaluation context.
+- **State persistence**: persist pending candidate titles and retry queues to disk across process restarts; protect user-edited titles.
+- **Shutdown timeout protection**: replace external network calls during session exit with bounded local finalization, preventing title loss from host termination timeouts.
+- **Lifecycle fixes**: resolve first-turn concurrency races, merge duplicate shutdown events, and fix omitted retries for untitled sessions.
+
 ## 0.2.0 — 2026-09-19
 
 - **Default `first_title_mode` to `plugin`**: the plugin now owns first-title generation from turn 1 out of the box, and disables the host's built-in `auxiliary.title_generation` at plugin load to eliminate race conditions. Explicit `builtin` remains available for users who prefer Hermes to own the opening title.

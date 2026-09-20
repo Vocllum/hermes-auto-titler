@@ -4,7 +4,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-plugin-1f6feb)![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)
 
-*Topic-aware session title maintenance for [Hermes Agent](https://github.com/NousResearch/hermes-agent), with provenance-safe writes and long-horizon intent tracking.*
+*Topic-aware session title tracking for [Hermes Agent](https://github.com/NousResearch/hermes-agent), with provenance-safe writes and long-horizon intent tracking.*
 
 [Features](#-features) · [How it works](#-how-it-works) · [Install](#-install) · [Configuration](#%EF%B8%8F-configuration) · [Commands](#-commands) · [简体中文](README.zh-CN.md)
 
@@ -14,7 +14,7 @@
 
 Hermes names a session from its opening exchange, but conversations evolve and titles don't. A chat that starts with *"how do i fix the thing with…"* can turn into an urgent Redis memory leak investigation and production deploy while the sidebar label stays anchored to the first message.
 
-**hermes-auto-titler** maintains session labels across their full lifecycle. It periodically checks whether an auto-generated title still matches the user's actual intent, updates the label when the conversation genuinely shifts direction, and never touches titles you set yourself.
+**hermes-auto-titler** maintains session labels across their full lifecycle. It periodically evaluates whether an auto-generated title still reflects the conversation's trajectory, updating the label as topics evolve while protecting user-authored titles.
 
 ```text
 ┌─ SESSIONS ────────────────────────────────────────────────┐

@@ -1,7 +1,6 @@
 """AutoTitler 核心逻辑测试。"""
 
 import contextvars
-import json
 import sys
 import threading
 import time
@@ -265,23 +264,13 @@ def test_every_n_turns_trigger(recording_threads):
     assert len(ctx.llm.calls) == 1
 
 
-def test_close_signal_with_reason_queues_without_network(tmp_path):
+def test_close_signal_with_reason_evaluates_throttled():
     db = FakeDB(messages=MSGS, title=None)
     t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 10})
-    t._state_path = tmp_path / "state.json"
-
     t.on_session_end(session_id="s1", reason="shutdown", interrupted=True)
-
-    assert ctx.llm.calls == []
-    assert t._failed_sessions["s1"]["reason"] == "finalize"
-    state = json.loads(t._state_path.read_text(encoding="utf-8"))
-    assert state["sessions"]["s1"]["reason"] == "finalize"
-
-    # finalize 是同一关闭入口：重复信号更新同一条记录，不发起第二条任务。
+    assert len(ctx.llm.calls) == 1  # 真实关闭信号 → 评估（首次无节流）
     t.on_session_end(session_id="s1", reason="shutdown", interrupted=True)
-    state = json.loads(t._state_path.read_text(encoding="utf-8"))
-    assert list(state["sessions"]) == ["s1"]
-    assert ctx.llm.calls == []
+    assert len(ctx.llm.calls) == 1  # force=False：min_interval 节流生效
 
 
 def test_bare_interruption_not_counted_or_evaluated(recording_threads):
@@ -372,17 +361,13 @@ def test_async_worker_evaluates_and_dedupes():
     assert len(llm.calls) == 2
 
 
-def test_finalize_queues_once_without_network(tmp_path):
+def test_finalize_evaluates_once_throttled():
     db = FakeDB(messages=MSGS, title=None)
     t, ctx = make_titler(db, text=_dec("keep"))
-    t._state_path = tmp_path / "state.json"
-
     t.on_session_finalize(session_id="s1", platform="cli", reason="session_boundary")
+    assert len(ctx.llm.calls) == 1
     t.on_session_finalize(session_id="s1", platform="cli", reason="session_boundary")
-
-    assert ctx.llm.calls == []
-    state = json.loads(t._state_path.read_text(encoding="utf-8"))
-    assert list(state["sessions"]) == ["s1"]
+    assert len(ctx.llm.calls) == 1  # force=False 节流，不重复
 
 
 def test_finalize_skips_when_eval_in_flight():
@@ -403,17 +388,13 @@ def test_finalize_skips_when_eval_in_flight():
     assert len(llm.calls) == 1  # 关闭不重复发起第二趟评估，且已等待第一趟安全完成
 
 
-def test_close_signal_then_finalize_share_one_queue_record(tmp_path):
+def test_close_signal_then_finalize_does_not_double_call():
     db = FakeDB(messages=MSGS, title=None)
     t, ctx = make_titler(db, text=_dec("keep"))
-    t._state_path = tmp_path / "state.json"
-
     t.on_session_end(session_id="s1", reason="shutdown", interrupted=True)
+    assert len(ctx.llm.calls) == 1
     t.on_session_finalize(session_id="s1", platform="cli", reason="session_boundary")
-
-    assert ctx.llm.calls == []
-    state = json.loads(t._state_path.read_text(encoding="utf-8"))
-    assert list(state["sessions"]) == ["s1"]
+    assert len(ctx.llm.calls) == 1  # 双重关闭信号仍只评估一次（节流）
 
 
 def test_finalize_respects_on_close_disabled():
@@ -1088,7 +1069,7 @@ def test_config_command_rejects_invalid_and_accepts_new_keys(monkeypatch):
 def test_register_registers_hooks_and_command(monkeypatch):
     import hermes_auto_titler as pkg
 
-    hooks, cmds, lifecycle = [], [], []
+    hooks, cmds = [], []
 
     class FakeCtx:
         def register_hook(self, name, fn):
@@ -1098,13 +1079,11 @@ def test_register_registers_hooks_and_command(monkeypatch):
             cmds.append(name)
 
     monkeypatch.setattr(pkg, "load_config", lambda: {**DEFAULTS, "enabled": True})
-    monkeypatch.setattr(pkg.AutoTitler, "restore_state", lambda self: lifecycle.append("restore"))
-    monkeypatch.setattr(pkg.AutoTitler, "start_retry_loop", lambda self: lifecycle.append("start"))
+    monkeypatch.setattr(pkg.AutoTitler, "start_retry_loop", lambda self: None)
     pkg.register(FakeCtx())
     assert "on_session_end" in hooks
     assert "on_session_finalize" in hooks
     assert "autotitler" in cmds
-    assert lifecycle == ["restore", "start"]
 
     hooks.clear()
     cmds.clear()
@@ -1757,10 +1736,9 @@ def test_retry_backoff_cooldown_not_suppressed_by_last_eval(monkeypatch):
     assert len(attempts) == 2
 
 
-def test_finalize_waits_at_most_100ms_for_inflight_worker(tmp_path):
-    """关闭只短暂等待已有 worker；超时后持久排队并立即交还控制权。"""
+def test_finalize_waits_for_inflight_worker_completion():
+    """Parallax Review [BLOCKER #2]: finalize 必须等待已有 in-flight worker 完成，不能直接跳过丢失最后写库。"""
     import threading
-
     db = FakeDB(messages=MSGS, title="旧标题", source="derived")
     entered = threading.Event()
     release = threading.Event()
@@ -1772,19 +1750,17 @@ def test_finalize_waits_at_most_100ms_for_inflight_worker(tmp_path):
             return SimpleNamespace(text='{"action":"rename","title":"终局成功标题"}', usage={})
 
     t = AutoTitler(SimpleNamespace(llm=BlockedLlm()), {**DEFAULTS, "every_n_turns": 1}, db=db)
-    t._state_path = tmp_path / "state.json"
     t.on_session_end(session_id="s1", completed=True)
     assert entered.wait(timeout=5)
 
-    started = time.monotonic()
-    t.on_session_finalize(session_id="s1")
-    elapsed = time.monotonic() - started
+    # 此时 worker 在飞行中。主线程 finalize 不应该抛弃，而是等待 worker 完成
+    def do_release():
+        time.sleep(0.05)
+        release.set()
 
-    assert elapsed < 0.25
-    assert db.title == "旧标题"
-    assert t._failed_sessions["s1"]["reason"] == "finalize budget exceeded"
-    release.set()
-    _wait_inflight_clear(t, "s1")
+    threading.Thread(target=do_release, daemon=True).start()
+    t.on_session_finalize(session_id="s1")
+
     assert db.title == "终局成功标题"
 
 

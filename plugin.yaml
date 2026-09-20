@@ -1,6 +1,6 @@
 name: hermes-auto-titler
-version: 0.2.1
-description: "Topic-aware session title tracking for Hermes Agent across evolving conversations."
+version: 0.2.0
+description: "Topic-aware session re-titling for Hermes Agent"
 author: "Vocllum"
 provides_hooks:
   - pre_llm_call

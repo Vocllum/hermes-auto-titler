@@ -28,7 +28,6 @@ import logging
 import re
 import threading
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_state import SessionDB
@@ -43,7 +42,6 @@ except ImportError:  # pragma: no cover
         return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 
 from .messages import display_width, load_context_with_summary, truncate_to_width
-from .state import StateStore
 
 log = logging.getLogger(__name__)
 
@@ -161,8 +159,6 @@ class AutoTitler:
         self._last_generate_errors: Dict[str, str] = {}
         self._last_generate_error: str = ""
         self._inflight_lock = threading.Lock()
-        self._state_lock = threading.RLock()
-        self._state_path = Path(get_hermes_home()) / "plugins" / "hermes-auto-titler" / "state.json"
 
     @property
     def db(self) -> SessionDB:
@@ -243,6 +239,7 @@ class AutoTitler:
             return
         self._current_session = session_id
         self._close_eval(session_id)
+        self._retry_failed_sessions()
 
     # -- 评估调度 -----------------------------------------------------------
 
@@ -274,8 +271,6 @@ class AutoTitler:
             for sid in expired:
                 self._failed_sessions.pop(sid, None)
 
-        if expired:
-            self._persist_state()
         if not candidates:
             return
 
@@ -291,15 +286,7 @@ class AutoTitler:
                     to_remove.append(sid)
                     continue
                 cur_title = self.db.get_session_title(sid)
-                if (
-                    cur_title
-                    and src == SessionDB.TITLE_SOURCE_LLM
-                    and not self._pending.get(sid)
-                    and self._failed_sessions.get(sid, {}).get("reason") not in {
-                        "finalize",
-                        "finalize budget exceeded",
-                    }
-                ):
+                if cur_title and src == SessionDB.TITLE_SOURCE_LLM:
                     to_remove.append(sid)
                     continue
             except Exception:
@@ -312,7 +299,6 @@ class AutoTitler:
             with self._retry_lock:
                 for sid in to_remove:
                     self._failed_sessions.pop(sid, None)
-            self._persist_state()
 
         for sid in to_retry:
             log.info("auto-titler retry: triggering compensation eval for %s", sid[:12])
@@ -472,148 +458,39 @@ class AutoTitler:
             event.set()
 
     def _close_eval(self, session_id: str) -> None:
-        """Persist finalization intent without starting a network call.
+        """真实关闭评估：正常节流（force=False）；已有 in-flight 评估时等待其完成。
 
-        An already-running evaluation may finish inside the 100ms grace period.  If
-        it does not, closing still returns promptly and the durable retry ledger is
-        resumed during a later normal process lifetime.
+        刻意保持同步：关闭是用户可见的终局动作，若已有 daemon 线程在执行，必须
+        等待其自然完成（底层 complete 调用本身已有 timeout=30s，此处无界 wait
+        直至该调用正常返回或超时异常释放），避免硬编码 15s 提前 return 导致守护
+        线程在进程退出时被操作系统终止、丢失写库。
         """
         if not self.cfg.get("on_close", True):
             return
 
+        existing_event = None
+        new_event = None
         with self._inflight_lock:
-            existing_event = self._inflight.get(session_id)
+            if session_id in self._inflight:
+                existing_event = self._inflight[session_id]
+            else:
+                new_event = threading.Event()
+                self._inflight[session_id] = new_event
 
         if existing_event is not None:
-            log.info(
-                "auto-titler close: waiting at most 100ms for in-flight worker for %s",
-                session_id[:12],
-            )
-            if existing_event.wait(0.1):
-                return
-            reason = "finalize budget exceeded"
-        else:
-            reason = "finalize"
-
-        self._queue_session(session_id, reason=reason)
-
-    def _queue_session(self, session_id: str, *, reason: str) -> None:
-        """Upsert a retry intent and durably snapshot scheduling state."""
-        try:
-            base_title = self.db.get_session_title(session_id)
-        except Exception:
-            base_title = None
-        pending = self._pending.get(session_id) or {}
-        now_wall = time.time()
-        with self._retry_lock:
-            previous = self._failed_sessions.get(session_id, {})
-            self._failed_sessions[session_id] = {
-                "attempts": int(previous.get("attempts", 0)),
-                "next_retry_at": time.monotonic(),
-                "capacity": bool(previous.get("capacity", False)),
-                "reason": reason,
-                "queued_at": now_wall,
-                "base_title": pending.get("base_title", base_title),
-                "candidate": pending.get("title"),
-                "confirmations": int(pending.get("confirmations", 0)),
-                "expected_title": base_title,
-            }
-        self._persist_state()
-
-    def _persistent_sessions(self) -> Dict[str, Dict[str, Any]]:
-        """Build the serialized view while keeping monotonic clocks process-local."""
-        now_mono = time.monotonic()
-        now_wall = time.time()
-        with self._retry_lock:
-            failed = {sid: dict(meta) for sid, meta in self._failed_sessions.items()}
-        sessions: Dict[str, Dict[str, Any]] = {}
-        session_ids = set(failed) | set(self._pending) | set(self._rename_counts)
-        for sid in session_ids:
-            meta = failed.get(sid, {})
-            pending = self._pending.get(sid, {})
-            try:
-                current_title = self.db.get_session_title(sid)
-            except Exception:
-                current_title = meta.get("base_title")
-            next_retry_at = float(meta.get("next_retry_at", now_mono))
-            sessions[sid] = {
-                "base_title": pending.get("base_title", meta.get("base_title") or current_title),
-                "candidate": pending.get("title", meta.get("candidate")),
-                "confirmations": int(pending.get("confirmations", meta.get("confirmations", 0))),
-                "expected_title": meta.get("expected_title", current_title),
-                "next_retry_at": now_wall + max(0.0, next_retry_at - now_mono),
-                "attempts": int(meta.get("attempts", 0)),
-                "capacity": bool(meta.get("capacity", False)),
-                "queued_at": float(meta.get("queued_at", now_wall)),
-                "reason": str(meta.get("reason") or "error"),
-                "rename_count": int(self._rename_counts.get(sid, 0)),
-            }
-        return sessions
-
-    def _persist_state(self) -> None:
-        try:
-            with self._state_lock:
-                StateStore(self._state_path).save(self._persistent_sessions())
-        except Exception:
-            log.warning("auto-titler state persistence failed", exc_info=True)
-
-    def restore_state(self) -> None:
-        """Restore valid pending/retry state; stale title snapshots are discarded."""
-        if not self._state_path.is_file():
-            return
-        try:
-            with self._state_lock:
-                sessions = StateStore(self._state_path).load()["sessions"]
-        except Exception:
-            log.warning("auto-titler state load failed; starting with empty state", exc_info=True)
+            log.info("auto-titler close: waiting for in-flight worker for %s", session_id[:12])
+            existing_event.wait()
             return
 
-        now_mono = time.monotonic()
-        now_wall = time.time()
-        restored = 0
-        unresolved = False
-        for sid, raw in sessions.items():
-            if not isinstance(sid, str) or not isinstance(raw, dict):
-                continue
-            try:
-                current = self.db.get_session_title(sid)
-                source = self.db.get_session_title_source(sid)
-            except Exception:
-                # DB startup can race plugin registration. Keep the on-disk record
-                # untouched so a later restart can validate and recover it.
-                unresolved = True
-                continue
-            base_title = raw.get("base_title")
-            if source == SessionDB.TITLE_SOURCE_USER or current != base_title:
-                continue
-            candidate = raw.get("candidate")
-            if candidate:
-                self._pending[sid] = {
-                    "title": str(candidate),
-                    "base_title": base_title,
-                    "confirmations": max(0, int(raw.get("confirmations", 0))),
-                }
-            retry_wall = float(raw.get("next_retry_at", now_wall))
-            with self._retry_lock:
-                self._failed_sessions[sid] = {
-                    "attempts": max(0, int(raw.get("attempts", 0))),
-                    "next_retry_at": now_mono + max(0.0, retry_wall - now_wall),
-                    "capacity": bool(raw.get("capacity", False)),
-                    "reason": str(raw.get("reason") or "error"),
-                    "queued_at": float(raw.get("queued_at", now_wall)),
-                    "base_title": base_title,
-                    "candidate": candidate,
-                    "confirmations": max(0, int(raw.get("confirmations", 0))),
-                    "expected_title": raw.get("expected_title"),
-                }
-            rename_count = max(0, int(raw.get("rename_count", 0)))
-            if rename_count:
-                self._rename_counts[sid] = rename_count
-            restored += 1
-        if restored:
-            log.info("auto-titler state: restored %d session(s)", restored)
-        if not unresolved:
-            self._persist_state()
+        try:
+            self.evaluate(session_id, force=False)
+        except Exception as e:
+            log.warning("auto-titler close evaluate failed: %s", e)
+        finally:
+            with self._inflight_lock:
+                self._inflight.pop(session_id, None)
+            if new_event:
+                new_event.set()
 
     # -- 评估 ---------------------------------------------------------------
 
@@ -630,12 +507,10 @@ class AutoTitler:
 
     def _do_evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
         try:
-            result = self._execute_evaluate(session_id, force=force, blind=blind)
-            return result
+            return self._execute_evaluate(session_id, force=force, blind=blind)
         finally:
             # 无论从何种分支返回，只要对该 session 启动了评估，释放对应的首轮快照，杜绝内存泄漏
             self._pre_llm_snapshots.pop(session_id, None)
-            self._persist_state()
 
     def _execute_evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
         if not self.cfg.get("enabled", True) and not force:

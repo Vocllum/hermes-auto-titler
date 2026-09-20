@@ -51,7 +51,6 @@ def register(ctx) -> None:
         # 真实会话关闭/终局（CLI 退出、TUI 关闭、gateway 过期、/new）走 lifecycle
         # hook：正常节流（force=False），且不重复进行中的自动评估
         ctx.register_hook("on_session_finalize", titler.on_session_finalize)
-        titler.restore_state()
         titler.start_retry_loop()
     ctx.register_command(
         "autotitler",

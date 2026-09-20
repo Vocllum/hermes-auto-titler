@@ -9,10 +9,7 @@ Keeps title judgment and review semantics separate from lifecycle / DB plumbing:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, List, Optional, Tuple
-
-if TYPE_CHECKING:
-    from .messages import ContextStats
+from typing import List, Optional, Tuple
 
 from .titler import (
     AutoTitler as _BaseAutoTitler,
@@ -86,7 +83,6 @@ class AutoTitler(_BaseAutoTitler):
         proposed: Optional[str] = None,
         earlier_summary: Optional[str] = None,
         session_id: Optional[str] = None,
-        stats: Optional["ContextStats"] = None,
     ) -> Tuple[str, Optional[str]]:
         cfg_len = self.cfg.get("max_title_length")
         max_title_len = int(cfg_len) if cfg_len is not None else 24

@@ -786,7 +786,7 @@ def test_generate_blind_renders_summary_as_primary_historical_context():
     ]
     db = FakeDB(messages=messages, title=None)
     t, ctx = make_titler(db, text=_dec("rename", "X 项目开发"))
-    recent, all_user, opening, summary, _stats = load_context_with_summary(
+    recent, all_user, opening, summary = load_context_with_summary(
         db, "s1", recent_turns=2, include_all_user=True, opening_turns=1
     )
     action, title = t._generate(
@@ -810,7 +810,7 @@ def test_generate_nonblind_with_summary_anchors_subject_on_summary():
     ]
     db = FakeDB(messages=messages, title="LINE辅助邮箱配置")
     t, ctx = make_titler(db, text=_dec("rename", "账号体系注册运营"))
-    recent, all_user, opening, summary, _stats = load_context_with_summary(
+    recent, all_user, opening, summary = load_context_with_summary(
         db, "s1", recent_turns=2, include_all_user=True, opening_turns=1
     )
     action, title = t._generate(
@@ -1875,3 +1875,31 @@ def test_requeue_untitled_sessions_from_db_survives_restart():
     assert "untitled" in t._failed_sessions
     assert "named" not in t._failed_sessions
     assert "manual" not in t._failed_sessions
+
+
+def test_production_default_review_protocol_e2e():
+    """在生产默认配置 rename_confirmations=1 下，验证完整的两轮审核闭环：
+    第一轮进入 pending，第二轮确认后落库并更新标题。
+    """
+    messages = [
+        {"role": "user", "content": "帮我开发一个新的自动标题插件"},
+        {"role": "assistant", "content": "好的，我们开始设计 hermes-auto-titler 架构。"},
+    ]
+    db = FakeDB(messages=messages, title="旧初始标题", source="llm")
+    llm = FakeLlm('{"action":"rename","title":"hermes-auto-titler 架构设计"}')
+    # 显式使用生产默认配置（rename_confirmations=1）
+    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS, "rename_confirmations": 1}, db=db)
+
+    # 第一轮：提出重命名候选，返回 pending，标题不落库
+    res1 = t.evaluate("s1", force=True)
+    assert res1["action"] == "pending"
+    assert res1["candidate"] == "hermes-auto-titler 架构设计"
+    assert db.get_session_title("s1") == "旧初始标题"
+
+    # 第二轮：模型背书确认该候选（approve 或再次提出相同候选），标题正式写入数据库
+    llm_approve = FakeLlm('{"action":"approve"}')
+    t.ctx.llm = llm_approve
+    res2 = t.evaluate("s1", force=True)
+    assert res2["action"] == "renamed"
+    assert res2["title"] == "hermes-auto-titler 架构设计"
+    assert db.get_session_title("s1") == "hermes-auto-titler 架构设计"

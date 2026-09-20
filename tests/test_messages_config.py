@@ -155,7 +155,7 @@ def test_load_context_filters_system_noise():
         {"role": "user", "content": "[Recent Summary (d0, node 1)] ## 当前状态"},
     ]
     db = FakeDB(conv)
-    recent, all_user, opening, summary, _stats = load_context_with_summary(
+    recent, all_user, opening, summary = load_context_with_summary(
         db, "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     roles_texts = [t for _, t in recent]
@@ -198,7 +198,7 @@ def test_load_context_deduplicates_replayed_adjacent_user_messages():
         {"role": "assistant", "content": "已处理"},
         {"role": "user", "content": "同一个请求"},
     ]
-    _, all_user, opening, _, _stats = load_context_with_summary(
+    _, all_user, opening, _ = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     assert all_user == [("user", "同一个请求"), ("user", "同一个请求")]
@@ -217,7 +217,7 @@ def test_load_context_summary_hint_only_when_opening_is_missing():
         {"role": "user", "content": "[Recent Summary (d0, node 5)] # 更早的历史"},
         {"role": "user", "content": "m2"},
     ]
-    _, all_user, opening, summary, _stats = load_context_with_summary(
+    _, all_user, opening, summary = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     # 摘要永远不进入 opening；最早摘要单独作为弱提示
@@ -233,7 +233,7 @@ def test_load_context_summary_hint_only_when_opening_is_missing():
         {"role": "user", "content": "[Session Arc Summary (d1, node 2)] 压缩摘要"},
         {"role": "user", "content": "后续消息"},
     ]
-    _, _, op2, summary2, _stats = load_context_with_summary(
+    _, _, op2, summary2 = load_context_with_summary(
         FakeDB(real_opening), "s1", recent_turns=2, include_all_user=True, opening_turns=1
     )
     assert summary2 is None
@@ -248,7 +248,7 @@ def test_load_context_recognizes_durable_summary_prefix():
         {"role": "assistant", "content": "a1"},
         {"role": "user", "content": "m2"},
     ]
-    _, all_user, opening, summary, _stats = load_context_with_summary(
+    _, all_user, opening, summary = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     assert opening[0] == ("user", "m1")
@@ -261,7 +261,7 @@ def test_load_context_summary_hint_truncated():
         {"role": "user", "content": "[Recent Summary (d0, node 1)] " + "y" * 500},
         {"role": "user", "content": "m1"},
     ]
-    _, _, opening, summary, _stats = load_context_with_summary(
+    _, _, opening, summary = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
         preview_chars=200,
     )
@@ -276,14 +276,14 @@ def test_load_context_summary_hint_summary_chars_override():
         {"role": "user", "content": "m1"},
     ]
     # summary_chars>0 时摘要按它截断，而不是 preview_chars
-    _, _, _, summary, _stats = load_context_with_summary(
+    _, _, _, summary = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
         preview_chars=200, summary_chars=400,
     )
     assert summary is not None and len(summary) <= 401
     assert summary.endswith("…")
     # summary_chars=0（默认）沿用 preview_chars
-    _, _, _, summary2, _stats = load_context_with_summary(
+    _, _, _, summary2 = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
         preview_chars=200,
     )
@@ -680,3 +680,53 @@ def test_config_command_rejects_nan_inf_and_bad_numeric_bool(monkeypatch, tmp_pa
     assert t.cfg["retitle_summary_chars"] == 0
     h("config user_message_threshold -3")
     assert t.cfg["user_message_threshold"] == 0
+
+
+def test_extract_compaction_summary_merged_carrier_and_clean_text():
+    from hermes_auto_titler.messages import _extract_compaction_summary, clean_captured_text
+
+    merged_carrier = (
+        "[PRIOR CONTEXT — for reference only; not a new message]\n"
+        "Earlier turns were compacted into the summary below.\n"
+        "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]\n"
+        "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted:\n"
+        "avoid repeating it:\n"
+        "## Historical Task Snapshot\n"
+        "User asked: 'v0.2.0 发版与文档整理'\n"
+        "Historical only; newer protected-tail messages after this summary win.\n"
+        "--- END OF CONTEXT SUMMARY ---\n"
+        "[STILL IN PROGRESS — continue current task]\n"
+        "真实的最后一条用户请求"
+    )
+
+    # 1. 摘要提取：即使带有 [PRIOR CONTEXT]，依然能定位并提取正文，且清洗掉行为指令
+    summary = _extract_compaction_summary(merged_carrier)
+    assert summary is not None
+    assert "## Historical Task Snapshot" in summary
+    assert "v0.2.0 发版与文档整理" in summary
+    assert "Historical only" not in summary
+
+    # 2. 消息清洗：正确截取 --- END OF CONTEXT SUMMARY --- 之后的真实用户指令，剥除 [STILL IN PROGRESS]
+    user_turn = clean_captured_text(merged_carrier)
+    assert user_turn == "真实的最后一条用户请求"
+
+
+def test_clean_assistant_dialog_strips_xml_control_tags_and_code():
+    from hermes_auto_titler.messages import clean_assistant_dialog
+
+    raw_assistant = (
+        "<command-message>git status</command-message>\n"
+        "<local-command-stdout>On branch main</local-command-stdout>\n"
+        "<system-reminder>Please run tests</system-reminder>\n"
+        "```python\nprint('hello')\n```\n"
+        "[tool: terminal] Ran pytest.\n"
+        "已成功完成插件发布与验证。"
+    )
+    cleaned = clean_assistant_dialog(raw_assistant)
+    assert "<command-message>" not in cleaned
+    assert "git status" not in cleaned
+    assert "<local-command-stdout>" not in cleaned
+    assert "<system-reminder>" not in cleaned
+    assert "[tool: terminal]" not in cleaned
+    assert "print('hello')" not in cleaned
+    assert "已成功完成插件发布与验证。" in cleaned

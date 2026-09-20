@@ -4,7 +4,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)![Hermes Agent](https://img.shields.io/badge/Hermes_Agent-plugin-1f6feb)![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)
 
-*为 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 提供面向主题的会话标题持续维护：保护用户手改标题，追踪长会话中的真实意图。*
+*为 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 提供面向主题的会话标题持续跟踪：长程意图演进追踪，用户手改标题严格不可变。*
 
 [English](README.md) · **简体中文**
 
@@ -14,7 +14,7 @@
 
 Hermes 可以根据开场对话生成第一版标题，但会话会发展，标题通常不会。一个从「怎么修那个……」开始的聊天，可能演变成紧急的 Redis 内存泄漏排查和生产部署，侧边栏标签还停在最初那条消息上。
 
-**hermes-auto-titler** 在整个会话生命周期内持续维护标题。它定期检查自动标题是否仍然反映用户的实际意图，在对话真正转向时更新标签，且永远不覆盖你手动设置的标题。
+**hermes-auto-titler** 在整个会话生命周期内持续维护标题。它定期评估自动标题是否仍然反映会话的实质走向，在主题演进时平滑更新标签，并严格将用户手动设置的标题视为不可变资产。
 
 ```text
 ┌─ SESSIONS ────────────────────────────────────────────────┐

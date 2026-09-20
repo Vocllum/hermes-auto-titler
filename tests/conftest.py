@@ -2,6 +2,7 @@
 
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -43,6 +44,17 @@ fake_plugin_llm.PluginLlmTextInput = PluginLlmTextInput
 fake_agent.plugin_llm = fake_plugin_llm
 sys.modules.setdefault("agent", fake_agent)
 sys.modules.setdefault("agent.plugin_llm", fake_plugin_llm)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state_path(request, monkeypatch, tmp_path):
+    """Never let unit tests write scheduling state into a live Hermes profile."""
+    if request.node.name == "test_get_db_isolates_profiles_by_hermes_home":
+        return
+    monkeypatch.setattr(
+        "hermes_auto_titler.titler.get_hermes_home",
+        lambda: Path(tmp_path),
+    )
 
 
 @pytest.fixture(autouse=True)

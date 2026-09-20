@@ -237,7 +237,7 @@ def test_rename_to_same_title_is_keep():
 
 
 def test_throttle_skips_frequent_evaluations():
-    db = FakeDB(messages=MSGS, title=None)
+    db = FakeDB(messages=MSGS, title="已有会话", source="llm")
     t, ctx = make_titler(db, text=_dec("keep"))
     t.evaluate("s1", force=True)
     n = len(ctx.llm.calls)
@@ -1009,7 +1009,7 @@ def test_auxiliary_usage_recorded_through_sessiondb():
 
 
 def test_auxiliary_usage_noop_without_api():
-    db = FakeDB(messages=MSGS, title=None)  # 无 record_auxiliary_usage（老宿主/测试 fake）
+    db = FakeDB(messages=MSGS, title="已有会话", source="llm")  # 无 record_auxiliary_usage（老宿主/测试 fake）
     t, ctx = make_titler(db, text=_dec("keep"))
     r = t.evaluate("s1", force=True)
     assert r["action"] == "keep"
@@ -1903,3 +1903,70 @@ def test_production_default_review_protocol_e2e():
     assert res2["action"] == "renamed"
     assert res2["title"] == "hermes-auto-titler 架构设计"
     assert db.get_session_title("s1") == "hermes-auto-titler 架构设计"
+
+
+def test_untitled_session_forces_rename_never_keeps():
+    """未命名会话必须强制 rename-only，绝不允许因为模型返回 keep 导致永久无标题。"""
+    db = FakeDB(messages=[{"role": "user", "content": "帮我写个脚本"}], title=None)
+    # 模型试图返回 keep
+    t = AutoTitler(SimpleNamespace(llm=FakeLlm('{"action":"keep"}')), {**DEFAULTS}, db=db)
+    # 模拟 evaluate 时传给 _generate 的 force_rename 必须为 True
+    res = t.evaluate("s1", force=True)
+    # 在 rename-only 契约下，模型返回 keep 会被判定为未能产生有效标题的 failed
+    assert res["action"] == "failed"
+    assert res["action"] != "keep"
+
+
+def test_pre_llm_call_fallback_snapshot_on_db_race():
+    """当 Hermes 触发 pre_llm_call 但数据库尚未持久化首条消息时，使用快照生成标题。"""
+    # 数据库此时是空的（模拟落盘慢于 hook 触发）
+    db = FakeDB(messages=[], title=None)
+    llm = FakeLlm('{"action":"rename","title":"首轮快照标题"}')
+    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS, "first_title_mode": "plugin"}, db=db)
+
+    # 注入首轮快照（模拟 on_pre_llm_call 捕获的用户提问）
+    t._pre_llm_snapshots["s_race"] = "这是首条用户提问"
+
+    # 评估时虽然 DB 为空，但快照生效
+    res = t.evaluate("s_race", force=True)
+    assert res["action"] == "renamed"
+    assert res["title"] == "首轮快照标题"
+
+
+def test_stale_last_generate_error_cleared_on_next_run():
+    """上一次的 503 报错不残留污染下一次的 JSON 格式错误。"""
+    from hermes_auto_titler.policy import AutoTitler as PolicyAutoTitler
+
+    class ErrorLlm:
+        def complete(self, messages, **kwargs):
+            raise RuntimeError("503 Service Unavailable")
+
+    db = FakeDB(messages=[{"role": "user", "content": "test"}], title="旧标题", source="llm")
+    t = PolicyAutoTitler(SimpleNamespace(llm=ErrorLlm()), {**DEFAULTS}, db=db)
+
+    # 第一次：503 异常
+    t.evaluate("s1", force=True)
+    assert "503" in t._last_generate_error
+
+    # 第二次：正常调用但返回非法 JSON
+    t.ctx.llm = FakeLlm("not a valid json")
+    t.evaluate("s1", force=True)
+    # 错误被清空，不再是 503
+    assert "503" not in t._last_generate_error
+
+
+def test_disabled_titler_stops_retry_and_eval():
+    """enabled: false 时，后台重试循环与常规评估完全停止。"""
+    db = FakeDB(messages=[{"role": "user", "content": "test"}], title="旧标题")
+    llm = FakeLlm('{"action":"rename","title":"新标题"}')
+    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS, "enabled": False}, db=db)
+    t._failed_sessions["s1"] = {"attempts": 0, "next_retry_at": 0}
+
+    # 重试轮询直接返回，不调用 LLM
+    t._retry_failed_sessions()
+    assert len(llm.calls) == 0
+
+    # evaluate 返回 disabled
+    res = t.evaluate("s1", force=False)
+    assert res["action"] == "disabled"
+    assert len(llm.calls) == 0

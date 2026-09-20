@@ -240,6 +240,8 @@ class AutoTitler(_BaseAutoTitler):
                 lines.append(f"Proposed title / 候选标题：{proposed}")
         user_prompt = "\n".join(lines)
 
+        self._last_generate_error = ""
+
         try:
             res = self.ctx.llm.complete(
                 messages=[

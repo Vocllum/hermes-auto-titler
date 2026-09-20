@@ -154,6 +154,9 @@ class AutoTitler:
         self._audit_log: collections.deque = collections.deque(maxlen=50)
         # 同一会话同一时刻只允许一个进行中的模型评估（hook 并发去重），记录关联的完成 Event
         self._inflight: Dict[str, threading.Event] = {}
+        self._dirty_sessions: set[str] = set()
+        self._pre_llm_snapshots: Dict[str, Any] = {}
+        self._last_generate_error: str = ""
         self._inflight_lock = threading.Lock()
 
     @property
@@ -185,6 +188,10 @@ class AutoTitler:
 
         # 仅对首轮接入且当前无标题或 derived 临时截断标题的会话触发
         if self._early_enabled() and self._early_eligible(session_id):
+            # 捕获首轮快照，解决 Hermes 持久化落盘慢于 worker 启动的真实 DB 竞态
+            u_msg = payload.get("user_message") or ""
+            if u_msg:
+                self._pre_llm_snapshots[session_id] = u_msg
             log.info("auto-titler pre_llm_call: eager evaluation for new session %s", session_id[:12])
             self._submit_eval(session_id)
 
@@ -244,6 +251,8 @@ class AutoTitler:
         - 全局背压：每轮调度最多申领少量任务（最多 2 个），避免惊群；
         - 保护校验：若会话已被用户手改标题（source=user）或已达到最大重试次数，则自动出队。
         """
+        if not self.cfg.get("enabled", True):
+            return
         now = time.monotonic()
         candidates: List[str] = []
         expired: List[str] = []
@@ -330,7 +339,7 @@ class AutoTitler:
                 self._failed_sessions[sid] = {
                     "attempts": 0,
                     "next_retry_at": now,
-                    "capacity": True,
+                    "capacity": False,
                 }
                 queued += 1
         if queued:
@@ -400,6 +409,8 @@ class AutoTitler:
         event = threading.Event()
         with self._inflight_lock:
             if session_id in self._inflight:
+                # 已有评估在进行中：标记 dirty，待当前评估完成后自动以最新上下文补跑一次（Coalescing）
+                self._dirty_sessions.add(session_id)
                 return
             self._inflight[session_id] = event
         try:
@@ -418,16 +429,27 @@ class AutoTitler:
                 session_id[:12], e,
             )
             with self._inflight_lock:
+                self._dirty_sessions.discard(session_id)
                 self._inflight.pop(session_id, None)
             event.set()
 
     def _eval_worker(self, session_id: str, event: threading.Event) -> None:
         try:
-            self.evaluate(session_id)
-        except Exception as e:
-            log.warning("auto-titler background evaluate failed: %s", e)
+            while True:
+                try:
+                    self.evaluate(session_id)
+                except Exception as e:
+                    log.warning("auto-titler background evaluate failed: %s", e)
+
+                with self._inflight_lock:
+                    if session_id in self._dirty_sessions:
+                        self._dirty_sessions.remove(session_id)
+                        continue
+                    self._inflight.pop(session_id, None)
+                    break
         finally:
             with self._inflight_lock:
+                self._dirty_sessions.discard(session_id)
                 self._inflight.pop(session_id, None)
             event.set()
 
@@ -480,6 +502,8 @@ class AutoTitler:
         return res
 
     def _do_evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
+        if not self.cfg.get("enabled", True) and not force:
+            return {"action": "disabled"}
         db = self.db
         if not force:
             last = self._last_eval.get(session_id)
@@ -540,10 +564,19 @@ class AutoTitler:
         )
 
         if not recent:
-            # 无消息会话不可评估，移出重试账本防止无限重试
-            with self._retry_lock:
-                self._failed_sessions.pop(session_id, None)
-            return {"action": "skipped", "reason": "no messages"}
+            # 如果存在 pre_llm_call 暂存的首轮快照，解决 Hermes 持久化落盘慢于 worker 启动的真实 DB 竞态
+            fallback_u = self._pre_llm_snapshots.pop(session_id, None)
+            if fallback_u:
+                user_txt = fallback_u if isinstance(fallback_u, str) else str(fallback_u.get("content", ""))
+                if user_txt:
+                    recent = [("user", user_txt)]
+                    opening = [("user", user_txt)]
+                    all_user = [("user", user_txt)]
+            if not recent:
+                # 无消息会话不可评估，移出重试账本防止无限重试
+                with self._retry_lock:
+                    self._failed_sessions.pop(session_id, None)
+                return {"action": "skipped", "reason": "no messages"}
 
         self._last_eval[session_id] = time.monotonic()
         # 压缩会话的可见消息位于摘要之后，本质上是新鲜续段，不是原始
@@ -554,9 +587,9 @@ class AutoTitler:
             recent = []
             opening = []
         # derived 是 Hermes 从首条用户消息截出的临时兜底，说明原生标题 LLM
-        # 尚未成功升级；短句也可能是「这个文件夹是做什么的」这类污染标题，
-        # 因此只要仍是 derived 就要求本次模型给出正式标题。
-        force_rename = src == SessionDB.TITLE_SOURCE_DERIVED and bool(current)
+        # 尚未成功升级；未命名的会话（current is None/empty）更必须生成标题。
+        # 因此只要无标题或仍是 derived，就强制要求本次模型给出正式标题（rename-only）。
+        force_rename = not current or src == SessionDB.TITLE_SOURCE_DERIVED
         # 评审协议：0 = 关闭（单轮评估直接改名写库）；
         # 1 = 确认 1 次（第 1 轮产生候选 pending，第 2 轮模型觉得上一轮改名可以则 approve 采用落库）；
         # derived/无标题升级与 blind 终局评估旁路直接提交。
@@ -607,9 +640,10 @@ class AutoTitler:
             )
             return {"action": "failed", "reason": "model call failed"}
 
-        # 评估成功推进：清除该会话的失败重试记录
-        with self._retry_lock:
-            self._failed_sessions.pop(session_id, None)
+        # 评估成功推进：仅在有效生成新标题或已有标题维持 keep 时清除重试记录
+        if (action == "rename" and candidate) or current:
+            with self._retry_lock:
+                self._failed_sessions.pop(session_id, None)
 
         if review and proposed:
             if proposed == current:
@@ -640,12 +674,10 @@ class AutoTitler:
             return {"action": "keep"}
 
         if action != "rename" or not candidate or candidate == current:
-            # 盲改是显式的重生成请求：无原标题时模型不得用 keep 伪装成成功。
-            # 记录为失败供批处理闭环统计，避免把缺标题误报为 keep；不自动
-            # 再调一次模型，防止语义失败触发重试风暴。
             self._pending.pop(session_id, None)
-            if blind and not current:
-                reason = "blind generation did not return a new title"
+            # 无原标题时模型不得用 keep 伪装成成功，避免缺标题误报为 keep
+            if not current:
+                reason = "untitled session did not produce a new title"
                 log.warning("auto-titler %s: %s", session_id[:12], reason)
                 return {"action": "failed", "reason": reason}
             log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)

@@ -236,19 +236,37 @@ def smart_preview(text: str, limit: int) -> str:
 
 
 def sample_user_messages(users: List[Tuple[str, str]], threshold: int) -> List[Tuple[str, str]]:
-    """用户消息条数上限：超限时保留开头 1 条（起点锚点）+ 最近 N-1 条（当前意图）。
+    """确定性分层采样：保留开头、结尾，并在中段均匀采样，覆盖整个会话弧线。
 
-    head + tail 策略：第一条锚定会话从哪里开始，最近消息反映当前方向；
-    中间的旧主题（含压缩续接会话的祖先内容）对标题价值最低，直接丢弃。
+    避免中间关键阶段被整体丢弃（防止 U 型注意力断层），严格按原始时间序列返回。
     threshold <= 0 表示不限。
     """
-    if threshold <= 0 or len(users) <= threshold:
+    n = len(users)
+    if threshold <= 0 or n <= threshold:
         return users
-    head = 1
-    tail = threshold - head
-    if tail <= 0:  # threshold=1 时 users[-0:] 会返回全部，必须单独处理
-        return users[:head]
-    return users[:head] + users[-tail:]
+    if threshold == 1:
+        return [users[0]]
+    if threshold == 2:
+        return [users[0], users[-1]]
+
+    # 分配预算：head 2 条，tail 取 threshold // 3，其余给中段均匀覆盖
+    head_count = min(2, threshold - 2)
+    tail_count = max(2, threshold // 3)
+    mid_count = threshold - head_count - tail_count
+
+    head_indices = list(range(head_count))
+    tail_indices = list(range(n - tail_count, n))
+
+    mid_start = head_count
+    mid_end = n - tail_count
+    if mid_count > 0 and mid_end > mid_start:
+        step = (mid_end - mid_start) / (mid_count + 1)
+        mid_indices = [int(mid_start + step * (i + 1)) for i in range(mid_count)]
+    else:
+        mid_indices = []
+
+    chosen = sorted(set(head_indices + mid_indices + tail_indices))
+    return [users[i] for i in chosen]
 
 
 def _sample_turns(

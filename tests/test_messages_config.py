@@ -378,14 +378,16 @@ def test_sample_user_messages_head_tail():
     users = [(f"user", f"m{i}") for i in range(100)]
     out = sample_user_messages(users, 40)
     assert len(out) == 40
-    # 开头 1 条（起点锚点）+ 最近 39 条（当前意图）
+    # 确定性分层采样：head 包含起点，tail 包含最近意图，中段均匀分布
     assert out[0] == ("user", "m0")
-    assert out[1] == ("user", "m61")
+    assert out[1] == ("user", "m1")
     assert out[-1] == ("user", "m99")
+    # 验证中段被均匀覆盖（而不是跳过前 60 条）
+    assert any(item[1] in ("m21", "m34", "m47", "m60") for item in out)
     # 不超限或 0 = 不限
     assert sample_user_messages(users, 0) == users
     assert len(sample_user_messages(users[:20], 40)) == 20
-    # 回归：threshold=1 时 tail=0，users[-0:] 会返回全部（101 条）——必须只留 1 条
+    # 回归：threshold=1 时只留 1 条
     out1 = sample_user_messages(users, 1)
     assert len(out1) == 1 and out1[0] == ("user", "m0")
 

@@ -2174,7 +2174,7 @@ def test_first_turn_end_overrides_eager_pre_title(recording_threads):
     # 验证 pre 已生成草稿标题并落库为 llm
     assert db.title == "草稿标题"
     assert db.source == "llm"
-    assert "s1" in t._first_turn_overrides
+    assert "s1" in t._eager_pre_sessions
     assert len(seq_llm.calls) == 1
 
     # 2. 触发第一回合 on_session_end
@@ -2184,11 +2184,11 @@ def test_first_turn_end_overrides_eager_pre_title(recording_threads):
     # 验证：第一回合 end 未被 every_n_turns=3 阻挡，未被 min_interval 冷却防抖，未进 pending，直接覆盖！
     assert db.title == "正式网页开发"
     assert db.source == "llm"
-    assert "s1" not in t._first_turn_overrides
+    assert "s1" not in t._eager_pre_sessions
     assert len(seq_llm.calls) == 2
 
     # 3. 验证第二回合恢复正常防抖门禁
-    t.on_session_end(session_id="s1", completed=True)  # n=2, 2 % 3 != 0, 且不在 _first_turn_overrides
+    t.on_session_end(session_id="s1", completed=True)  # n=2, 2 % 3 != 0, 且不在 _eager_pre_sessions
     # 不触发任何新提交
     assert len(recording_threads.instances) == 2
 
@@ -2217,7 +2217,7 @@ def test_first_turn_end_override_respects_user_title(recording_threads):
 
     assert db.title == "用户权威标题"
     assert db.source == "user"
-    assert "s1" not in t._first_turn_overrides
+    assert "s1" not in t._eager_pre_sessions
 
 
 def test_first_turn_end_override_keeps_when_candidate_identical(recording_threads):
@@ -2241,11 +2241,11 @@ def test_first_turn_end_override_keeps_when_candidate_identical(recording_thread
     run_recorded(recording_threads)
 
     assert db.title == "一致标题"
-    assert "s1" not in t._first_turn_overrides
+    assert "s1" not in t._eager_pre_sessions
 
 
 def test_first_turn_end_override_when_pre_still_inflight(recording_threads):
-    """当 pre_llm_call 评估还在后台执行中时，第一回合 end 到达标记 dirty，接力第二趟强制覆盖。"""
+    """当 pre_llm_call 评估还在后台执行中时，第一回合 end 到达标记 dirty，接力第二趟强制覆盖，生产默认 rename_confirmations=1 下直接落库不进 pending。"""
     db = FakeDB(
         messages=[
             {"role": "user", "content": "帮我写一个网页"},
@@ -2264,7 +2264,12 @@ def test_first_turn_end_override_when_pre_still_inflight(recording_threads):
             return SimpleNamespace(text='{"action":"rename","title":"正式终稿标题"}')
 
     seq_llm = SequenceLlm()
-    cfg = {**DEFAULTS, "every_n_turns": 3, "min_interval_minutes": 5}
+    cfg = {
+        **DEFAULTS,
+        "every_n_turns": 3,
+        "min_interval_minutes": 5,
+        "rename_confirmations": 1,  # 显式使用生产默认确认数
+    }
     t = AutoTitler(SimpleNamespace(llm=seq_llm), cfg, db=db)
 
     # 1. pre_llm_call 触发，生成 Worker
@@ -2273,13 +2278,71 @@ def test_first_turn_end_override_when_pre_still_inflight(recording_threads):
 
     # 2. 在 Worker 尚未 run_recorded（仍在 in-flight）期间，第一回合 end 到达
     t.on_session_end(session_id="s1", completed=True)
-    # 因为 in-flight，s1 被加入 _dirty_sessions
+    # 因为 in-flight，s1 被加入 _dirty_sessions，并且 dirty override intent 登记
     assert "s1" in t._dirty_sessions
+    assert "s1" in t._dirty_override_intents
 
-    # 3. Worker 执行，完成第一趟后发现 dirty，自动执行第二趟首轮覆盖
+    # 3. Worker 执行，完成第一趟 pre 写入草稿后，第二趟以 override 身份执行
     run_recorded(recording_threads)
 
+    # 验证：正式标题直接覆盖落库，绝不卡入 pending
     assert db.title == "正式终稿标题"
     assert db.source == "llm"
-    assert "s1" not in t._first_turn_overrides
+    assert "s1" not in t._eager_pre_sessions
+    assert "s1" not in t._dirty_override_intents
+    assert t._pending.get("s1") is None
     assert len(seq_llm.calls) == 2
+
+
+def test_first_turn_end_error_clears_override_and_respects_retry_backoff(recording_threads):
+    """首轮 end 若遇到模型报错，清除 override 标记进入失败账本，后续轮次绝不绕过退避狂刷模型。"""
+    db = FakeDB(
+        messages=[
+            {"role": "user", "content": "帮我写一个网页"},
+            {"role": "assistant", "content": "好，这是代码"},
+        ],
+        title=None,
+        source=None,
+    )
+    class FailOnSecondLlm:
+        def __init__(self):
+            self.calls = []
+        def complete(self, messages, **kwargs):
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                return SimpleNamespace(text='{"action":"rename","title":"草稿标题"}')
+            raise RuntimeError("503 Service Unavailable")
+
+    fail_llm = FailOnSecondLlm()
+    cfg = {**DEFAULTS, "every_n_turns": 3, "min_interval_minutes": 5}
+    t = AutoTitler(SimpleNamespace(llm=fail_llm), cfg, db=db)
+
+    # 1. pre_llm_call 成功生成草稿
+    t.on_pre_llm_call(session_id="s1", user_message="帮我写一个网页")
+    run_recorded(recording_threads)
+    assert db.title == "草稿标题"
+    assert len(fail_llm.calls) == 1
+
+    # 2. 第一轮 end 执行遇到 503 报错
+    t.on_session_end(session_id="s1", completed=True)
+    run_recorded(recording_threads)
+    assert len(fail_llm.calls) == 2
+    assert "s1" in t._failed_sessions
+    assert t._failed_sessions["s1"]["attempts"] == 1
+    assert "s1" not in t._eager_pre_sessions
+    assert "s1" not in t._dirty_override_intents
+
+    # 3. 第二轮、第三轮 end：因为 override 标记已被清除，且退避时间未到、未达 every_n_turns，绝不提交调用
+    t.on_session_end(session_id="s1", completed=True)  # n=2
+    assert len(recording_threads.instances) == 2
+    assert len(fail_llm.calls) == 2
+
+
+def test_on_pre_llm_call_does_not_arm_override_when_not_first_turn(recording_threads):
+    """当 payload 明确指示 is_first_turn=False 时，即使无标题也不得武装首轮覆盖标记。"""
+    db = FakeDB(messages=MSGS, title=None, source=None)
+    t, ctx = make_titler(db)
+
+    t.on_pre_llm_call(session_id="s1", is_first_turn=False)
+    # 不得进入 _eager_pre_sessions
+    assert "s1" not in t._eager_pre_sessions

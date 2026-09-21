@@ -27,14 +27,15 @@ class AutoTitler(_BaseAutoTitler):
 
     def evaluate(self, session_id: str, force: bool = False, blind: bool = False):
         """Invalidate review state if another automatic writer changed the base title."""
-        pending = self._pending.get(session_id)
-        if pending and pending.get("base_title") is not None:
-            try:
-                current = self.db.get_session_title(session_id)
-            except Exception:
-                current = pending.get("base_title")
-            if current != pending.get("base_title"):
-                self._pending.pop(session_id, None)
+        with self._state_lock:
+            pending = self._pending.get(session_id)
+            if pending and pending.get("base_title") is not None:
+                try:
+                    current = self.db.get_session_title(session_id)
+                except Exception:
+                    current = pending.get("base_title")
+                if current != pending.get("base_title"):
+                    self._pending.pop(session_id, None)
 
         return super().evaluate(session_id, force=force, blind=blind)
 
@@ -48,29 +49,30 @@ class AutoTitler(_BaseAutoTitler):
         bypass_limit: bool = False,
     ):
         """Require exactly ``rename_confirmations`` follow-up endorsements."""
-        pending = self._pending.get(session_id)
-        needed = max(0, int(self.cfg.get("rename_confirmations", 0)))
-        if needed > 0 and pending and pending.get("title") == title:
-            confirmed = int(pending.get("confirmations", 0)) + 1
-            pending["confirmations"] = confirmed
-            if confirmed < needed:
-                log.info(
-                    "auto-titler %s: pending candidate=%r confirmations=%d/%d",
-                    session_id[:12], title, confirmed, needed,
-                )
-                return {
-                    "action": "pending",
-                    "candidate": title,
-                    "confirmations": confirmed,
-                    "required": needed,
-                }
-        return super()._commit_rename(
-            db,
-            session_id,
-            title,
-            expected_title=expected_title,
-            bypass_limit=bypass_limit,
-        )
+        with self._state_lock:
+            pending = self._pending.get(session_id)
+            needed = max(0, int(self.cfg.get("rename_confirmations", 0)))
+            if needed > 0 and pending and pending.get("title") == title:
+                confirmed = int(pending.get("confirmations", 0)) + 1
+                pending["confirmations"] = confirmed
+                if confirmed < needed:
+                    log.info(
+                        "auto-titler %s: pending candidate=%r confirmations=%d/%d",
+                        session_id[:12], title, confirmed, needed,
+                    )
+                    return {
+                        "action": "pending",
+                        "candidate": title,
+                        "confirmations": confirmed,
+                        "required": needed,
+                    }
+            return super()._commit_rename(
+                db,
+                session_id,
+                title,
+                expected_title=expected_title,
+                bypass_limit=bypass_limit,
+            )
 
     def _generate(
         self,

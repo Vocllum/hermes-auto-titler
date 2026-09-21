@@ -52,7 +52,7 @@ Hermes 可以根据开场对话生成第一版标题，但会话会发展，标�
 ## 🔍 工作原理
 
 1. **首标题归属** — 默认 `first_title_mode: plugin`，插件从第 1 轮开始评估，启动时自动关闭宿主标题器以防竞态。设为 `builtin` 可将首标题交还宿主。
-2. **触发与节奏门控** — Hook `on_session_end` / `on_session_finalize`。只有完整前台轮次计入 `every_n_turns`（默认 `2`）；失败、被打断、cron、subagent、后台任务均排除。周期评估在 daemon worker 中异步执行，关闭评估同步执行（仍受 `min_interval_minutes` 约束）。
+2. **触发、节奏与关闭处理** — Hook `on_session_end` / `on_session_finalize`。只有完整前台轮次计入 `every_n_turns`（默认 `2`）；失败、被打断、cron、subagent、后台任务均排除。周期评估异步执行；关闭 hook 不发起网络请求，只对已有 worker 等待最多 100ms，随后把 typed finalize intent 原子持久化，交由下一段正常进程生命周期续跑。
 3. **上下文构造** — 提取开头轮次、最近轮次（每个用户消息配对最后一条 assistant 回复），以及受限的首条与最近用户消息轨迹。若压缩已移除原始 opening，则以压缩摘要作为历史锚点。协议交接包装和重放噪声在采样前清理。
 4. **证据优先评估** — 辅助模型输出结构化 JSON。对话证据排在当前标题之前以降低锚定偏差。明确且重复的用户意图权重最高；assistant 回复提供辅助上下文但不能独立引入新主题。跨采样区间的结构性重复被显式折扣。
 5. **策略评估** — `conservative` 在无显著、持续的主题偏移时保留现有标题；`aggressive` 在用户明确放弃旧目标或持续追求新方向时更快适应，但单靠最近几轮不足以触发改名。
@@ -65,7 +65,7 @@ Hermes 可以根据开场对话生成第一版标题，但会话会发展，标�
 - **为什么要持续维护，而不把首条命名做得更好？** 开场对话无法预见后续走向。长会话需要标题能随用户实际目标演化。
 - **为什么采样意图轨迹，而不把完整 transcript 全塞进去？** 标题模型需要的是持续意图，不是工具执行过程。插件保留开头与最近上下文及受限用户消息轨迹，长消息用首尾提取保留关键指令。
 - **为什么先看证据再看原标题？** 现有标题适合做比较基线，但不是好的证据来源。先分析对话证据可以避免锚定在过时标签上。
-- **为什么关闭评估要同步？** 会话结束后写入的标题可能不再出现在 UI 中。关闭评估最多阻塞到 provider timeout（约 30 秒），但能保证在进程退出前捕获最终状态。
+- **为什么关闭时入队而不是调用模型？** Hermes 的 finalize 有硬时间预算。关闭 hook 因此不发起网络请求，只等待已有工作最多 100ms，并持久化带 epoch 的 finalize intent；retry worker 在正常生命周期继续执行，且仍须经过 provenance 与复审门禁。
 - **为什么默认复审 1 次？** 单次改名可能反映临时偏离。要求一次后续背书是防止标题抖动的合理防线；设 `rename_confirmations: 0` 可立即更新，增大 N 提高稳定性。
 - **已知限制：** Hermes 未提供会话标题的原子 compare-and-swap API，并发写入存在极小竞态窗口。插件缩小并检测这些碰撞。
 
@@ -147,7 +147,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `every_n_turns` | `2` | 每 N 个完整前台轮次评估一次。 |
 | `first_title_mode` | `plugin` | `plugin` = 从第 1 轮评估，加载时关闭宿主标题器；`builtin` = 第一版标题归 Hermes。切换按重启级配置处理。 |
 | `early_turn_eval` | `false` | 兼容旧配置保留。实际行为由 `first_title_mode` 控制。 |
-| `on_close` | `true` | 关闭/终局时评估一次（同步、受时间节流）。 |
+| `on_close` | `true` | 关闭/终局时最多等待已有工作 100ms，并持久化 typed finalize intent；关闭 hook 不发起网络请求。 |
 | `recent_turns` / `opening_turns` | `2` / `2` | 上下文窗口按真实用户轮计；每个选中轮次保留用户消息 + 最后一条 assistant 回复。 |
 | `ignore_model_messages` | `false` | 从捕获上下文中排除 assistant 消息（主要用于 A/B 测试）。 |
 | `preview_chars` | `400` | 开头/最近单条消息的预览预算；多句消息使用首部 + 尾部提取。 |
@@ -162,7 +162,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔。 |
 | `max_title_length` / `max_display_width` | `null` / `40` | `null` 不强加代码层字符硬切，由提示词保持标题简洁，`max_display_width` 限制显示列宽；`complete` 风格额外增加 12 列。 |
 | `rename_confirmations` | `1` | 默认再要求 1 次后续背书；`0` = 一次判定后直接写；`N > 1` = 需要 N 次后续背书。候选被替换则重新计数。 |
-| `max_renames_per_session` | `0` | 默认关闭。`N > 0` = 每个会话最多自动替换标题 N 次。首次命名和 `rename-now` 不消耗次数；`derived` 升级算一次替换。计数仅存在当前进程内。 |
+| `max_renames_per_session` | `0` | 默认关闭。`N > 0` = 每个会话最多自动替换标题 N 次。首次命名和 `rename-now` 不消耗次数；`derived` 升级算一次替换。计数持久化保存于 `state.json`。 |
 | `custom_instructions` | `""` | 追加到 system prompt 末尾的自定义指令。如 `"标题使用英文"` 或 `"始终包含项目名前缀"`。留空无影响。 |
 
 </details>

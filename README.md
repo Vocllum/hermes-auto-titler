@@ -52,7 +52,7 @@ Hermes names a session from its opening exchange, but conversations evolve and t
 ## 🔍 How it works
 
 1. **First-title ownership** — With `first_title_mode: plugin` (default), the plugin evaluates from turn 1 and disables the host's competing title generator at startup. Set to `builtin` to let the host handle initial titles.
-2. **Cadence gating** — Hooks into `on_session_end` and `on_session_finalize`. Only completed foreground turns count toward `every_n_turns` (default `2`); failed, interrupted, cron, subagent, and background turns are excluded. Periodic evaluations run async in a daemon worker; session close evaluations run synchronously (still respecting `min_interval_minutes`).
+2. **Cadence and close handling** — Hooks into `on_session_end` and `on_session_finalize`. Only completed foreground turns count toward `every_n_turns` (default `2`); failed, interrupted, cron, subagent, and background turns are excluded. Periodic evaluations run asynchronously. Close hooks never start network work: they wait at most 100 ms for an existing worker, then atomically persist a typed finalize intent for the next normal process lifetime.
 3. **Context construction** — Extracts opening turns, recent turns (user prompt + final assistant reply), and a bounded trajectory of earliest and latest user prompts. When history compaction has evicted the opening exchange, compaction summaries serve as historical anchors. Protocol handoffs and prompt replays are stripped before sampling.
 4. **Evidence-first evaluation** — The auxiliary model outputs structured JSON. Conversation evidence appears before the current title to reduce anchoring bias. Explicit and repeated user intent carries the highest weight; assistant responses support but cannot introduce new topics. Structural overlap between sampled sections is discounted.
 5. **Strategy** — `conservative` keeps the existing title unless a significant, durable topic shift has occurred. `aggressive` adapts faster when the user explicitly abandons an earlier objective or sustains a new direction, but recent turns alone are still insufficient to rename.
@@ -65,7 +65,7 @@ Hermes names a session from its opening exchange, but conversations evolve and t
 - **Why continuous maintenance instead of better first-message titling?** An opening exchange cannot anticipate where a conversation leads. Long sessions need titles that evolve with the user's actual objectives.
 - **Why sample intent trajectory instead of full transcripts?** The title model needs durable intent, not tool execution noise. The plugin preserves opening and recent context alongside a bounded trajectory of key user prompts, using head+tail extraction for long messages.
 - **Why infer the subject before inspecting current titles?** Existing titles work as comparison baselines but not as evidence. Analyzing conversation evidence first avoids anchoring on outdated labels.
-- **Why evaluate synchronously on session close?** Titles written after termination may never surface in the UI. Synchronous evaluation on close can block up to the provider timeout (~30 s) but ensures the final state is captured.
+- **Why queue on session close instead of calling the model?** Hermes gives finalization a bounded shutdown window. Close hooks therefore make no network call, wait at most 100 ms for already-running work, and durably queue an epoch-tagged finalize intent. The retry worker processes it during a normal lifecycle without bypassing provenance or review gates.
 - **Why require one review endorsement by default?** A single rename trigger can reflect a temporary detour. Requiring one subsequent endorsement provides a defense against title flutter; set `rename_confirmations: 0` for immediate updates, or increase N for stricter stability.
 - **Known limitation:** Hermes does not provide an atomic compare-and-swap API for session titles, leaving a narrow race window during concurrent writes. The plugin mitigates and detects these collisions.
 
@@ -147,7 +147,7 @@ model: "your-model"         # any model your Hermes setup can reach
 | `every_n_turns` | `2` | Evaluate every N completed foreground turns. |
 | `first_title_mode` | `plugin` | `plugin` = evaluate from turn 1, disable host title generator at load; `builtin` = Hermes owns first-title generation. Treat changes as restart-level config. |
 | `early_turn_eval` | `false` | Legacy compat key. Actual behavior is controlled by `first_title_mode`. |
-| `on_close` | `true` | Evaluate on session close/finalize (synchronous, throttled). |
+| `on_close` | `true` | On close/finalize, wait at most 100 ms for existing work and persist a typed finalize intent; never start a network call from the close hook. |
 | `recent_turns` / `opening_turns` | `2` / `2` | Context window in real user turns; each selected turn keeps the user message + last assistant reply. |
 | `ignore_model_messages` | `false` | Exclude assistant messages from captured context (A/B testing). |
 | `preview_chars` | `400` | Per-message preview budget for opening/recent context. Multi-sentence messages use head+tail extraction. |

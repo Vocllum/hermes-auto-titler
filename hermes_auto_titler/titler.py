@@ -11,8 +11,8 @@
 - 被打断/失败/未完成（completed=False / failed / interrupted，即使标志
   不一致）的轮次不是完整前台轮次，不计轮数
 - 真实关闭由 on_session_finalize（或带非空 reason 的 on_session_end）表达，
-  走正常节流（force=False）且不与进行中的自动评估重复；关闭评估刻意保持
-  同步——可能阻塞至 provider timeout，换取关闭前完成标题更新的确定性
+  走正常节流（force=False）且不与进行中的自动评估重复；关闭 hook 刻意禁网络调用，
+  只对已有 worker 等待最多 100ms，随后将 typed finalize intent 原子持久化，由后续正常生命周期续跑
 - 轮次评估在 daemon worker 中执行（携带当前 profile Context），hook 立即
   返回；同一会话 in-flight 去重
 - early_turn_eval 的早期评估只对无标题或 derived 来源的会话触发
@@ -145,13 +145,18 @@ class AutoTitler:
         self._current_session: Optional[str] = None
         # 滞后机制：session_id -> {"title": 待审候选}（评审协议，见 evaluate）
         self._pending: Dict[str, Dict[str, Any]] = {}
-        # 失败重试登记簿：记录未成功命名的会话及重试元数据（用于后续轮次补偿重试）
+        # Ordinary model failures and close/finalize intent have separate budgets.
+        # A stale worker may clear its ordinary failure, but never a newer close intent.
         self._failed_sessions: Dict[str, Dict[str, Any]] = {}
-        self._retry_lock = threading.Lock()
-        # 可选的自动改名次数门控。与轮数、pending 等其他运行时状态一样，
-        # 当前只保存在插件进程内；0 表示关闭，不改变默认行为。
+        self._finalize_intents: Dict[str, Dict[str, Any]] = {}
+        # State mutations that participate in persistence are serialized by the
+        # single barrier below.  Keep the legacy attribute names as aliases so
+        # integrations/tests that introspect them do not acquire a second lock
+        # domain accidentally.
+        self._retry_lock: threading.RLock
+        # 可选的自动改名次数门控；0 表示关闭，不改变默认行为。
         self._rename_counts: Dict[str, int] = {}
-        self._rename_count_lock = threading.RLock()
+        self._rename_count_lock: threading.RLock
         # 结构化审计环形日志：固定容量（最多 50 条），供 /autotitler status 或排障审查
         self._audit_log: collections.deque = collections.deque(maxlen=50)
         # 同一会话同一时刻只允许一个进行中的模型评估（hook 并发去重），记录关联的完成 Event
@@ -161,7 +166,17 @@ class AutoTitler:
         self._last_generate_errors: Dict[str, str] = {}
         self._last_generate_error: str = ""
         self._inflight_lock = threading.Lock()
+        # One barrier covers every durable-state mutation and snapshot.  File
+        # replacement alone is atomic but cannot make a mixed in-memory snapshot
+        # consistent while pending/retry/counter fields are changing.
         self._state_lock = threading.RLock()
+        self._retry_lock = self._state_lock
+        self._rename_count_lock = self._state_lock
+        self._closing_epochs: Dict[str, int] = {}
+        self._completed_epochs: Dict[str, int] = {}
+        self._worker_epochs: Dict[str, int] = {}
+        self._closing_fenced: set[str] = set()
+        self._unresolved_disk_records: Dict[str, Dict[str, Any]] = {}
         self._state_path = Path(get_hermes_home()) / "plugins" / "hermes-auto-titler" / "state.json"
 
     @property
@@ -247,27 +262,24 @@ class AutoTitler:
     # -- 评估调度 -----------------------------------------------------------
 
     def _retry_failed_sessions(self) -> None:
-        """捎带检查失败记录簿：重试因模型异常未能成功命名的会话。
-
-        特性：
-        - 天然去重：每个会话在 _failed_sessions 字典中仅占一条记录，不按轮次无限累加；
-        - 指数退避：每次失败翻倍等待时长，避免服务商瘫痪时引发重试风暴；
-        - 全局背压：每轮调度最多申领少量任务（最多 2 个），避免惊群；
-        - 保护校验：若会话已被用户手改标题（source=user）或已达到最大重试次数，则自动出队。
-        """
+        """Claim typed ordinary-retry and finalize intents with global backpressure."""
         if not self.cfg.get("enabled", True):
             return
         now = time.monotonic()
         candidates: List[str] = []
         expired: List[str] = []
 
-        with self._retry_lock:
-            if not self._failed_sessions:
+        with self._state_lock:
+            session_ids = set(self._failed_sessions) | set(self._finalize_intents)
+            if not session_ids:
                 return
-            for sid, meta in list(self._failed_sessions.items()):
+            for sid in session_ids:
+                finalize = self._finalize_intents.get(sid)
+                retry = self._failed_sessions.get(sid)
+                meta = finalize or retry or {}
                 attempts = int(meta.get("attempts", 0))
                 capacity = bool(meta.get("capacity"))
-                if attempts >= 5 and not capacity:
+                if finalize is None and attempts >= 5 and not capacity:
                     expired.append(sid)
                 elif now >= float(meta.get("next_retry_at", 0)):
                     candidates.append(sid)
@@ -279,12 +291,18 @@ class AutoTitler:
         if not candidates:
             return
 
-        to_retry: List[str] = []
+        to_retry: List[Tuple[str, Optional[int]]] = []
         to_remove: List[str] = []
+        deferred: List[str] = []
         for sid in candidates:
             with self._inflight_lock:
                 if sid in self._inflight:
                     continue
+            finalize_claim: Optional[int] = None
+            with self._state_lock:
+                fin = self._finalize_intents.get(sid)
+                if fin:
+                    finalize_claim = int(fin.get("close_epoch", 0))
             try:
                 src = self.db.get_session_title_source(sid)
                 if src == SessionDB.TITLE_SOURCE_USER:
@@ -292,31 +310,48 @@ class AutoTitler:
                     continue
                 cur_title = self.db.get_session_title(sid)
                 if (
-                    cur_title
+                    sid not in self._finalize_intents
+                    and cur_title
                     and src == SessionDB.TITLE_SOURCE_LLM
                     and not self._pending.get(sid)
-                    and self._failed_sessions.get(sid, {}).get("reason") not in {
-                        "finalize",
-                        "finalize budget exceeded",
-                    }
                 ):
                     to_remove.append(sid)
                     continue
             except Exception:
-                pass
-            to_retry.append(sid)
+                # DB unknown is not proof of staleness; leave the intent queued.
+                continue
+            # An intent whose anchor was unknown at close time cannot be settled
+            # by an epoch claim alone: the terminal snapshot was never observed,
+            # so any claimant could "cover" it tautologically.  Now that the DB
+            # is readable, re-validate the anchor and defer consumption to a
+            # later sweep.  That keeps "re-validate the base, then consume" a
+            # two-phase operation instead of one self-certifying pass.
+            with self._state_lock:
+                fin = self._finalize_intents.get(sid)
+                if fin is not None and not fin.get("base_title_known", True):
+                    fin["base_title_known"] = True
+                    fin["base_title"] = cur_title
+                    fin["expected_title"] = cur_title
+                    self._persist_state_locked()
+                    deferred.append(sid)
+                    continue
+            to_retry.append((sid, finalize_claim))
             if len(to_retry) >= 2:
                 break
 
         if to_remove:
-            with self._retry_lock:
+            with self._state_lock:
                 for sid in to_remove:
                     self._failed_sessions.pop(sid, None)
+                    self._clear_finalize_intent_locked(sid)
             self._persist_state()
 
-        for sid in to_retry:
+        for sid, finalize_claim in to_retry:
             log.info("auto-titler retry: triggering compensation eval for %s", sid[:12])
-            self._submit_eval(sid)
+            try:
+                self._submit_eval(sid, finalize_claim=finalize_claim)
+            except TypeError:
+                self._submit_eval(sid)
 
     def _requeue_untitled_sessions(self) -> None:
         """Recover untitled/derived sessions after restart so a quota outage can drain later."""
@@ -412,33 +447,43 @@ class AutoTitler:
             return not current  # 无标题 → early 可评估；legacy 已有标题 → 保护
         return False  # llm 等其余来源不提前评估
 
-    def _submit_eval(self, session_id: str) -> None:
-        """把轮次评估提交到 daemon worker；同一会话已有 in-flight 评估则跳过。
+    def _submit_eval(self, session_id: str, *, finalize_claim: Optional[int] = None) -> None:
+        """Submit one coalescing worker.
 
-        评估离开 hook 关键路径（hook 立即返回）。worker 经
-        tools.thread_context.propagate_context_to_thread 携带当前 profile
-        Context（老宿主退回 contextvars），保证辅助模型调用在正确上下文里
-        执行。轮数/节流/去重计数器都是进程内的：进程重启后清零，属可接受
-        的本地行为。
+        Ordinary submissions are rejected once a closing fence is established for
+        the session.  Only an explicit claimant providing a recorded close_epoch
+        from an existing finalize intent may evaluate a closed session.
         """
+        with self._state_lock:
+            if session_id in self._closing_fenced and finalize_claim is None:
+                # The fence expresses an unresolved terminal intent, never
+                # "this session is closed forever".  If no intent remains the
+                # fence is stale by definition, so release it and continue.
+                if session_id not in self._finalize_intents:
+                    self._closing_fenced.discard(session_id)
+                else:
+                    return
+            if finalize_claim is not None:
+                worker_epoch = int(finalize_claim)
+            else:
+                worker_epoch = 0
+
         event = threading.Event()
         with self._inflight_lock:
             if session_id in self._inflight:
-                # 已有评估在进行中：标记 dirty，待当前评估完成后自动以最新上下文补跑一次（Coalescing）
                 self._dirty_sessions.add(session_id)
                 return
+            self._worker_epochs[session_id] = worker_epoch
             self._inflight[session_id] = event
         try:
             worker = threading.Thread(
                 target=_wrap_with_context(self._eval_worker),
-                args=(session_id, event),
+                args=(session_id, event, worker_epoch),
                 name=f"autotitler-eval-{session_id[:8]}",
                 daemon=True,
             )
             worker.start()
         except Exception as e:
-            # 线程构造/启动失败：清掉 in-flight 标记（后续轮次可重试），
-            # 只记日志，绝不让 hook 抛异常。
             log.warning(
                 "auto-titler failed to start eval worker for %s: %s",
                 session_id[:12], e,
@@ -446,114 +491,295 @@ class AutoTitler:
             with self._inflight_lock:
                 self._dirty_sessions.discard(session_id)
                 self._inflight.pop(session_id, None)
+                self._worker_epochs.pop(session_id, None)
             event.set()
 
-    def _eval_worker(self, session_id: str, event: threading.Event) -> None:
+    def _eval_worker(
+        self,
+        session_id: str,
+        event: threading.Event,
+        worker_epoch: int = 0,
+    ) -> None:
         try:
             force_eval = False
             while True:
                 try:
-                    self.evaluate(session_id, force=force_eval)
+                    with self._state_lock:
+                        finalize_meta = dict(self._finalize_intents.get(session_id, {}))
+                        covers_finalize = bool(
+                            finalize_meta
+                            and int(finalize_meta.get("close_epoch", 0)) <= worker_epoch
+                            and finalize_meta.get("base_title_known", True)
+                        )
+                    # A recovered finalize intent represents a missed terminal
+                    # snapshot. It must not be throttled by the last periodic eval.
+                    result = self.evaluate(session_id, force=force_eval or covers_finalize)
+                    action = str((result or {}).get("action") or "")
+                    with self._state_lock:
+                        if action not in {"failed", "pending", "throttled"}:
+                            self._completed_epochs[session_id] = max(
+                                self._completed_epochs.get(session_id, 0), worker_epoch
+                            )
+                            meta = self._finalize_intents.get(session_id)
+                            if (
+                                meta
+                                and int(meta.get("close_epoch", 0)) <= worker_epoch
+                                # An unknown anchor means the terminal snapshot
+                                # was never observed.  Claiming the epoch alone
+                                # would make the coverage proof tautological, so
+                                # the intent survives until the anchor is
+                                # validated and re-claimed.
+                                and meta.get("base_title_known", True)
+                            ):
+                                self._clear_finalize_intent_locked(session_id)
+                        elif covers_finalize:
+                            meta = self._finalize_intents.get(session_id)
+                            if meta:
+                                attempts = int(meta.get("attempts", 0)) + 1
+                                delay = min(30 * (2 ** (attempts - 1)), 600)
+                                meta["attempts"] = attempts
+                                meta["next_retry_at"] = time.monotonic() + delay
+                        self._persist_state_locked()
                 except Exception as e:
                     log.warning("auto-titler background evaluate failed: %s", e)
+                    with self._state_lock:
+                        meta = self._finalize_intents.get(session_id)
+                        if meta and int(meta.get("close_epoch", 0)) <= worker_epoch:
+                            attempts = int(meta.get("attempts", 0)) + 1
+                            delay = min(30 * (2 ** (attempts - 1)), 600)
+                            meta["attempts"] = attempts
+                            meta["next_retry_at"] = time.monotonic() + delay
+                            self._persist_state_locked()
 
                 with self._inflight_lock:
                     if session_id in self._dirty_sessions:
                         self._dirty_sessions.remove(session_id)
-                        # 并发到达了新的上下文（如轮次结束）：重跑必须穿透节流，真正读取最新状态
                         force_eval = True
+                        worker_epoch = self._closing_epochs.get(session_id, worker_epoch)
+                        self._worker_epochs[session_id] = worker_epoch
                         continue
                     self._inflight.pop(session_id, None)
+                    self._worker_epochs.pop(session_id, None)
                     break
         finally:
             with self._inflight_lock:
                 self._dirty_sessions.discard(session_id)
                 self._inflight.pop(session_id, None)
+                self._worker_epochs.pop(session_id, None)
             event.set()
 
     def _close_eval(self, session_id: str) -> None:
-        """Persist finalization intent without starting a network call.
+        """Persist finalization without networking; network wait is capped at 100ms.
 
-        An already-running evaluation may finish inside the 100ms grace period.  If
-        it does not, closing still returns promptly and the durable retry ledger is
-        resumed during a later normal process lifetime.
+        Atomically fences the session against ordinary submissions, persists the
+        typed finalize intent, and only then inspects any running worker.  A
+        running worker clears the finalize intent only when its tagged epoch
+        matches or exceeds this close epoch.
         """
         if not self.cfg.get("on_close", True):
             return
 
+        with self._state_lock:
+            self._closing_fenced.add(session_id)
+            existing_intent = self._finalize_intents.get(session_id)
+            if existing_intent:
+                close_epoch = int(existing_intent.get("close_epoch", 0))
+            else:
+                close_epoch = self._closing_epochs.get(session_id, 0) + 1
+                self._closing_epochs[session_id] = close_epoch
+
+            # Atomically queue the intent under the fence before looking at in-flight state.
+            self._queue_session_locked(session_id, reason="finalize", close_epoch=close_epoch)
+
         with self._inflight_lock:
             existing_event = self._inflight.get(session_id)
+            worker_epoch = self._worker_epochs.get(session_id, 0)
 
+        completed = False
         if existing_event is not None:
             log.info(
                 "auto-titler close: waiting at most 100ms for in-flight worker for %s",
                 session_id[:12],
             )
-            if existing_event.wait(0.1):
-                return
-            reason = "finalize budget exceeded"
-        else:
-            reason = "finalize"
+            completed = existing_event.wait(0.1)
 
-        self._queue_session(session_id, reason=reason)
+        with self._state_lock:
+            covered = (
+                completed
+                and worker_epoch >= close_epoch
+                and self._completed_epochs.get(session_id, 0) >= close_epoch
+            )
+            if not covered and existing_event is not None and not completed:
+                # Update intent reason to reflect timeout without altering close_epoch or budget.
+                intent = self._finalize_intents.get(session_id)
+                if intent:
+                    intent["reason"] = "finalize budget exceeded"
+                    self._persist_state_locked()
 
-    def _queue_session(self, session_id: str, *, reason: str) -> None:
-        """Upsert a retry intent and durably snapshot scheduling state."""
+    def _queue_session(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        close_epoch: Optional[int] = None,
+    ) -> None:
+        with self._state_lock:
+            self._queue_session_locked(session_id, reason=reason, close_epoch=close_epoch)
+
+    def _clear_finalize_intent_locked(self, session_id: str) -> None:
+        """Drop a finalize intent together with the closing fence it created.
+
+        The fence only means "an unresolved terminal intent exists".  Once the
+        intent is settled — either covered by a worker that provably observed
+        the final epoch, or provably unsatisfiable (user authority, legacy
+        protection, rename cap, empty session) — the session must regain
+        ordinary foreground titling instead of being barred forever.
+        """
+        self._finalize_intents.pop(session_id, None)
+        if session_id not in self._finalize_intents:
+            self._closing_fenced.discard(session_id)
+
+    def _queue_session_locked(
+        self,
+        session_id: str,
+        *,
+        reason: str,
+        close_epoch: Optional[int] = None,
+    ) -> None:
+        """Upsert a typed finalize intent under ``_state_lock``."""
+        base_title_known = True
         try:
             base_title = self.db.get_session_title(session_id)
         except Exception:
             base_title = None
-        pending = self._pending.get(session_id) or {}
+            base_title_known = False
         now_wall = time.time()
-        with self._retry_lock:
-            previous = self._failed_sessions.get(session_id, {})
-            self._failed_sessions[session_id] = {
-                "attempts": int(previous.get("attempts", 0)),
-                "next_retry_at": time.monotonic(),
-                "capacity": bool(previous.get("capacity", False)),
-                "reason": reason,
-                "queued_at": now_wall,
-                "base_title": pending.get("base_title", base_title),
-                "candidate": pending.get("title"),
-                "confirmations": int(pending.get("confirmations", 0)),
-                "expected_title": base_title,
-            }
-        self._persist_state()
+        pending = dict(self._pending.get(session_id) or {})
+        previous = dict(self._failed_sessions.get(session_id, {}))
+        existing = dict(self._finalize_intents.get(session_id, {}))
+        epoch = int(close_epoch or self._closing_epochs.get(session_id, 0))
+        self._closing_epochs[session_id] = max(
+            self._closing_epochs.get(session_id, 0), epoch
+        )
+        existing_epoch = int(existing.get("close_epoch", -1))
+        if existing and existing_epoch >= epoch:
+            # on_session_end(reason=...) and on_session_finalize may report the
+            # same close.  Preserve the original typed intent and its budget.
+            return
+        # Finalization is not the sixth ordinary retry.  It has a separate
+        # typed ledger so a stale ordinary worker cannot erase it.
+        self._finalize_intents[session_id] = {
+            "attempts": 0,
+            "next_retry_at": time.monotonic(),
+            "capacity": False,
+            "reason": reason,
+            "queued_at": now_wall,
+            "base_title": pending.get("base_title", base_title),
+            "base_title_known": True if pending.get("base_title") is not None else base_title_known,
+            "candidate": pending.get("title"),
+            "confirmations": int(pending.get("confirmations", 0)),
+            "expected_title": base_title,
+            "close_epoch": epoch,
+            "previous_retry_attempts": int(previous.get("attempts", 0)),
+        }
+        self._persist_state_locked()
+
+    @staticmethod
+    def _state_kind(meta: Dict[str, Any], pending: Dict[str, Any], count: int) -> str:
+        reason = str(meta.get("reason") or "")
+        parts = []
+        if reason in {"finalize", "finalize budget exceeded"}:
+            parts.append("finalize")
+        elif meta:
+            parts.append("retry")
+        if pending:
+            parts.append("pending")
+        if count:
+            parts.append("counter")
+        return "+".join(parts) or "counter"
 
     def _persistent_sessions(self) -> Dict[str, Dict[str, Any]]:
-        """Build the serialized view while keeping monotonic clocks process-local."""
+        """Build a typed serialized view under ``_state_lock``."""
         now_mono = time.monotonic()
         now_wall = time.time()
-        with self._retry_lock:
-            failed = {sid: dict(meta) for sid, meta in self._failed_sessions.items()}
-        sessions: Dict[str, Dict[str, Any]] = {}
-        session_ids = set(failed) | set(self._pending) | set(self._rename_counts)
+        failed = {sid: dict(meta) for sid, meta in self._failed_sessions.items()}
+        finalizes = {sid: dict(meta) for sid, meta in self._finalize_intents.items()}
+        sessions: Dict[str, Dict[str, Any]] = {
+            sid: dict(rec) for sid, rec in self._unresolved_disk_records.items()
+        }
+        session_ids = (
+            set(failed)
+            | set(finalizes)
+            | set(self._pending)
+            | set(self._rename_counts)
+        )
         for sid in session_ids:
-            meta = failed.get(sid, {})
-            pending = self._pending.get(sid, {})
+            retry = failed.get(sid, {})
+            finalize = finalizes.get(sid, {})
+            anchor = finalize or retry
+            pending = dict(self._pending.get(sid, {}))
+            count = int(self._rename_counts.get(sid, 0))
+            base_known = anchor.get("base_title_known")
             try:
                 current_title = self.db.get_session_title(sid)
+                if base_known is None and not anchor.get("base_title") and not pending.get("base_title"):
+                    base_known = True
             except Exception:
-                current_title = meta.get("base_title")
-            next_retry_at = float(meta.get("next_retry_at", now_mono))
-            sessions[sid] = {
-                "base_title": pending.get("base_title", meta.get("base_title") or current_title),
-                "candidate": pending.get("title", meta.get("candidate")),
-                "confirmations": int(pending.get("confirmations", meta.get("confirmations", 0))),
-                "expected_title": meta.get("expected_title", current_title),
-                "next_retry_at": now_wall + max(0.0, next_retry_at - now_mono),
-                "attempts": int(meta.get("attempts", 0)),
-                "capacity": bool(meta.get("capacity", False)),
-                "queued_at": float(meta.get("queued_at", now_wall)),
-                "reason": str(meta.get("reason") or "error"),
-                "rename_count": int(self._rename_counts.get(sid, 0)),
+                current_title = anchor.get("base_title") or pending.get("base_title")
+                if base_known is None:
+                    base_known = False
+            base_title = pending.get("base_title", anchor.get("base_title") or current_title)
+            if base_known is None:
+                base_known = True if base_title is not None else False
+            parts = []
+            if finalize:
+                parts.append("finalize")
+            if retry:
+                parts.append("retry")
+            if pending:
+                parts.append("pending")
+            if count:
+                parts.append("counter")
+            record: Dict[str, Any] = {
+                "kind": "+".join(parts) or "counter",
+                "base_title": base_title,
+                "base_title_known": bool(base_known),
+                "expected_title": anchor.get("expected_title", current_title),
+                "rename_count": count,
             }
+            if pending:
+                record["pending_review"] = {
+                    "candidate": pending.get("title"),
+                    "confirmations": int(pending.get("confirmations", 0)),
+                }
+
+            def serialize_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
+                next_retry_at = float(meta.get("next_retry_at", now_mono))
+                return {
+                    "attempts": int(meta.get("attempts", 0)),
+                    "next_retry_at": now_wall + max(0.0, next_retry_at - now_mono),
+                    "capacity": bool(meta.get("capacity", False)),
+                    "queued_at": float(meta.get("queued_at", now_wall)),
+                    "reason": str(meta.get("reason") or "error"),
+                }
+
+            if retry:
+                record["retry"] = serialize_meta(retry)
+            if finalize:
+                record["finalize_intent"] = True
+                serialized = serialize_meta(finalize)
+                serialized["close_epoch"] = int(finalize.get("close_epoch", 0))
+                record["finalize"] = serialized
+            sessions[sid] = record
         return sessions
+
+    def _persist_state_locked(self) -> None:
+        StateStore(self._state_path).save(self._persistent_sessions())
 
     def _persist_state(self) -> None:
         try:
             with self._state_lock:
-                StateStore(self._state_path).save(self._persistent_sessions())
+                self._persist_state_locked()
         except Exception:
             log.warning("auto-titler state persistence failed", exc_info=True)
 
@@ -572,6 +798,8 @@ class AutoTitler:
         now_wall = time.time()
         restored = 0
         unresolved = False
+        with self._state_lock:
+            self._unresolved_disk_records.clear()
         for sid, raw in sessions.items():
             if not isinstance(sid, str) or not isinstance(raw, dict):
                 continue
@@ -579,37 +807,114 @@ class AutoTitler:
                 current = self.db.get_session_title(sid)
                 source = self.db.get_session_title_source(sid)
             except Exception:
-                # DB startup can race plugin registration. Keep the on-disk record
-                # untouched so a later restart can validate and recover it.
+                # DB unknown is not stale.  Preserve the on-disk record verbatim so
+                # another normal startup can validate it against SessionDB.
                 unresolved = True
+                with self._state_lock:
+                    self._unresolved_disk_records[sid] = dict(raw)
                 continue
-            base_title = raw.get("base_title")
-            if source == SessionDB.TITLE_SOURCE_USER or current != base_title:
+
+            try:
+                base_title = raw.get("base_title")
+                base_title_known = raw.get("base_title_known", True)
+                if source == SessionDB.TITLE_SOURCE_USER:
+                    continue
+                if base_title_known and current != base_title:
+                    continue
+
+                # v1 legacy records are accepted once and rewritten as typed state.
+                pending_raw = raw.get("pending_review")
+                if pending_raw is None and raw.get("candidate"):
+                    pending_raw = {
+                        "candidate": raw.get("candidate"),
+                        "confirmations": raw.get("confirmations", 0),
+                    }
+                if pending_raw is not None:
+                    if not isinstance(pending_raw, dict) or not pending_raw.get("candidate"):
+                        raise ValueError("invalid pending_review")
+                    candidate = str(pending_raw["candidate"])
+                    confirmations = max(0, int(pending_raw.get("confirmations", 0)))
+                    with self._state_lock:
+                        self._pending[sid] = {
+                            "title": candidate,
+                            "base_title": base_title,
+                            "confirmations": confirmations,
+                        }
+                else:
+                    candidate = None
+                    confirmations = 0
+
+                rename_count = max(0, int(raw.get("rename_count", 0)))
+                if rename_count:
+                    with self._state_lock:
+                        self._rename_counts[sid] = rename_count
+
+                finalize_raw = raw.get("finalize")
+                retry_raw = raw.get("retry")
+                if finalize_raw is None and retry_raw is None and (
+                    "attempts" in raw or "reason" in raw
+                ):
+                    legacy_meta = {
+                        "attempts": raw.get("attempts", 0),
+                        "next_retry_at": raw.get("next_retry_at", now_wall),
+                        "capacity": raw.get("capacity", False),
+                        "queued_at": raw.get("queued_at", now_wall),
+                        "reason": raw.get("reason", "error"),
+                    }
+                    if str(legacy_meta["reason"]) in {
+                        "finalize",
+                        "finalize budget exceeded",
+                    }:
+                        finalize_raw = legacy_meta
+                    else:
+                        retry_raw = legacy_meta
+
+                def restore_meta(typed: Any, *, finalize: bool) -> None:
+                    if typed is None:
+                        return
+                    if not isinstance(typed, dict):
+                        raise ValueError("retry/finalize metadata must be an object")
+                    attempts = max(0, int(typed.get("attempts", 0)))
+                    retry_wall = float(typed.get("next_retry_at", now_wall))
+                    queued_at = float(typed.get("queued_at", now_wall))
+                    reason = str(
+                        typed.get("reason") or ("finalize" if finalize else "error")
+                    )
+                    close_epoch = max(0, int(typed.get("close_epoch", 0)))
+                    meta = {
+                        "attempts": attempts,
+                        "next_retry_at": now_mono + max(0.0, retry_wall - now_wall),
+                        "capacity": bool(typed.get("capacity", False)),
+                        "reason": reason,
+                        "queued_at": queued_at,
+                        "base_title": base_title,
+                        "base_title_known": bool(base_title_known),
+                        "candidate": candidate,
+                        "confirmations": confirmations,
+                        "expected_title": raw.get("expected_title"),
+                        "close_epoch": close_epoch,
+                    }
+                    if finalize:
+                        self._finalize_intents[sid] = meta
+                        self._closing_fenced.add(sid)
+                        self._closing_epochs[sid] = max(
+                            self._closing_epochs.get(sid, 0), close_epoch
+                        )
+                    else:
+                        self._failed_sessions[sid] = meta
+
+                with self._state_lock:
+                    restore_meta(retry_raw, finalize=False)
+                    restore_meta(finalize_raw, finalize=True)
+                restored += 1
+            except (TypeError, ValueError, OverflowError):
+                log.warning("auto-titler state: skipping invalid record %s", sid[:12])
+                with self._state_lock:
+                    self._pending.pop(sid, None)
+                    self._failed_sessions.pop(sid, None)
+                    self._clear_finalize_intent_locked(sid)
+                    self._rename_counts.pop(sid, None)
                 continue
-            candidate = raw.get("candidate")
-            if candidate:
-                self._pending[sid] = {
-                    "title": str(candidate),
-                    "base_title": base_title,
-                    "confirmations": max(0, int(raw.get("confirmations", 0))),
-                }
-            retry_wall = float(raw.get("next_retry_at", now_wall))
-            with self._retry_lock:
-                self._failed_sessions[sid] = {
-                    "attempts": max(0, int(raw.get("attempts", 0))),
-                    "next_retry_at": now_mono + max(0.0, retry_wall - now_wall),
-                    "capacity": bool(raw.get("capacity", False)),
-                    "reason": str(raw.get("reason") or "error"),
-                    "queued_at": float(raw.get("queued_at", now_wall)),
-                    "base_title": base_title,
-                    "candidate": candidate,
-                    "confirmations": max(0, int(raw.get("confirmations", 0))),
-                    "expected_title": raw.get("expected_title"),
-                }
-            rename_count = max(0, int(raw.get("rename_count", 0)))
-            if rename_count:
-                self._rename_counts[sid] = rename_count
-            restored += 1
         if restored:
             log.info("auto-titler state: restored %d session(s)", restored)
         if not unresolved:
@@ -633,9 +938,11 @@ class AutoTitler:
             result = self._execute_evaluate(session_id, force=force, blind=blind)
             return result
         finally:
-            # 无论从何种分支返回，只要对该 session 启动了评估，释放对应的首轮快照，杜绝内存泄漏
-            self._pre_llm_snapshots.pop(session_id, None)
-            self._persist_state()
+            # State mutations in _execute_evaluate and their durable snapshot are
+            # one barrier transaction. Network I/O remains outside this section.
+            with self._state_lock:
+                self._pre_llm_snapshots.pop(session_id, None)
+                self._persist_state_locked()
 
     def _execute_evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
         if not self.cfg.get("enabled", True) and not force:
@@ -656,6 +963,7 @@ class AutoTitler:
             self._pending.pop(session_id, None)
             with self._retry_lock:
                 self._failed_sessions.pop(session_id, None)
+                self._clear_finalize_intent_locked(session_id)
             return {"action": "skipped", "reason": "user title is authoritative"}
 
         try:
@@ -669,6 +977,7 @@ class AutoTitler:
         if src is None and current:
             with self._retry_lock:
                 self._failed_sessions.pop(session_id, None)
+                self._clear_finalize_intent_locked(session_id)
             return {"action": "skipped", "reason": "legacy title (NULL provenance) is protected"}
 
         # 达到上限时在调用模型前短路，避免继续消耗标题模型额度。blind 是用户
@@ -681,6 +990,9 @@ class AutoTitler:
         )
         if limit_result is not None:
             self._pending.pop(session_id, None)
+            with self._retry_lock:
+                self._failed_sessions.pop(session_id, None)
+                self._clear_finalize_intent_locked(session_id)
             return limit_result
 
         recent, all_user, opening, earlier_summary = load_context_with_summary(
@@ -712,6 +1024,7 @@ class AutoTitler:
                 # 无消息会话不可评估，移出重试账本防止无限重试
                 with self._retry_lock:
                     self._failed_sessions.pop(session_id, None)
+                    self._clear_finalize_intent_locked(session_id)
                 return {"action": "skipped", "reason": "no messages"}
 
         self._last_eval[session_id] = time.monotonic()
@@ -888,6 +1201,9 @@ class AutoTitler:
             )
             if result is not None:
                 self._pending.pop(session_id, None)
+                with self._retry_lock:
+                    self._failed_sessions.pop(session_id, None)
+                    self._clear_finalize_intent_locked(session_id)
                 return result
 
         previous_title = expected_title
@@ -910,6 +1226,8 @@ class AutoTitler:
                 )
                 if result is not None:
                     self._pending.pop(session_id, None)
+                    self._failed_sessions.pop(session_id, None)
+                    self._clear_finalize_intent_locked(session_id)
                     return result
                 written = self._write(db, session_id, title, expected_title=expected_title)
                 # 只统计“已有标题 → 新标题”的自动替换；首次生成不消耗额度。

@@ -663,11 +663,11 @@ def test_config_command_rejects_nan_inf_and_bad_numeric_bool(monkeypatch, tmp_pa
     h = make_handler(t)
     # NaN / inf（YAML 与命令两条入口共用 coerce_value 校验）
     for bad in ("nan", "inf", "-inf"):
-        assert "值无效" in h(f"config min_interval_minutes {bad}")
+        assert "Invalid value" in h(f"config min_interval_minutes {bad}")
         assert t.cfg["min_interval_minutes"] == 5.0
     # 数值布尔只接受 0/1
     for bad in ("2", "-1", "0.5"):
-        assert "值无效" in h(f"config enabled {bad}")
+        assert "Invalid value" in h(f"config enabled {bad}")
         assert t.cfg["enabled"] is True
     h("config enabled 0")
     assert t.cfg["enabled"] is False

@@ -1,4 +1,4 @@
-"""/autotitler 斜杠命令：status / config / rename-now / retitle-all。"""
+"""/autotitler slash command: status / config / rename-now / retitle-all."""
 
 from __future__ import annotations
 
@@ -10,21 +10,19 @@ def _set_config(titler, key: str, value: str) -> str:
     from .config import coerce_value, save_config
 
     if key not in cfg:
-        return f"未知配置键: {key}"
+        return f"Unknown config key: {key}"
     try:
         v = coerce_value(key, value)
     except ValueError as e:
-        return f"值无效: {value}（{e}）"
+        return f"Invalid value: {value} ({e})"
     cfg[key] = v
     save_config(cfg)
     if key == "enabled":
-        # hook 注册在插件加载（register）时按初始 enabled 决定；运行期
-        # false→true 只写配置，hook 要等重启才注册。
         return (
-            f"{key} = {v}（已写入 config.yaml；hook 注册在插件加载时决定，"
-            "初始 false→true 需重启 Hermes 生效）"
+            f"{key} = {v} (saved to config.yaml; hooks are selected at plugin "
+            "load, so changing false to true requires a Hermes restart)"
         )
-    return f"{key} = {v}（已写入 config.yaml，立即生效）"
+    return f"{key} = {v} (saved to config.yaml; effective immediately)"
 
 
 def _fmt_result(r: dict[str, Any]) -> str:
@@ -52,7 +50,8 @@ def make_handler(titler) -> Callable[[str], str]:
                 f" | model={c['model'] or '(host default)'}"
                 f" | interval={c['min_interval_minutes']}m | max_len={c['max_title_length']}"
                 f" | max_renames={c.get('max_renames_per_session', 0)}"
-                f" | failed_queue={len(titler._failed_sessions)}"
+                f" | retry_queue={len(titler._failed_sessions)}"
+                f" | finalize_queue={len(titler._finalize_intents)}"
                 f"{log_section}"
             )
 
@@ -60,8 +59,8 @@ def make_handler(titler) -> Callable[[str], str]:
             if len(args) >= 3:
                 return _set_config(titler, args[1], args[2])
             if len(args) == 2:
-                return f"{args[1]}: {titler.cfg.get(args[1], '（未知键）')}"
-            return "用法: /autotitler config <key> [value]"
+                return f"{args[1]}: {titler.cfg.get(args[1], '(unknown key)')}"
+            return "Usage: /autotitler config <key> [value]"
 
         if cmd == "rename-now":
             raw_arg = args[1] if len(args) > 1 else ""
@@ -73,7 +72,10 @@ def make_handler(titler) -> Callable[[str], str]:
             if not sid:
                 sid = titler._current_session
             if not sid:
-                return "没有可用的会话（最近未发生对话）。可指定: /autotitler rename-now <session_id>"
+                return (
+                    "No active session is available. Specify one with: "
+                    "/autotitler rename-now <session_id>"
+                )
             # 手动重命名代表用户显式即时意图，必须旁路评审协议（blind=True），立即生成并落库
             r = titler.evaluate(sid, force=True, blind=True)
             return _fmt_result({"session_id": sid, **r})
@@ -101,11 +103,11 @@ def make_handler(titler) -> Callable[[str], str]:
             ]
             lines += [_fmt_result(r) for r in results[:20]]
             if len(results) > 20:
-                lines.append(f"  ... 共 {len(results)} 个会话")
+                lines.append(f"  ... {len(results)} sessions total")
             return "\n".join(lines)
 
         return (
-            "用法:\n"
+            "Usage:\n"
             "  /autotitler status\n"
             "  /autotitler config <key> [value]\n"
             "  /autotitler rename-now [session_id]\n"

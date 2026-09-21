@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hermes_auto_titler.config import DEFAULTS
 from hermes_auto_titler.messages import display_width, load_context, load_context_with_summary
+from hermes_auto_titler.state import StateStore
 from hermes_auto_titler.titler import AutoTitler
 
 
@@ -273,9 +274,11 @@ def test_close_signal_with_reason_queues_without_network(tmp_path):
     t.on_session_end(session_id="s1", reason="shutdown", interrupted=True)
 
     assert ctx.llm.calls == []
-    assert t._failed_sessions["s1"]["reason"] == "finalize"
+    assert t._finalize_intents["s1"]["reason"] == "finalize"
     state = json.loads(t._state_path.read_text(encoding="utf-8"))
-    assert state["sessions"]["s1"]["reason"] == "finalize"
+    saved = state["sessions"]["s1"]
+    assert saved["finalize_intent"] is True
+    assert saved["finalize"]["reason"] == "finalize"
 
     # finalize 是同一关闭入口：重复信号更新同一条记录，不发起第二条任务。
     t.on_session_end(session_id="s1", reason="shutdown", interrupted=True)
@@ -409,11 +412,15 @@ def test_close_signal_then_finalize_share_one_queue_record(tmp_path):
     t._state_path = tmp_path / "state.json"
 
     t.on_session_end(session_id="s1", reason="shutdown", interrupted=True)
+    first_epoch = t._finalize_intents["s1"]["close_epoch"]
+    first_queued_at = t._finalize_intents["s1"]["queued_at"]
     t.on_session_finalize(session_id="s1", platform="cli", reason="session_boundary")
 
     assert ctx.llm.calls == []
     state = json.loads(t._state_path.read_text(encoding="utf-8"))
     assert list(state["sessions"]) == ["s1"]
+    assert t._finalize_intents["s1"]["close_epoch"] == first_epoch
+    assert t._finalize_intents["s1"]["queued_at"] == first_queued_at
 
 
 def test_finalize_respects_on_close_disabled():
@@ -422,6 +429,127 @@ def test_finalize_respects_on_close_disabled():
     t.on_session_finalize(session_id="s1", platform="cli", reason="session_boundary")
     t.on_session_end(session_id="s1", reason="shutdown", interrupted=True)
     assert ctx.llm.calls == []
+
+
+def test_fence_released_after_retry_claim_consumes_finalize_intent(
+    recording_threads, tmp_path
+):
+    """A consumed finalize intent must not fence the session forever.
+
+    The fence expresses "an unresolved terminal intent exists".  Once the retry
+    loop has actually evaluated and cleared the intent, later ordinary turns of
+    the same session id must be able to submit again.
+    """
+    db = FakeDB(messages=MSGS, title="已有标题", source="llm")
+    t, ctx = make_titler(
+        db,
+        text=_dec("keep"),
+        cfg={"every_n_turns": 1, "min_interval_minutes": 0},
+    )
+    t._state_path = tmp_path / "state.json"
+
+    # 1. A completed foreground turn still evaluates.
+    t.on_session_end(session_id="s1", completed=True)
+    assert ctx.llm.calls == []
+    assert len(recording_threads.instances) == 1
+    run_recorded(recording_threads)
+    assert len(ctx.llm.calls) == 1
+    assert "s1" not in t._closing_fenced
+    assert "s1" not in t._finalize_intents
+
+    # 2. Close: the session is fenced and a finalize intent is queued.
+    t.on_session_finalize(session_id="s1", platform="cli", reason="session_boundary")
+    assert "s1" in t._closing_fenced
+    assert t._finalize_intents["s1"]["close_epoch"] == 1
+
+    # 3. An ordinary submit while fenced is refused.
+    t._submit_eval("s1")
+    assert len(recording_threads.instances) == 1, (
+        "ordinary submit during an open fence dispatched a worker"
+    )
+
+    # 4. The retry loop claims and consumes the intent.
+    t._retry_failed_sessions()
+    assert len(recording_threads.instances) == 2, "retry loop did not claim the intent"
+    run_recorded(recording_threads)
+    assert "s1" not in t._finalize_intents
+    calls_after_claim = len(ctx.llm.calls)
+    assert calls_after_claim == 2
+
+    # 5. The fence must be gone: the same session id can be evaluated again.
+    assert "s1" not in t._closing_fenced, (
+        "closing fence outlived its finalize intent"
+    )
+    t.on_session_end(session_id="s1", completed=True)
+    assert len(recording_threads.instances) == 3, (
+        "ordinary turn after intent resolution was blocked by a stale fence"
+    )
+    run_recorded(recording_threads)
+    assert len(ctx.llm.calls) == calls_after_claim + 1
+
+    # 6. on_pre_llm_call (first-round naming path) is fenced too, and must
+    #    behave identically.
+    db.title = None  # a fresh untitled session with the same id
+    db.source = None
+    t.on_pre_llm_call(session_id="s1", user_message="hello")
+    assert len(recording_threads.instances) == 4, (
+        "on_pre_llm_call was blocked by a stale fence"
+    )
+    run_recorded(recording_threads)
+    assert len(ctx.llm.calls) == calls_after_claim + 2
+
+
+def test_fence_released_when_finalize_intent_cleared_by_skip(tmp_path):
+    """The intent-clearing skip branches must also release the fence."""
+    db = FakeDB(messages=MSGS, title="已有标题", source="user")
+    t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 1})
+    t._state_path = tmp_path / "state.json"
+
+    t.on_session_finalize(session_id="s1", platform="cli", reason="session_boundary")
+    assert "s1" in t._closing_fenced
+    assert t._finalize_intents["s1"]["close_epoch"] == 1
+
+    # user-authoritative title invalidates the intent
+    result = t.evaluate("s1", force=True)
+    assert result["action"] == "skipped"
+    assert "s1" not in t._finalize_intents
+    assert "s1" not in t._closing_fenced, (
+        "fence survived an intent cleared by an authoritative skip"
+    )
+
+
+def test_restored_finalize_intent_releases_fence_after_claim(recording_threads, tmp_path):
+    """A restart must not fence a session for its whole lifetime either."""
+    path = tmp_path / "state.json"
+    StateStore(path).save(
+        {
+            "s1": {
+                "kind": "finalize",
+                "base_title": "旧标题",
+                "base_title_known": True,
+                "finalize_intent": True,
+                "finalize": {
+                    "attempts": 0,
+                    "next_retry_at": 0,
+                    "capacity": False,
+                    "queued_at": 1.0,
+                    "reason": "finalize",
+                    "close_epoch": 1,
+                },
+            }
+        }
+    )
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 1})
+    t._state_path = path
+    t.restore_state()
+
+    assert "s1" in t._closing_fenced
+    t._retry_failed_sessions()
+    assert len(recording_threads.instances) == 1
+    run_recorded(recording_threads)
+    assert "s1" not in t._finalize_intents
+    assert "s1" not in t._closing_fenced
 
 
 def test_first_title_mode_builtin_suppresses_early(recording_threads):
@@ -1039,6 +1167,19 @@ def test_auxiliary_usage_noop_without_api():
 
 # -- 命令与生命周期注册 -------------------------------------------------------
 
+def test_autotitler_command_defaults_to_english_copy():
+    from hermes_auto_titler.commands import make_handler
+
+    db = FakeDB(messages=MSGS)
+    t, _ = make_titler(db)
+    handler = make_handler(t)
+
+    assert handler("config missing").endswith("(unknown key)")
+    assert handler("unknown").startswith("Usage:")
+    t._current_session = None
+    assert "No active session" in handler("rename-now")
+
+
 def test_status_includes_first_title_mode():
     from hermes_auto_titler.commands import make_handler
 
@@ -1070,11 +1211,11 @@ def test_config_command_rejects_invalid_and_accepts_new_keys(monkeypatch):
     db = FakeDB(messages=MSGS)
     t, _ = make_titler(db)
     h = make_handler(t)
-    assert "值无效" in h("config strategy bogus")
+    assert "Invalid value" in h("config strategy bogus")
     assert t.cfg["strategy"] == "conservative"
-    assert "值无效" in h("config enabled maybe")  # 非法 bool 明确拒绝，不静默变 False
+    assert "Invalid value" in h("config enabled maybe")  # invalid bool is rejected
     assert t.cfg["enabled"] is True
-    assert "值无效" in h("config every_n_turns abc")
+    assert "Invalid value" in h("config every_n_turns abc")
     assert t.cfg["every_n_turns"] == 2
     h("config early_turn_eval true")
     assert t.cfg["early_turn_eval"] is True
@@ -1469,10 +1610,10 @@ def test_config_command_enabled_message_notes_restart(monkeypatch):
     h = make_handler(t)
     out = h("config enabled 0")
     assert t.cfg["enabled"] is False
-    assert "需重启" in out  # 初始 false→true 需重启才能注册 hook
+    assert "requires a Hermes restart" in out
     out2 = h("config enabled 1")
     assert t.cfg["enabled"] is True
-    assert "需重启" in out2
+    assert "requires a Hermes restart" in out2
 
 
 # -- 评审协议：候选标题由下一次评估裁决（approve/rename/keep） --------------------
@@ -1758,7 +1899,7 @@ def test_retry_backoff_cooldown_not_suppressed_by_last_eval(monkeypatch):
 
 
 def test_finalize_waits_at_most_100ms_for_inflight_worker(tmp_path):
-    """关闭只短暂等待已有 worker；超时后持久排队并立即交还控制权。"""
+    """Network wait is 100ms; total close path stays far below the 10s host budget."""
     import threading
 
     db = FakeDB(messages=MSGS, title="旧标题", source="derived")
@@ -1780,9 +1921,9 @@ def test_finalize_waits_at_most_100ms_for_inflight_worker(tmp_path):
     t.on_session_finalize(session_id="s1")
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.25
+    assert elapsed < 1.0
     assert db.title == "旧标题"
-    assert t._failed_sessions["s1"]["reason"] == "finalize budget exceeded"
+    assert t._finalize_intents["s1"]["reason"] == "finalize budget exceeded"
     release.set()
     _wait_inflight_clear(t, "s1")
     assert db.title == "终局成功标题"

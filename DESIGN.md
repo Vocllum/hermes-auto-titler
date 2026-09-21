@@ -326,6 +326,6 @@ The default comparison is the current prompt. Select extra variants explicitly; 
 1. **`first_title_mode` 的宿主副作用不可逆管理**：插件能关闭内建标题器，但不知道它原本是谁关的，也不会自动恢复。更好的长期设计是保存所有权/原值，或让宿主提供临时抑制接口。
 2. **status 不解析宿主实际路由**：默认 auxiliary 模式下只能看到 `(host default)`。
 3. **llm→llm 没有宿主级 CAS**：只能等待 Hermes 提供更合适的公开写入 API。
-4. **进程内状态重启即丢失**：pending、确认次数、轮数和频次窗口都不会跨进程保留，这是当前刻意接受的本地行为。
+4. **调度状态跨重启恢复与门禁对齐**：`state.json` 原子持久化 typed `retry` / `finalize` / `pending_review` / `counter`。`_pending`、`_failed_sessions` 与 `_rename_counts` 均可安全重建；未背书候选绝不偷跑写库，普通 `counter` 与 `pending` 记录绝不误转重试。
 5. **高 N 会带来明显更新延迟**：确认按后续评估次数计算，而评估本身还受 `every_n_turns` / `min_interval_minutes` 约束，因此不建议无理由把 `rename_confirmations` 调得很大。
-6. **改名上限是进程内保护**：`max_renames_per_session` 默认关闭，且计数不跨重启持久化；它适合控制单次运行中的抖动和成本，不能作为跨进程的强审计配额。
+6. **改名上限持久化保护**：`max_renames_per_session` 默认关闭。设为 N 后按会话持久化累计改名次数，重启后继续生效，有效控制标题抖动与预算。

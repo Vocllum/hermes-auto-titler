@@ -1,5 +1,5 @@
 name: hermes-auto-titler
-version: 0.2.3
+version: 0.2.3.1
 description: "Topic-aware session title tracking. Default takeover mode disables Hermes built-in title generation by writing auxiliary.title_generation.enabled=false; uninstalling does not restore that setting automatically."
 author: "Vocllum"
 provides_hooks:

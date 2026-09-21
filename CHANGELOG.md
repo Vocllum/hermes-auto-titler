@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.3.1 — 2026-09-21
+
+- **Rename write-back verification**: Both host write-back paths for automatic renames are now exercised against a real database under the host's own transaction rules. No behavior change; 0.2.3 does not lose session titles.
+
 ## 0.2.3 — 2026-09-21
 
 - **First-turn end override**: Once the first turn completes with the assistant's response, immediately evaluate and override the initial eager preview title from the full turn context without cadence or debounce delays.

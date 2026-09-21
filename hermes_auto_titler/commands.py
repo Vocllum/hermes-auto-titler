@@ -22,6 +22,39 @@ def _set_config(titler, key: str, value: str) -> str:
             f"{key} = {v} (saved to config.yaml; hooks are selected at plugin "
             "load, so changing false to true requires a Hermes restart)"
         )
+    if key == "first_title_mode":
+        if v == "builtin":
+            restored = False
+            try:
+                from .config import enable_builtin_title_generation
+                restored = enable_builtin_title_generation()
+            except Exception:
+                pass
+            note = (
+                "restored host auxiliary.title_generation.enabled=true"
+                if restored
+                else "check host auxiliary.title_generation.enabled"
+            )
+            return (
+                f"{key} = {v} (saved to config.yaml; startup-level setting that "
+                f"requires a Hermes restart; {note})"
+            )
+        if v == "plugin":
+            disabled = False
+            try:
+                from .config import disable_builtin_title_generation
+                disabled = disable_builtin_title_generation()
+            except Exception:
+                pass
+            note = (
+                "disabled host auxiliary.title_generation.enabled"
+                if disabled
+                else "host auxiliary.title_generation.enabled already false"
+            )
+            return (
+                f"{key} = {v} (saved to config.yaml; startup-level setting that "
+                f"requires a Hermes restart; {note})"
+            )
     return f"{key} = {v} (saved to config.yaml; effective immediately)"
 
 

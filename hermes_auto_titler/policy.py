@@ -25,7 +25,13 @@ log = logging.getLogger(__name__)
 class AutoTitler(_BaseAutoTitler):
     """Policy-specialized AutoTitler while reusing the core lifecycle/write path."""
 
-    def evaluate(self, session_id: str, force: bool = False, blind: bool = False):
+    def evaluate(
+        self,
+        session_id: str,
+        force: bool = False,
+        blind: bool = False,
+        claim_epoch: Optional[int] = None,
+    ):
         """Invalidate review state if another automatic writer changed the base title."""
         with self._state_lock:
             pending = self._pending.get(session_id)
@@ -37,7 +43,9 @@ class AutoTitler(_BaseAutoTitler):
                 if current != pending.get("base_title"):
                     self._pending.pop(session_id, None)
 
-        return super().evaluate(session_id, force=force, blind=blind)
+        return super().evaluate(
+            session_id, force=force, blind=blind, claim_epoch=claim_epoch
+        )
 
     def _commit_rename(
         self,
@@ -47,6 +55,7 @@ class AutoTitler(_BaseAutoTitler):
         expected_title: Optional[str] = None,
         *,
         bypass_limit: bool = False,
+        claim_epoch: Optional[int] = None,
     ):
         """Require exactly ``rename_confirmations`` follow-up endorsements."""
         with self._state_lock:
@@ -72,6 +81,7 @@ class AutoTitler(_BaseAutoTitler):
                 title,
                 expected_title=expected_title,
                 bypass_limit=bypass_limit,
+                claim_epoch=claim_epoch,
             )
 
     def _generate(

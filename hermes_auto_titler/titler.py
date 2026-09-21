@@ -271,7 +271,14 @@ class AutoTitler:
         if not session_id:
             return
         self._current_session = session_id
-        self._close_eval(session_id)
+        try:
+            self._close_eval(session_id)
+        except Exception:
+            log.warning(
+                "auto-titler finalize failed; failing open for session %s",
+                session_id[:12],
+                exc_info=True,
+            )
 
     # -- 评估调度 -----------------------------------------------------------
 
@@ -319,18 +326,20 @@ class AutoTitler:
                     finalize_claim = int(fin.get("close_epoch", 0))
             try:
                 src = self.db.get_session_title_source(sid)
-                if src == SessionDB.TITLE_SOURCE_USER:
-                    to_remove.append(sid)
-                    continue
-                cur_title = self.db.get_session_title(sid)
-                if (
-                    sid not in self._finalize_intents
-                    and cur_title
-                    and src == SessionDB.TITLE_SOURCE_LLM
-                    and not self._pending.get(sid)
-                ):
-                    to_remove.append(sid)
-                    continue
+                if finalize_claim is None:
+                    if src == SessionDB.TITLE_SOURCE_USER:
+                        to_remove.append(sid)
+                        continue
+                    cur_title = self.db.get_session_title(sid)
+                    if (
+                        cur_title
+                        and src == SessionDB.TITLE_SOURCE_LLM
+                        and not self._pending.get(sid)
+                    ):
+                        to_remove.append(sid)
+                        continue
+                else:
+                    cur_title = self.db.get_session_title(sid)
             except Exception:
                 # DB unknown is not proof of staleness; leave the intent queued.
                 continue
@@ -357,7 +366,6 @@ class AutoTitler:
             with self._state_lock:
                 for sid in to_remove:
                     self._failed_sessions.pop(sid, None)
-                    self._clear_finalize_intent_locked(sid)
             self._persist_state()
 
         for sid, finalize_claim in to_retry:
@@ -544,10 +552,17 @@ class AutoTitler:
                     # snapshot. It must not be throttled by the last periodic eval.
                     # Eager pre-titles must also not throttle the first full turn's evaluation.
                     try:
-                        result = self.evaluate(
-                            session_id,
-                            force=force_eval or covers_finalize or current_override,
-                        )
+                        try:
+                            result = self.evaluate(
+                                session_id,
+                                force=force_eval or covers_finalize or current_override,
+                                claim_epoch=worker_epoch,
+                            )
+                        except TypeError:
+                            result = self.evaluate(
+                                session_id,
+                                force=force_eval or covers_finalize or current_override,
+                            )
                     finally:
                         with self._state_lock:
                             self._active_override_sessions.discard(session_id)
@@ -568,7 +583,7 @@ class AutoTitler:
                                 # validated and re-claimed.
                                 and meta.get("base_title_known", True)
                             ):
-                                self._clear_finalize_intent_locked(session_id)
+                                self._clear_finalize_intent_locked(session_id, close_epoch=worker_epoch)
                         elif covers_finalize:
                             meta = self._finalize_intents.get(session_id)
                             if meta:
@@ -592,8 +607,7 @@ class AutoTitler:
                     if session_id in self._dirty_sessions:
                         self._dirty_sessions.remove(session_id)
                         force_eval = True
-                        worker_epoch = self._closing_epochs.get(session_id, worker_epoch)
-                        self._worker_epochs[session_id] = worker_epoch
+                        # Dirty rerun triggers re-evaluation but never promotes epoch/finalize claim
                         if session_id in self._dirty_override_intents:
                             self._dirty_override_intents.discard(session_id)
                             current_override = True
@@ -672,7 +686,9 @@ class AutoTitler:
         with self._state_lock:
             self._queue_session_locked(session_id, reason=reason, close_epoch=close_epoch)
 
-    def _clear_finalize_intent_locked(self, session_id: str) -> None:
+    def _clear_finalize_intent_locked(
+        self, session_id: str, *, close_epoch: Optional[int] = None
+    ) -> bool:
         """Drop a finalize intent together with the closing fence it created.
 
         The fence only means "an unresolved terminal intent exists".  Once the
@@ -681,9 +697,14 @@ class AutoTitler:
         protection, rename cap, empty session) — the session must regain
         ordinary foreground titling instead of being barred forever.
         """
+        meta = self._finalize_intents.get(session_id)
+        if meta is not None:
+            if close_epoch is None or int(meta.get("close_epoch", 0)) > close_epoch:
+                return False
         self._finalize_intents.pop(session_id, None)
         if session_id not in self._finalize_intents:
             self._closing_fenced.discard(session_id)
+        return True
 
     def _queue_session_locked(
         self,
@@ -820,7 +841,10 @@ class AutoTitler:
         return sessions
 
     def _persist_state_locked(self) -> None:
-        StateStore(self._state_path).save(self._persistent_sessions())
+        try:
+            StateStore(self._state_path).save(self._persistent_sessions())
+        except Exception:
+            log.warning("auto-titler state persistence failed", exc_info=True)
 
     def _persist_state(self) -> None:
         try:
@@ -958,7 +982,8 @@ class AutoTitler:
                 with self._state_lock:
                     self._pending.pop(sid, None)
                     self._failed_sessions.pop(sid, None)
-                    self._clear_finalize_intent_locked(sid)
+                    self._finalize_intents.pop(sid, None)
+                    self._closing_fenced.discard(sid)
                     self._rename_counts.pop(sid, None)
                 continue
         if restored:
@@ -968,9 +993,15 @@ class AutoTitler:
 
     # -- 评估 ---------------------------------------------------------------
 
-    def evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
+    def evaluate(
+        self,
+        session_id: str,
+        force: bool = False,
+        blind: bool = False,
+        claim_epoch: Optional[int] = None,
+    ) -> Dict[str, Any]:
         t0 = time.monotonic()
-        res = self._do_evaluate(session_id, force=force, blind=blind)
+        res = self._do_evaluate(session_id, force=force, blind=blind, claim_epoch=claim_epoch)
         dur_ms = int((time.monotonic() - t0) * 1000)
         action = res.get("action", "unknown")
         reason = res.get("reason") or res.get("candidate") or res.get("title") or ""
@@ -979,9 +1010,22 @@ class AutoTitler:
         log.info("auto-titler audit: %s", log_line)
         return res
 
-    def _do_evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
+    def _do_evaluate(
+        self,
+        session_id: str,
+        force: bool = False,
+        blind: bool = False,
+        claim_epoch: Optional[int] = None,
+    ) -> Dict[str, Any]:
         try:
-            result = self._execute_evaluate(session_id, force=force, blind=blind)
+            try:
+                result = self._execute_evaluate(
+                    session_id, force=force, blind=blind, claim_epoch=claim_epoch
+                )
+            except TypeError:
+                result = self._execute_evaluate(
+                    session_id, force=force, blind=blind
+                )
             return result
         finally:
             # State mutations in _execute_evaluate and their durable snapshot are
@@ -990,9 +1034,21 @@ class AutoTitler:
                 self._pre_llm_snapshots.pop(session_id, None)
                 self._persist_state_locked()
 
-    def _execute_evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
+    def _execute_evaluate(
+        self,
+        session_id: str,
+        force: bool = False,
+        blind: bool = False,
+        claim_epoch: Optional[int] = None,
+    ) -> Dict[str, Any]:
         with self._state_lock:
             first_turn_override = session_id in self._active_override_sessions
+            if claim_epoch is not None:
+                active_claim = claim_epoch
+            elif force and session_id not in self._worker_epochs:
+                active_claim = int(self._finalize_intents.get(session_id, {}).get("close_epoch", 0))
+            else:
+                active_claim = 0
         if not self.cfg.get("enabled", True) and not force and not first_turn_override:
             return {"action": "disabled"}
         db = self.db
@@ -1011,7 +1067,7 @@ class AutoTitler:
             self._pending.pop(session_id, None)
             with self._retry_lock:
                 self._failed_sessions.pop(session_id, None)
-                self._clear_finalize_intent_locked(session_id)
+                self._clear_finalize_intent_locked(session_id, close_epoch=active_claim)
             with self._state_lock:
                 self._eager_pre_sessions.discard(session_id)
             return {"action": "skipped", "reason": "user title is authoritative"}
@@ -1027,7 +1083,7 @@ class AutoTitler:
         if src is None and current:
             with self._retry_lock:
                 self._failed_sessions.pop(session_id, None)
-                self._clear_finalize_intent_locked(session_id)
+                self._clear_finalize_intent_locked(session_id, close_epoch=active_claim)
             with self._state_lock:
                 self._eager_pre_sessions.discard(session_id)
             return {"action": "skipped", "reason": "legacy title (NULL provenance) is protected"}
@@ -1045,7 +1101,7 @@ class AutoTitler:
                 self._pending.pop(session_id, None)
                 with self._retry_lock:
                     self._failed_sessions.pop(session_id, None)
-                    self._clear_finalize_intent_locked(session_id)
+                    self._clear_finalize_intent_locked(session_id, close_epoch=active_claim)
                 return limit_result
 
         recent, all_user, opening, earlier_summary = load_context_with_summary(
@@ -1077,7 +1133,7 @@ class AutoTitler:
                 # 无消息会话不可评估，移出重试账本防止无限重试
                 with self._retry_lock:
                     self._failed_sessions.pop(session_id, None)
-                    self._clear_finalize_intent_locked(session_id)
+                    self._clear_finalize_intent_locked(session_id, close_epoch=active_claim)
                 return {"action": "skipped", "reason": "no messages"}
 
         self._last_eval[session_id] = time.monotonic()
@@ -1161,6 +1217,7 @@ class AutoTitler:
                     proposed,
                     expected_title=current,
                     bypass_limit=blind,
+                    claim_epoch=active_claim,
                 )
             if action == "rename" and candidate and candidate != current:
                 # 模型给出更好的新候选：替换待审，旧候选作废，并记录生成时的 current 快照作为 base_title
@@ -1208,6 +1265,7 @@ class AutoTitler:
             candidate,
             expected_title=current,
             bypass_limit=blind or first_turn_override,
+            claim_epoch=active_claim,
         )
 
     @staticmethod
@@ -1235,11 +1293,13 @@ class AutoTitler:
         expected_title: Optional[str] = None,
         *,
         bypass_limit: bool = False,
+        claim_epoch: Optional[int] = None,
     ) -> Dict[str, Any]:
         """实际写库 + 状态清理。title 必须是已 _prepare_candidate 的候选。"""
         # _do_evaluate() 已在模型调用前检查过一次；这里再检查一次，覆盖
         # review/pending 和并发评估之间的窗口。锁只保护插件计数，不替代
         # SessionDB 自己的写入 CAS。
+        active_claim = claim_epoch if claim_epoch is not None else 0
         if not bypass_limit:
             current = expected_title
             if current is None:
@@ -1256,7 +1316,7 @@ class AutoTitler:
                 self._pending.pop(session_id, None)
                 with self._retry_lock:
                     self._failed_sessions.pop(session_id, None)
-                    self._clear_finalize_intent_locked(session_id)
+                    self._clear_finalize_intent_locked(session_id, close_epoch=active_claim)
                 return result
 
         previous_title = expected_title
@@ -1280,7 +1340,7 @@ class AutoTitler:
                 if result is not None:
                     self._pending.pop(session_id, None)
                     self._failed_sessions.pop(session_id, None)
-                    self._clear_finalize_intent_locked(session_id)
+                    self._clear_finalize_intent_locked(session_id, close_epoch=active_claim)
                     return result
                 written = self._write(db, session_id, title, expected_title=expected_title)
                 # 只统计“已有标题 → 新标题”的自动替换；首次生成不消耗额度。

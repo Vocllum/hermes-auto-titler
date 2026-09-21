@@ -730,3 +730,49 @@ def test_clean_assistant_dialog_strips_xml_control_tags_and_code():
     assert "[tool: terminal]" not in cleaned
     assert "print('hello')" not in cleaned
     assert "已成功完成插件发布与验证。" in cleaned
+
+
+def test_first_title_mode_config_requires_restart_and_manages_host(monkeypatch, tmp_path):
+    """P2: /autotitler config first_title_mode must report restart-required and manage host config."""
+    import sys
+    from hermes_auto_titler.commands import make_handler
+    from hermes_auto_titler.config import load_config
+    from hermes_auto_titler.titler import AutoTitler
+
+    host = {"auxiliary": {"title_generation": {"enabled": False}}}
+    saved_host = []
+    fake = type("ConfigModule", (), {
+        "load_config": staticmethod(lambda: host),
+        "save_config": staticmethod(lambda cfg: saved_host.append(dict(cfg))),
+    })
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+
+    p = tmp_path / "config.yaml"
+    p.write_text("first_title_mode: plugin\n", encoding="utf-8")
+    saved_plugin = []
+    monkeypatch.setattr(
+        "hermes_auto_titler.config.save_config",
+        lambda cfg, path=None: saved_plugin.append(dict(cfg)),
+    )
+
+    t = AutoTitler(
+        type("Ctx", (), {"llm": None})(),
+        load_config(path=p),
+        db=type("DB", (), {})(),
+    )
+    h = make_handler(t)
+
+    # Switch to builtin
+    out = h("config first_title_mode builtin")
+    assert "requires a Hermes restart" in out
+    assert "restored host auxiliary.title_generation.enabled=true" in out
+    assert host["auxiliary"]["title_generation"]["enabled"] is True
+    assert t.cfg["first_title_mode"] == "builtin"
+
+    # Switch to plugin
+    out = h("config first_title_mode plugin")
+    assert "requires a Hermes restart" in out
+    assert "disabled host auxiliary.title_generation.enabled" in out
+    assert host["auxiliary"]["title_generation"]["enabled"] is False
+    assert t.cfg["first_title_mode"] == "plugin"
+

@@ -5,6 +5,10 @@
 ## 0.2.3 — 2026-09-21
 
 - **First-turn end override**: Once the first turn completes with the assistant's response, immediately evaluate and override the initial eager preview title from the full turn context without cadence or debounce delays.
+- **Finalize intent epoch verification**: Ordinary retry cleanup is strictly scoped to retry ledgers and can never delete concurrent finalize intents; finalize intents can only be cleared by claimants holding and verifying matching close epochs.
+- **Worker epoch immutability**: Worker epoch and finalize claim are fixed at creation time; in-flight workers undergoing dirty reruns re-evaluate fresh context without self-upgrading to finalize claimants.
+- **Fail-open finalize persistence**: Catch filesystem and serialization exceptions during close and finalize flows, ensuring host teardown is never interrupted by storage errors.
+- **Restart-required `first_title_mode` feedback**: Explicitly report that `first_title_mode` is a startup-level configuration requiring a Hermes restart, and automatically manage and report host `auxiliary.title_generation.enabled` when switching between builtin and plugin modes.
 - **Strict user authority & error backoff**: Unconditionally preserve manual user titles, and safely route provider/network errors to the exponential retry ledger.
 
 ## 0.2.2 — 2026-09-21

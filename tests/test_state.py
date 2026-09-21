@@ -1000,3 +1000,99 @@ def test_persistent_snapshot_barrier_blocks_pending_mutation(tmp_path, monkeypat
     persist_thread.join(2)
     mutation_thread.join(2)
     assert mutation_finished.is_set()
+
+
+def test_retry_cleanup_does_not_clear_concurrent_finalize_intent(tmp_path, monkeypatch):
+    """P1: Retry sweep must not erase a finalize intent created during the sweep."""
+    path = tmp_path / "state.json"
+    db = SessionDB({"s1": ("已生成标题", "llm")})
+    titler = make_titler(db, path)
+    titler._failed_sessions["s1"] = {
+        "attempts": 1,
+        "next_retry_at": 0,
+        "capacity": False,
+        "reason": "error",
+    }
+    titler._persist_state()
+
+    orig_source = db.get_session_title_source
+    def racing_source(sid):
+        res = orig_source(sid)
+        # Concurrent session finalize creates a finalize intent
+        titler._queue_session(sid, reason="finalize", close_epoch=1)
+        titler._closing_fenced.add(sid)
+        return res
+
+    monkeypatch.setattr(db, "get_session_title_source", racing_source)
+    titler._retry_failed_sessions()
+
+    assert "s1" not in titler._failed_sessions
+    assert "s1" in titler._finalize_intents
+    assert titler._finalize_intents["s1"]["close_epoch"] == 1
+    assert "s1" in titler._closing_fenced
+
+
+def test_dirty_rerun_does_not_promote_worker_to_finalize_claimant(tmp_path, monkeypatch):
+    """P1: An ordinary worker undergoing dirty rerun must not elevate to finalize claimant."""
+    import threading
+
+    path = tmp_path / "state.json"
+    titler = make_titler(SessionDB({"s1": ("已有标题", "llm")}), path)
+
+    first_eval_started = threading.Event()
+    release_first_eval = threading.Event()
+    eval_count = 0
+
+    def mock_eval(session_id, force=False, blind=False, claim_epoch=None):
+        nonlocal eval_count
+        eval_count += 1
+        if eval_count == 1:
+            first_eval_started.set()
+            assert release_first_eval.wait(2)
+        return {"action": "keep"}
+
+    monkeypatch.setattr(titler, "evaluate", mock_eval)
+
+    # Spawn an ordinary worker (epoch 0)
+    titler._submit_eval("s1")
+    assert first_eval_started.wait(2)
+
+    # While first eval is running, finalize happens and creates close_epoch=1
+    with titler._state_lock:
+        titler._closing_epochs["s1"] = 1
+        titler._queue_session_locked("s1", reason="finalize", close_epoch=1)
+        titler._closing_fenced.add("s1")
+
+    # Mark the session dirty to trigger a rerun in the same worker
+    with titler._inflight_lock:
+        titler._dirty_sessions.add("s1")
+
+    # Release the worker to do its dirty rerun
+    release_first_eval.set()
+    _drain_inflight(titler, "s1")
+
+    # The worker reran (eval_count == 2), but could NOT clear the finalize intent
+    # because its worker_epoch was 0 and was not upgraded.
+    assert eval_count >= 2
+    assert "s1" in titler._finalize_intents
+    assert titler._finalize_intents["s1"]["close_epoch"] == 1
+    assert "s1" in titler._closing_fenced
+
+
+def test_finalize_persistence_fails_open_on_io_error(tmp_path, monkeypatch):
+    """P1: Persistence errors during finalize must not bubble to host finalize."""
+    path = tmp_path / "state.json"
+    titler = make_titler(SessionDB({"s1": ("旧标题", "llm")}), path)
+
+    def broken_save(store, sessions):
+        raise OSError("Disk full: no space left on device")
+
+    monkeypatch.setattr(StateStore, "save", broken_save)
+
+    # on_session_finalize must NOT raise an exception
+    titler.on_session_finalize(session_id="s1", platform="cli", reason="session_boundary")
+
+    # And in-memory finalize state was still tracked under fence
+    assert "s1" in titler._closing_fenced
+    assert "s1" in titler._finalize_intents
+

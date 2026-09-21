@@ -240,3 +240,29 @@ def disable_builtin_title_generation() -> bool:
     title_generation["enabled"] = False
     save_host_config(host_cfg)
     return True
+
+
+def enable_builtin_title_generation() -> bool:
+    """Re-enable Hermes' built-in title generator when switching back to builtin mode.
+
+    Returns ``True`` when this call changed the host config, ``False`` when it was already
+    enabled. Callers should catch failures: an unavailable config writer must not stop
+    the plugin from updating its local config.
+    """
+    from hermes_cli.config import load_config as load_host_config, save_config as save_host_config
+
+    host_cfg = load_host_config() or {}
+    auxiliary = host_cfg.setdefault("auxiliary", {})
+    if not isinstance(auxiliary, dict):
+        auxiliary = {}
+        host_cfg["auxiliary"] = auxiliary
+    title_generation = auxiliary.setdefault("title_generation", {})
+    if not isinstance(title_generation, dict):
+        title_generation = {}
+        auxiliary["title_generation"] = title_generation
+    if title_generation.get("enabled") is True:
+        return False
+    title_generation["enabled"] = True
+    save_host_config(host_cfg)
+    return True
+

@@ -2137,3 +2137,149 @@ def test_disabled_titler_stops_retry_and_eval():
     res = t.evaluate("s1", force=False)
     assert res["action"] == "disabled"
     assert len(llm.calls) == 0
+
+
+def test_first_turn_end_overrides_eager_pre_title(recording_threads):
+    """首轮 pre_llm_call 生成草稿后，第一回合 end 绝不被防抖，直接全量覆盖落库。"""
+    db = FakeDB(
+        messages=[
+            {"role": "user", "content": "帮我写一个网页"},
+            {"role": "assistant", "content": "好，这是完整的网页代码"},
+        ],
+        title=None,
+        source=None,
+    )
+    class SequenceLlm:
+        def __init__(self):
+            self.calls = []
+        def complete(self, messages, **kwargs):
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                return SimpleNamespace(text='{"action":"rename","title":"草稿标题"}')
+            return SimpleNamespace(text='{"action":"rename","title":"正式网页开发"}')
+
+    seq_llm = SequenceLlm()
+    cfg = {
+        **DEFAULTS,
+        "every_n_turns": 3,         # 正常情况下第 1 轮不满足每 3 轮门禁
+        "min_interval_minutes": 5,   # 正常情况下 5 分钟内会被 throttle
+        "rename_confirmations": 2,   # 正常情况下 llm->llm 需要 2 轮确认进入 pending
+    }
+    t = AutoTitler(SimpleNamespace(llm=seq_llm), cfg, db=db)
+
+    # 1. 触发 pre_llm_call
+    t.on_pre_llm_call(session_id="s1", user_message="帮我写一个网页")
+    run_recorded(recording_threads)
+
+    # 验证 pre 已生成草稿标题并落库为 llm
+    assert db.title == "草稿标题"
+    assert db.source == "llm"
+    assert "s1" in t._first_turn_overrides
+    assert len(seq_llm.calls) == 1
+
+    # 2. 触发第一回合 on_session_end
+    t.on_session_end(session_id="s1", completed=True)
+    run_recorded(recording_threads)
+
+    # 验证：第一回合 end 未被 every_n_turns=3 阻挡，未被 min_interval 冷却防抖，未进 pending，直接覆盖！
+    assert db.title == "正式网页开发"
+    assert db.source == "llm"
+    assert "s1" not in t._first_turn_overrides
+    assert len(seq_llm.calls) == 2
+
+    # 3. 验证第二回合恢复正常防抖门禁
+    t.on_session_end(session_id="s1", completed=True)  # n=2, 2 % 3 != 0, 且不在 _first_turn_overrides
+    # 不触发任何新提交
+    assert len(recording_threads.instances) == 2
+
+
+def test_first_turn_end_override_respects_user_title(recording_threads):
+    """若用户在首轮内手动命名，第一回合 end 绝不覆盖用户标题。"""
+    db = FakeDB(
+        messages=[{"role": "user", "content": "hello"}],
+        title=None,
+        source=None,
+    )
+    llm = FakeLlm('{"action":"rename","title":"草稿标题"}')
+    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS, "every_n_turns": 3}, db=db)
+
+    t.on_pre_llm_call(session_id="s1", user_message="hello")
+    run_recorded(recording_threads)
+    assert db.title == "草稿标题"
+
+    # 用户手动改名
+    db.title = "用户权威标题"
+    db.source = "user"
+
+    # 第一回合 end
+    t.on_session_end(session_id="s1", completed=True)
+    run_recorded(recording_threads)
+
+    assert db.title == "用户权威标题"
+    assert db.source == "user"
+    assert "s1" not in t._first_turn_overrides
+
+
+def test_first_turn_end_override_keeps_when_candidate_identical(recording_threads):
+    """若首回合 end 模型评估生成的新标题与 pre 标题一致，判定 keep 并正常清除覆写标记。"""
+    db = FakeDB(
+        messages=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
+        ],
+        title=None,
+        source=None,
+    )
+    llm = FakeLlm('{"action":"rename","title":"一致标题"}')
+    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS, "every_n_turns": 3}, db=db)
+
+    t.on_pre_llm_call(session_id="s1", user_message="hello")
+    run_recorded(recording_threads)
+    assert db.title == "一致标题"
+
+    t.on_session_end(session_id="s1", completed=True)
+    run_recorded(recording_threads)
+
+    assert db.title == "一致标题"
+    assert "s1" not in t._first_turn_overrides
+
+
+def test_first_turn_end_override_when_pre_still_inflight(recording_threads):
+    """当 pre_llm_call 评估还在后台执行中时，第一回合 end 到达标记 dirty，接力第二趟强制覆盖。"""
+    db = FakeDB(
+        messages=[
+            {"role": "user", "content": "帮我写一个网页"},
+            {"role": "assistant", "content": "好，这是完整的网页代码"},
+        ],
+        title=None,
+        source=None,
+    )
+    class SequenceLlm:
+        def __init__(self):
+            self.calls = []
+        def complete(self, messages, **kwargs):
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                return SimpleNamespace(text='{"action":"rename","title":"草稿标题"}')
+            return SimpleNamespace(text='{"action":"rename","title":"正式终稿标题"}')
+
+    seq_llm = SequenceLlm()
+    cfg = {**DEFAULTS, "every_n_turns": 3, "min_interval_minutes": 5}
+    t = AutoTitler(SimpleNamespace(llm=seq_llm), cfg, db=db)
+
+    # 1. pre_llm_call 触发，生成 Worker
+    t.on_pre_llm_call(session_id="s1", user_message="帮我写一个网页")
+    assert "s1" in t._inflight
+
+    # 2. 在 Worker 尚未 run_recorded（仍在 in-flight）期间，第一回合 end 到达
+    t.on_session_end(session_id="s1", completed=True)
+    # 因为 in-flight，s1 被加入 _dirty_sessions
+    assert "s1" in t._dirty_sessions
+
+    # 3. Worker 执行，完成第一趟后发现 dirty，自动执行第二趟首轮覆盖
+    run_recorded(recording_threads)
+
+    assert db.title == "正式终稿标题"
+    assert db.source == "llm"
+    assert "s1" not in t._first_turn_overrides
+    assert len(seq_llm.calls) == 2

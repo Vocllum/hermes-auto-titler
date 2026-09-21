@@ -163,6 +163,9 @@ class AutoTitler:
         self._inflight: Dict[str, threading.Event] = {}
         self._dirty_sessions: set[str] = set()
         self._pre_llm_snapshots: Dict[str, Any] = {}
+        self._eager_pre_sessions: set[str] = set()
+        self._dirty_override_intents: set[str] = set()
+        self._active_override_sessions: set[str] = set()
         self._last_generate_errors: Dict[str, str] = {}
         self._last_generate_error: str = ""
         self._inflight_lock = threading.Lock()
@@ -208,6 +211,10 @@ class AutoTitler:
 
         # 仅对首轮接入且当前无标题或 derived 临时截断标题的会话触发
         if self._early_enabled() and self._early_eligible(session_id):
+            # 仅在真实首轮开局时武装覆写标记，避免后续回合重新武装
+            if payload.get("is_first_turn") is not False and self._turns.get(session_id, 0) == 0:
+                with self._state_lock:
+                    self._eager_pre_sessions.add(session_id)
             # 捕获首轮快照，解决 Hermes 持久化落盘慢于 worker 启动的真实 DB 竞态
             u_msg = payload.get("user_message") or ""
             if u_msg:
@@ -237,7 +244,14 @@ class AutoTitler:
         n = self._turns.get(session_id, 0) + 1
         self._turns[session_id] = n
         every = max(1, int(self.cfg.get("every_n_turns", 2)))
-        if n % every == 0:
+        with self._state_lock:
+            first_turn_override = (session_id in self._eager_pre_sessions) and (n == 1)
+            if first_turn_override or n > 1:
+                self._eager_pre_sessions.discard(session_id)
+        if first_turn_override:
+            log.info("auto-titler on_session_end: overriding eager pre-title for turn 1 of %s", session_id[:12])
+            self._submit_eval(session_id, override_intent=True)
+        elif n % every == 0:
             self._submit_eval(session_id)
         elif (
             self._early_enabled()
@@ -447,7 +461,13 @@ class AutoTitler:
             return not current  # 无标题 → early 可评估；legacy 已有标题 → 保护
         return False  # llm 等其余来源不提前评估
 
-    def _submit_eval(self, session_id: str, *, finalize_claim: Optional[int] = None) -> None:
+    def _submit_eval(
+        self,
+        session_id: str,
+        *,
+        finalize_claim: Optional[int] = None,
+        override_intent: bool = False,
+    ) -> None:
         """Submit one coalescing worker.
 
         Ordinary submissions are rejected once a closing fence is established for
@@ -472,13 +492,15 @@ class AutoTitler:
         with self._inflight_lock:
             if session_id in self._inflight:
                 self._dirty_sessions.add(session_id)
+                if override_intent:
+                    self._dirty_override_intents.add(session_id)
                 return
             self._worker_epochs[session_id] = worker_epoch
             self._inflight[session_id] = event
         try:
             worker = threading.Thread(
                 target=_wrap_with_context(self._eval_worker),
-                args=(session_id, event, worker_epoch),
+                args=(session_id, event, worker_epoch, override_intent),
                 name=f"autotitler-eval-{session_id[:8]}",
                 daemon=True,
             )
@@ -490,6 +512,7 @@ class AutoTitler:
             )
             with self._inflight_lock:
                 self._dirty_sessions.discard(session_id)
+                self._dirty_override_intents.discard(session_id)
                 self._inflight.pop(session_id, None)
                 self._worker_epochs.pop(session_id, None)
             event.set()
@@ -499,9 +522,11 @@ class AutoTitler:
         session_id: str,
         event: threading.Event,
         worker_epoch: int = 0,
+        initial_override_intent: bool = False,
     ) -> None:
         try:
             force_eval = False
+            current_override = initial_override_intent
             while True:
                 try:
                     with self._state_lock:
@@ -511,9 +536,21 @@ class AutoTitler:
                             and int(finalize_meta.get("close_epoch", 0)) <= worker_epoch
                             and finalize_meta.get("base_title_known", True)
                         )
+                        if current_override:
+                            self._active_override_sessions.add(session_id)
+                        else:
+                            self._active_override_sessions.discard(session_id)
                     # A recovered finalize intent represents a missed terminal
                     # snapshot. It must not be throttled by the last periodic eval.
-                    result = self.evaluate(session_id, force=force_eval or covers_finalize)
+                    # Eager pre-titles must also not throttle the first full turn's evaluation.
+                    try:
+                        result = self.evaluate(
+                            session_id,
+                            force=force_eval or covers_finalize or current_override,
+                        )
+                    finally:
+                        with self._state_lock:
+                            self._active_override_sessions.discard(session_id)
                     action = str((result or {}).get("action") or "")
                     with self._state_lock:
                         if action not in {"failed", "pending", "throttled"}:
@@ -557,15 +594,24 @@ class AutoTitler:
                         force_eval = True
                         worker_epoch = self._closing_epochs.get(session_id, worker_epoch)
                         self._worker_epochs[session_id] = worker_epoch
+                        if session_id in self._dirty_override_intents:
+                            self._dirty_override_intents.discard(session_id)
+                            current_override = True
+                        else:
+                            current_override = False
                         continue
+                    self._dirty_override_intents.discard(session_id)
                     self._inflight.pop(session_id, None)
                     self._worker_epochs.pop(session_id, None)
                     break
         finally:
             with self._inflight_lock:
                 self._dirty_sessions.discard(session_id)
+                self._dirty_override_intents.discard(session_id)
                 self._inflight.pop(session_id, None)
                 self._worker_epochs.pop(session_id, None)
+            with self._state_lock:
+                self._active_override_sessions.discard(session_id)
             event.set()
 
     def _close_eval(self, session_id: str) -> None:
@@ -945,10 +991,12 @@ class AutoTitler:
                 self._persist_state_locked()
 
     def _execute_evaluate(self, session_id: str, force: bool = False, blind: bool = False) -> Dict[str, Any]:
-        if not self.cfg.get("enabled", True) and not force:
+        with self._state_lock:
+            first_turn_override = session_id in self._active_override_sessions
+        if not self.cfg.get("enabled", True) and not force and not first_turn_override:
             return {"action": "disabled"}
         db = self.db
-        if not force:
+        if not force and not first_turn_override:
             last = self._last_eval.get(session_id)
             interval = float(self.cfg.get("min_interval_minutes", 5)) * 60
             if last is not None and (time.monotonic() - last) < interval:
@@ -964,6 +1012,8 @@ class AutoTitler:
             with self._retry_lock:
                 self._failed_sessions.pop(session_id, None)
                 self._clear_finalize_intent_locked(session_id)
+            with self._state_lock:
+                self._eager_pre_sessions.discard(session_id)
             return {"action": "skipped", "reason": "user title is authoritative"}
 
         try:
@@ -978,22 +1028,25 @@ class AutoTitler:
             with self._retry_lock:
                 self._failed_sessions.pop(session_id, None)
                 self._clear_finalize_intent_locked(session_id)
+            with self._state_lock:
+                self._eager_pre_sessions.discard(session_id)
             return {"action": "skipped", "reason": "legacy title (NULL provenance) is protected"}
 
         # 达到上限时在调用模型前短路，避免继续消耗标题模型额度。blind 是用户
         # 显式的 rename-now/批量重生成路径，保留其旁路语义；首次无标题生成
-        # 也不应消耗“替换次数”。
-        limit_result = self._rename_limit_result(
-            session_id,
-            current,
-            blind=blind,
-        )
-        if limit_result is not None:
-            self._pending.pop(session_id, None)
-            with self._retry_lock:
-                self._failed_sessions.pop(session_id, None)
-                self._clear_finalize_intent_locked(session_id)
-            return limit_result
+        # 与首回合 end 强制覆盖也不应消耗“替换次数”。
+        if not first_turn_override:
+            limit_result = self._rename_limit_result(
+                session_id,
+                current,
+                blind=blind,
+            )
+            if limit_result is not None:
+                self._pending.pop(session_id, None)
+                with self._retry_lock:
+                    self._failed_sessions.pop(session_id, None)
+                    self._clear_finalize_intent_locked(session_id)
+                return limit_result
 
         recent, all_user, opening, earlier_summary = load_context_with_summary(
             db,
@@ -1037,17 +1090,17 @@ class AutoTitler:
             opening = []
         # derived 是 Hermes 从首条用户消息截出的临时兜底，说明原生标题 LLM
         # 尚未成功升级；未命名的会话（current is None/empty）更必须生成标题。
-        # 因此只要无标题或仍是 derived，就强制要求本次模型给出正式标题（rename-only）。
-        force_rename = not current or src == SessionDB.TITLE_SOURCE_DERIVED
+        # 因此只要无标题或仍是 derived，或首回合 end 覆盖，就强制要求本次模型给出正式标题（rename-only）。
+        force_rename = not current or src == SessionDB.TITLE_SOURCE_DERIVED or first_turn_override
         # 评审协议：0 = 关闭（单轮评估直接改名写库）；
         # 1 = 确认 1 次（第 1 轮产生候选 pending，第 2 轮模型觉得上一轮改名可以则 approve 采用落库）；
-        # derived/无标题升级与 blind 终局评估旁路直接提交。
-        needed = 0 if blind else int(self.cfg.get("rename_confirmations", 0))
+        # derived/无标题升级、blind 终局评估及首回合 end 覆盖旁路直接提交。
+        needed = 0 if (blind or first_turn_override) else int(self.cfg.get("rename_confirmations", 0))
         review = needed >= 1 and src == SessionDB.TITLE_SOURCE_LLM and bool(current)
         pending = self._pending.get(session_id) if review else None
         proposed = pending["title"] if pending else None
-        if blind:
-            # 终局评估以内容为准，直接落库并忽略进程内待审候选
+        if blind or first_turn_override:
+            # 终局评估与首回合覆盖以内容为准，直接落库并忽略进程内待审候选
             self._pending.pop(session_id, None)
 
         action, title = self._generate(
@@ -1154,7 +1207,7 @@ class AutoTitler:
             session_id,
             candidate,
             expected_title=current,
-            bypass_limit=blind,
+            bypass_limit=blind or first_turn_override,
         )
 
     @staticmethod

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.2.3 — 2026-09-21
+
+- **First-turn end override**: Once the first turn completes with the assistant's response, immediately evaluate and override the initial eager preview title from the full turn context without cadence or debounce delays.
+- **Strict user authority & error backoff**: Unconditionally preserve manual user titles, and safely route provider/network errors to the exponential retry ledger.
+
 ## 0.2.2 — 2026-09-21
 
 - **Graceful shutdown protection**: close and finalize hooks never start a network call; in-flight work is waited on for at most 100 ms and the full path stays well under the host's 10 s teardown budget, so terminal titles are no longer lost to shutdown timeouts.

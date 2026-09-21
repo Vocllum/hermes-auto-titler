@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-09-21
+
+- **Graceful shutdown protection**: close and finalize hooks never start a network call; in-flight work is waited on for at most 100 ms and the full path stays well under the host's 10 s teardown budget, so terminal titles are no longer lost to shutdown timeouts.
+- **Durable typed scheduler state**: retry, finalize, pending-review and rename-counter ledgers persist separately with per-record isolation, so a single corrupt record can no longer abort plugin registration.
+- **Finalize intent with its own budget**: terminal intents survive the ordinary 5-failure cap and are only cleared by a worker that provably covered the final close epoch.
+- **Closing fence bound to intent lifetime**: a closing fence is released by the same code path that settles the intent, so a resolved session can never be permanently barred from foreground titling.
+- **Two-phase unknown-anchor consumption**: a close whose DB read failed re-validates its anchor before consumption, instead of being "covered" tautologically by a later turn.
+- **Catalog card at official 2:1**: adds a 1600x800 card for the plugin browser; the original 2400x640 banner moves to the detail page, where it is no longer clipped.
+- **English defaults for `/autotitler`**: slash-command replies now default to English, matching the README and prompt language.
+
 ## 0.2.1 — 2026-09-21
 
 - **Long-session title tracking**: evaluate opening intent, topic shifts, and late instructions to track genuine conversation progress, preventing titles from drifting due to transient follow-ups or tool logs.

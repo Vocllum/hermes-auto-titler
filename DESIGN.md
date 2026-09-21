@@ -227,7 +227,14 @@ derived < llm < user
 - 唯一性冲突时添加递增后缀，并继续满足字符与显示宽度上限；
 - 成功自动写入后保持 `source=llm`，让以后用户手改仍拥有更高优先级。
 
-Hermes 当前没有公开的 llm→llm 原子 compare-and-swap。该路径需要 `set_session_title` 后再恢复 llm 来源，因此仍存在极小跨步骤竞态窗口；实现负责尽量缩小并检测，不宣称绝对原子。
+写回路径按宿主能力分两档：
+
+- **现代宿主**：宿主私有 `_execute_write(fn)` 在单事务内执行 `BEGIN IMMEDIATE` → `fn(conn)` → `commit()`，事务由宿主开启与提交。llm→llm 改名的 CAS 是一条幂等 `UPDATE ... WHERE id = ? AND title IS ? AND title_source = 'llm'`，与预期快照不符时匹配 0 行并 fail-closed；回调不得自行 `commit`、不得自行开启事务。
+- **老宿主**：没有 `_execute_write` 时走严格两步 fail-closed（`set_session_title` → 回读校验 → 恢复 `source=llm`）。这是老宿主用户唯一的降级路径，不是冗余代码。
+
+决定走哪一档的是宿主能力而非插件版本，因此两档都必须长期有效。CAS 与兜底两条路径都由真实 `sqlite3` 连接、与宿主一致的 `sessions` 表和同构的 `_execute_write` 驱动（见 `tests/test_host_write_contract.py`）。
+
+本节的每条断言由 `tests/test_host_write_contract.py` 强制：删改任一档路径、让宿主回调自行提交事务，都会让对应测试转红。
 
 ## 10. Profile Context 与用量记账
 

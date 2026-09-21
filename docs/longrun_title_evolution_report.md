@@ -161,9 +161,9 @@
 
 修订后的 A-1 由三部分组成：
 
-**（1）关闭路径禁止发起网络调用。** `on_session_finalize` / `on_session_end(reason=...)` 一律不得触发需要模型调用的评估；若检测到 in-flight 评估正在进行，只做 **≤ 100ms 有界等待**（`existing_event.wait(0.1)`），超时即放弃并记录 `reason="finalize budget exceeded"`。关闭动作的职责收缩为"尽快交还控制权"，不再试图在 teardown 窗口内完成一次 LLM 往返。
+**（1）关闭路径禁止发起网络调用。** `on_session_finalize` / `on_session_end(reason=...)` 一律不得触发需要模型调用的评估；若检测到 in-flight 评估正在进行，仅把**网络等待上限**限定为 100ms（`existing_event.wait(0.1)`），超时后记录 `reason="finalize budget exceeded"`。等待之后仍有 `state.json` 原子替换、文件 `fsync` 与目录 `fsync`，因此不能声称整个关闭路径严格 ≤100ms；可验证目标是远低于宿主 10s 预算，测试对总路径采用宽松的 `<1s` 门槛。关闭动作的职责收缩为"尽快交还控制权"，不再试图在 teardown 窗口内完成一次 LLM 往返。
 
-**（2）未完成时不保任何未背书候选。** 保留最后**已提交**的标题（即当前库中 `title_source='llm'` 的值）。这是唯一不绕过 `rename_confirmations` 门禁的选择——宁可标题略滞后，也不把一个未经 N 轮背书的候选写进用户可见的终局状态。
+**（2）未完成时不把任何未背书候选写入 SessionDB。** 保留最后**已提交**的用户可见标题（即当前库中 `title_source='llm'` 的值）；待审候选可以作为 `pending_review` 调度元数据持久化，但恢复后仍必须继续经过 review / provenance / confirmation / CAS 门禁，绝不能直接落为标题。这是唯一不绕过 `rename_confirmations` 门禁的选择——宁可标题略滞后，也不把一个未经 N 轮背书的候选暴露给用户。
 
 **（3）终局意图写入可跨 teardown 恢复的持久队列。** 新增插件自有状态文件（`~/.hermes/plugins/hermes-auto-titler/state.json`，原子写入 + fsync），每条记录至少包含：
 
@@ -176,9 +176,9 @@
 | `next_retry_at` / `attempts` / `capacity` | 从 `_failed_sessions` 迁出的退避账本 |
 | `queued_at` / `reason` | 入队原因（`finalize` / `error`） |
 
-下次 Hermes 启动（`register()` 时）load 该文件：`base_title` 与当前库中标题不一致的记录直接作废（对应 `policy.py:29-37` 的内存版失效逻辑）；一致的重建 `_pending` 与 `_failed_sessions`，由 `start_retry_loop()` 的 daemon 在**正常进程生命周期内**续跑确认与写入。这样 teardown 只是"交还控制权"，标题收敛交给有完整时间预算的后续会话，而不是赌 10 秒。
+下次 Hermes 启动（`register()` 时）load 该文件：`base_title` 与当前库中标题不一致的记录直接作废（对应 `policy.py:29-37` 的内存版失效逻辑）；一致的记录按 typed state 分别重建 `_pending`、`_failed_sessions`、`_finalize_intents` 与 `_rename_counts`。只有 `retry` / `finalize` 会被 `start_retry_loop()` 的 daemon 在**正常进程生命周期内**调度，`pending_review` 与 `counter_only` 不会凭“记录存在”额外触发模型；数据库暂时不可读属于 unknown 而不是 stale，原磁盘记录保持不动。这样 teardown 只是"交还控制权"，标题收敛交给有完整时间预算的后续会话，而不是赌 10 秒。
 
-**验收要点**：关闭路径耗时上界由模型 `timeout=30` 降到 ~100ms；重启后 `_pending` / `_failed_sessions` 可从 `state.json` 重建；`confirmations < needed` 的候选在任何情况下都不会绕过门禁落库。
+**验收要点**：关闭 hook 不发起网络调用，已有网络工作的等待上限为 100ms，含原子落盘与双 `fsync` 的总路径目标低于宿主 10s；重启后 typed `retry` / `finalize` / `pending_review` / `counter` 分别恢复，单条坏记录逐条隔离，DB unknown 保留原记录；per-session closing epoch 只有在 worker 证明覆盖最终 epoch 后才清 finalize；所有内存变更与快照共用 `_state_lock` barrier；`confirmations < needed` 的候选在任何情况下都不会绕过门禁落库。
 
 ### A-2 把实验变量提升为一等配置（对应 V-2）
 

@@ -3,6 +3,7 @@ name: tests
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   pytest:
@@ -17,3 +18,20 @@ jobs:
         run: python -m pip install -U pytest PyYAML
       - name: Run tests
         run: python -m pytest tests/ -q
+
+  catalog-sync:
+    # Release-time gate, not a per-push gate. It needs the tag for the
+    # plugin.yaml version to exist and the live catalog to already list it, so
+    # on every push it would fail with exit 2 ("no local tag") on any
+    # unreleased version bump. Dispatch it by hand after the catalog entry is up.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Verify the gate runner exists
+        run: test -f scripts/check_catalog_sync.py
+      - name: Check the live catalog against plugin.yaml
+        run: python3 scripts/check_catalog_sync.py

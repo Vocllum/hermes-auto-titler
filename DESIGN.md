@@ -282,6 +282,27 @@ CI 单元测试：
 python -m pytest tests/ -q
 ```
 
+### 发布门禁：catalog 同步
+
+上游 plugin-catalog 是手工复制的副本，与仓库的 `plugin.yaml` + tag 没有任何机械联系；三次发布（0.2.1 → 0.2.2 → 0.2.3）因此漏同步，而 catalog 缺条目只意味着「目录里没有」，安装不会报错。
+
+```bash
+python3 scripts/check_catalog_sync.py            # 本地 vs live
+python3 scripts/check_catalog_sync.py --json     # 机器可读
+```
+
+三态契约，`tests/test_catalog_sync.py` 强制：
+
+| 退出码 | 含义 |
+|---|---|
+| 0 | live 条目的 sha 与 `plugin.yaml` 版本对应 commit 一致，version 也一致 |
+| 1 | catalog 落后 / 条目缺失 / 重复 / sha 不是 40-hex / version 不合法 |
+| 2 | **没能验证**：网络不可达，或 `plugin.yaml` 的版本还没有 tag |
+
+退出码 2 是「未知」而不是「通过」——把没跑的验证显示成绿灯比失败更糟。短 sha 单独判失败：宿主会静默丢弃整个条目，不会报错。
+
+触发时机：手动 dispatch `catalog-sync` job（`.github/workflows/tests.yml`），**不挂在 push 上**。门禁需要「版本对应的 tag 已存在」且「catalog 条目已发布」两个前提，挂在 push 上会让任何未发布版本的 bump 直接 exit 2。它因此是发布序列的一步，不是回归测试的一部分。
+
 本地 Hermes 环境建议在 0.2 发布前重新跑：
 
 ```bash

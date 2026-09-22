@@ -444,7 +444,8 @@ def test_fence_released_after_retry_claim_consumes_finalize_intent(
     t, ctx = make_titler(
         db,
         text=_dec("keep"),
-        cfg={"every_n_turns": 1, "min_interval_minutes": 0},
+        # 首轮抢占路径需要显式 opt-in（0.3 默认 builtin，首轮归宿主）
+        cfg={"every_n_turns": 1, "min_interval_minutes": 0, "first_title_mode": "plugin"},
     )
     t._state_path = tmp_path / "state.json"
 
@@ -565,23 +566,23 @@ def test_first_title_mode_builtin_suppresses_early(recording_threads):
     assert len(recording_threads.instances) == 1
 
 
-def test_first_title_mode_plugin_default_takes_first_turn(recording_threads):
-    # 默认 plugin：第 1 轮就接管
+def test_first_title_mode_builtin_default_yields_first_turn(recording_threads):
+    # 0.3 默认 builtin：第 1 轮不接管（宿主负责首轮毫秒级起名）
     db = FakeDB(messages=MSGS, title=None)
     t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3})
-    t.on_session_end(session_id="s1", completed=True)  # n=1 < 3 → 接管提交
-    assert len(recording_threads.instances) == 1
+    t.on_session_end(session_id="s1", completed=True)  # n=1 < 3 → 让给宿主
+    assert len(recording_threads.instances) == 0
 
 
 def test_first_title_mode_config_validation(tmp_path):
     from hermes_auto_titler.config import DEFAULTS, load_config
 
-    assert DEFAULTS["first_title_mode"] == "plugin"
+    assert DEFAULTS["first_title_mode"] == "builtin"
     p = tmp_path / "config.yaml"
-    p.write_text("first_title_mode: builtin\n", encoding="utf-8")
-    assert load_config(path=p)["first_title_mode"] == "builtin"
+    p.write_text("first_title_mode: plugin\n", encoding="utf-8")
+    assert load_config(path=p)["first_title_mode"] == "plugin"
     p.write_text("first_title_mode: bogus\n", encoding="utf-8")
-    assert load_config(path=p)["first_title_mode"] == "plugin"  # 非法回退默认
+    assert load_config(path=p)["first_title_mode"] == "builtin"  # 非法回退默认
 
 
 def test_early_turn_eval_submits_early_turns(recording_threads):
@@ -1790,7 +1791,8 @@ def test_user_race_during_confirmation_clears_pending():
 
 def test_on_pre_llm_call_triggers_eager_evaluation_for_new_session(recording_threads):
     db = FakeDB(messages=MSGS, title=None, source=None)
-    t, ctx = make_titler(db)  # 默认即 plugin 接管
+    # 首轮抢占需显式 opt-in（0.3 默认 builtin，首轮归宿主）
+    t, ctx = make_titler(db, cfg={"first_title_mode": "plugin"})
     t.on_pre_llm_call(session_id="s1")
     assert len(recording_threads.instances) == 1
 
@@ -2164,6 +2166,8 @@ def test_first_turn_end_overrides_eager_pre_title(recording_threads):
         "every_n_turns": 3,         # 正常情况下第 1 轮不满足每 3 轮门禁
         "min_interval_minutes": 5,   # 正常情况下 5 分钟内会被 throttle
         "rename_confirmations": 2,   # 正常情况下 llm->llm 需要 2 轮确认进入 pending
+        # 首轮抢占路径需显式 opt-in（0.3 默认 builtin）
+        "first_title_mode": "plugin",
     }
     t = AutoTitler(SimpleNamespace(llm=seq_llm), cfg, db=db)
 
@@ -2201,7 +2205,11 @@ def test_first_turn_end_override_respects_user_title(recording_threads):
         source=None,
     )
     llm = FakeLlm('{"action":"rename","title":"草稿标题"}')
-    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS, "every_n_turns": 3}, db=db)
+    t = AutoTitler(
+        SimpleNamespace(llm=llm),
+        {**DEFAULTS, "every_n_turns": 3, "first_title_mode": "plugin"},
+        db=db,
+    )
 
     t.on_pre_llm_call(session_id="s1", user_message="hello")
     run_recorded(recording_threads)
@@ -2231,7 +2239,11 @@ def test_first_turn_end_override_keeps_when_candidate_identical(recording_thread
         source=None,
     )
     llm = FakeLlm('{"action":"rename","title":"一致标题"}')
-    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS, "every_n_turns": 3}, db=db)
+    t = AutoTitler(
+        SimpleNamespace(llm=llm),
+        {**DEFAULTS, "every_n_turns": 3, "first_title_mode": "plugin"},
+        db=db,
+    )
 
     t.on_pre_llm_call(session_id="s1", user_message="hello")
     run_recorded(recording_threads)
@@ -2269,6 +2281,8 @@ def test_first_turn_end_override_when_pre_still_inflight(recording_threads):
         "every_n_turns": 3,
         "min_interval_minutes": 5,
         "rename_confirmations": 1,  # 显式使用生产默认确认数
+        # 首轮抢占路径需显式 opt-in（0.3 默认 builtin）
+        "first_title_mode": "plugin",
     }
     t = AutoTitler(SimpleNamespace(llm=seq_llm), cfg, db=db)
 
@@ -2314,7 +2328,7 @@ def test_first_turn_end_error_clears_override_and_respects_retry_backoff(recordi
             raise RuntimeError("503 Service Unavailable")
 
     fail_llm = FailOnSecondLlm()
-    cfg = {**DEFAULTS, "every_n_turns": 3, "min_interval_minutes": 5}
+    cfg = {**DEFAULTS, "every_n_turns": 3, "min_interval_minutes": 5, "first_title_mode": "plugin"}
     t = AutoTitler(SimpleNamespace(llm=fail_llm), cfg, db=db)
 
     # 1. pre_llm_call 成功生成草稿

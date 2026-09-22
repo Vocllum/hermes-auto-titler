@@ -16,6 +16,11 @@ def _set_config(titler, key: str, value: str) -> str:
     except ValueError as e:
         return f"Invalid value: {value} ({e})"
     cfg[key] = v
+    # model / title_model 是同一个设置的内部键与对外别名，写任一个都同步另一个
+    if key == "model":
+        cfg["title_model"] = v
+    elif key == "title_model":
+        cfg["model"] = v
     save_config(cfg)
     if key == "enabled":
         return (
@@ -23,38 +28,11 @@ def _set_config(titler, key: str, value: str) -> str:
             "load, so changing false to true requires a Hermes restart)"
         )
     if key == "first_title_mode":
-        if v == "builtin":
-            restored = False
-            try:
-                from .config import enable_builtin_title_generation
-                restored = enable_builtin_title_generation()
-            except Exception:
-                pass
-            note = (
-                "restored host auxiliary.title_generation.enabled=true"
-                if restored
-                else "check host auxiliary.title_generation.enabled"
-            )
-            return (
-                f"{key} = {v} (saved to config.yaml; startup-level setting that "
-                f"requires a Hermes restart; {note})"
-            )
-        if v == "plugin":
-            disabled = False
-            try:
-                from .config import disable_builtin_title_generation
-                disabled = disable_builtin_title_generation()
-            except Exception:
-                pass
-            note = (
-                "disabled host auxiliary.title_generation.enabled"
-                if disabled
-                else "host auxiliary.title_generation.enabled already false"
-            )
-            return (
-                f"{key} = {v} (saved to config.yaml; startup-level setting that "
-                f"requires a Hermes restart; {note})"
-            )
+        return (
+            f"{key} = {v} (saved to config.yaml; startup-level setting that "
+            "requires a Hermes restart; the host's own title generator is never "
+            "modified by this plugin)"
+        )
     return f"{key} = {v} (saved to config.yaml; effective immediately)"
 
 

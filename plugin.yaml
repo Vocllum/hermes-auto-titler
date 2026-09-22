@@ -1,8 +1,112 @@
 name: hermes-auto-titler
-version: 0.2.3.1
-description: "Topic-aware session title tracking. Default takeover mode disables Hermes built-in title generation by writing auxiliary.title_generation.enabled=false; uninstalling does not restore that setting automatically."
+version: 0.3.0
+description: "Topic-aware session title tracking. Hermes owns the first title; the plugin tracks multi-turn evolution, drift, and session close, and never rewrites host configuration on install or uninstall."
 author: "Vocllum"
+license: Apache-2.0
+homepage: https://github.com/Vocllum/hermes-auto-titler
+manifest_version: 2
+api_version: 1
 provides_hooks:
   - pre_llm_call
   - on_session_end
   - on_session_finalize
+config_schema:
+  enabled:
+    type: bool
+    default: true
+    description: "Register the title hooks and the /autotitler command. Requires a Hermes restart when switched."
+  every_n_turns:
+    type: int
+    default: 2
+    description: "Evaluate the title every N completed foreground turns."
+  on_close:
+    type: bool
+    default: true
+    description: "Run a final evaluation when the session closes or finalizes."
+  early_turn_eval:
+    type: bool
+    default: false
+    description: "Legacy compatibility key. Current first-turn behavior is decided by first_title_mode."
+  first_title_mode:
+    type: str
+    default: builtin
+    choices: [builtin, plugin]
+    description: "builtin (default) leaves the first title to Hermes; plugin lets the plugin evaluate from turn 1. Neither mode writes host configuration."
+  recent_turns:
+    type: int
+    default: 2
+    description: "Number of recent turns sampled as the near-term window."
+  opening_turns:
+    type: int
+    default: 2
+    description: "Number of opening turns sampled as the intent anchor."
+  ignore_model_messages:
+    type: bool
+    default: false
+    description: "Exclude assistant messages from the evaluation input."
+  preview_chars:
+    type: int
+    default: 120
+    description: "Per-message preview cap, applied symmetrically to user and assistant turns."
+  include_all_user_messages:
+    type: bool
+    default: true
+    description: "Feed the full user-message trajectory instead of only the opening and recent windows."
+  user_message_threshold:
+    type: int
+    default: 40
+    description: "Maximum number of user messages sampled from the trajectory (0 = no limit)."
+  user_message_preview_chars:
+    type: int
+    default: 300
+    description: "Per-user-message preview cap for the trajectory."
+  summary_preview_chars:
+    type: int
+    default: 1200
+    description: "Character budget for compaction summaries in routine evaluations."
+  retitle_summary_chars:
+    type: int
+    default: 12000
+    description: "Character budget for compaction summaries in blind, manual, and batch regeneration (0 = preview_chars)."
+  title_style:
+    type: str
+    default: concise
+    choices: [concise, complete]
+    description: "concise = subject label; complete = short event/intent summary with a wider display budget."
+  strategy:
+    type: str
+    default: conservative
+    choices: [conservative, aggressive]
+    description: "conservative renames only on a persistent mismatch; aggressive follows a clear new main line sooner."
+  provider:
+    type: str
+    default: ""
+    description: "Optional provider override. Empty reuses the Hermes title_generation auxiliary task."
+  title_model:
+    type: str
+    default: ""
+    description: "Optional model override for title generation. Empty reuses the Hermes title_generation auxiliary task. Declared as title_model because the host reserves the bare 'model' settings root."
+  min_interval_minutes:
+    type: float
+    default: 5
+    description: "Minimum minutes between two evaluations of the same session."
+  max_title_length:
+    type: int
+    default: 10
+    description: "Hard character cap for generated titles. Set 0 to disable the code-level truncation (10 is the enforced minimum when a cap is set)."
+  max_display_width:
+    type: int
+    default: 40
+    description: "Display-width budget used when fitting a title."
+  rename_confirmations:
+    type: int
+    default: 1
+    description: "Confirmations required before a candidate is written; 0 writes on the first verdict."
+  max_renames_per_session:
+    type: int
+    default: 0
+    description: "Per-process cap on automatic renames for one session (0 = no cap). First naming and manual renames are exempt."
+  custom_instructions:
+    type: str
+    default: ""
+    description: "Optional instructions appended to the system prompt, e.g. \"always prefix the project name\"."

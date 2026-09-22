@@ -1,13 +1,17 @@
 # Hermes auto-titler 配置
+# 优先级：宿主 plugins.entries.hermes-auto-titler.settings（Desktop/CLI 面板）
+# > 本文件（0.2 存量配置，显式写过的键继续生效）> 插件默认值。
+# 本文件不是必须的：宿主 config_schema 已声明全部键与默认值。
 enabled: true
 every_n_turns: 2
 on_close: true
 early_turn_eval: false  # 旧键（保留兼容）：当前实际行为由 first_title_mode 决定
-# first_title_mode: plugin  # plugin（默认，插件全权接管第1轮开局并关闭宿主内建器）| builtin（首轮归内建，插件首轮不动作）
+# first_title_mode: builtin  # builtin（默认）=首轮归内建，插件只做后续演进 | plugin=插件首轮即评估
+# 两种模式都不改写宿主 auxiliary.title_generation：卸载或停用插件后，宿主原生标题链路零残留。
 recent_turns: 2
 opening_turns: 2
 ignore_model_messages: false
-preview_chars: 400
+preview_chars: 120
 include_all_user_messages: true
 user_message_threshold: 40
 user_message_preview_chars: 300

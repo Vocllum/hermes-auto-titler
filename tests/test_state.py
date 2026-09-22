@@ -40,7 +40,7 @@ def make_titler(db, path: Path):
     return titler
 
 
-def test_catalog_discloses_default_takeover_side_effect_and_no_uninstall_rollback():
+def test_catalog_discloses_non_invasive_default_and_zero_uninstall_residue():
     import yaml
 
     manifest = yaml.safe_load(
@@ -48,8 +48,12 @@ def test_catalog_discloses_default_takeover_side_effect_and_no_uninstall_rollbac
     )
     description = manifest["description"]
 
-    assert "auxiliary.title_generation.enabled=false" in description
-    assert "uninstalling does not restore" in description
+    # 0.3 契约：默认不接管宿主标题生成，卸载/停用零残留
+    assert "Hermes owns the first title" in description
+    assert "never rewrites" in description
+
+    schema = manifest["config_schema"]
+    assert schema["first_title_mode"]["default"] == "builtin"
 
 
 def test_state_store_replaces_atomically_and_leaves_no_temp_file(tmp_path, monkeypatch):
@@ -386,7 +390,6 @@ def test_register_restores_state_before_starting_retry_loop(tmp_path, monkeypatc
     )
 
     monkeypatch.setattr(plugin_entry, "AutoTitler", TrackedTitler)
-    monkeypatch.setattr(plugin_entry, "disable_builtin_title_generation", lambda: False)
     monkeypatch.setattr(plugin_entry, "load_config", lambda: {**DEFAULTS, "enabled": True})
 
     plugin_entry.register(ctx)

@@ -61,12 +61,14 @@ on_session_end
 
 `first_title_mode` 决定谁负责第一版标题：
 
-- `plugin`（默认）：插件从第 1 轮开始接管标题评估，并在**插件加载时**通过 Hermes 配置 API 把宿主 `auxiliary.title_generation.enabled` 设为 `false`，避免两个标题器竞争；
-- `builtin`：首轮交给 Hermes 内建 `title_generation`；插件从正常周期/关闭评估开始维护。
+- `builtin`（默认）：首轮交给 Hermes 内建 `title_generation`，插件从多轮演化、主题漂移与关闭评估开始维护；
+- `plugin`：插件从第 1 轮开始接管标题评估。
+
+0.3 起两种模式都**不写任何宿主配置**。此前 `plugin` 会在加载时把宿主 `auxiliary.title_generation.enabled` 置为 `false`，由于 Hermes 没有插件卸载回调（`hermes plugins disable` 只改 config，不触发进程内 unload），插件停用或删除后宿主原生标题器会被永久静默——这正是 0.3 废除该写操作的根因。现在插件加载、卸载、切换模式都不留任何宿主侧残留。
 
 `early_turn_eval` 只为兼容旧配置保留；当前实际 early 行为由 `first_title_mode` 决定。
 
-需要特别区分运行时配置值和宿主标题器状态：运行期间切换 `first_title_mode` 不会重新执行加载期的宿主开关动作，从 `plugin` 切回 `builtin` 也不会自动重新启用此前关闭的宿主标题器。因此标题所有权切换应按重启级配置处理，并同时检查 Hermes `auxiliary.title_generation.enabled`。
+`first_title_mode` 在加载期读取，运行期切换只改插件本地配置，并明确报告需要重启才生效。
 
 ## 4. 触发、节流与调用成本
 

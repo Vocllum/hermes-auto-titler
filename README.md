@@ -130,13 +130,13 @@ model: "your-model"         # any model your Hermes setup can reach
 
 **Requirements:** Python ≥ 3.11 · a recent Hermes Agent.
 
-> **Takeover-mode note:** `first_title_mode: plugin` disables Hermes' built-in title generator at plugin load. Changing `first_title_mode` at runtime does not replay that startup action, and switching back to `builtin` does not re-enable a previously disabled host generator. Treat ownership changes as restart-time config and verify `auxiliary.title_generation.enabled` when switching back.
+> **Title ownership note:** `first_title_mode` is a startup-level setting (default `builtin`): Hermes owns the first-turn title and the plugin starts from its multi-turn evolution. Set `first_title_mode: plugin` if you want the plugin to evaluate from turn 1. Neither mode ever writes host configuration, so disabling or deleting the plugin leaves Hermes' own title generator fully intact.
 
 > **Install-layout note:** Place the plugin directly at `~/.hermes/plugins/hermes-auto-titler/`. If you symlink the package directory, `config.yaml` must live where the package physically resides (config resolves relative to the package).
 
 ## ⚙️ Configuration
 
-`~/.hermes/plugins/hermes-auto-titler/config.yaml` — every key is optional; invalid values fall back to defaults.
+Settings resolve per key, in this order: `ctx.get_config()` → host `plugins.entries.hermes-auto-titler.settings` (Hermes Desktop/CLI Plugins panel, declared by `config_schema` in `plugin.yaml`) → `~/.hermes/plugins/hermes-auto-titler/config.yaml` → built-in defaults. The local file is optional and only needs the keys you want to override; a legacy 0.2 `config.yaml` keeps every key it explicitly set. Invalid values fall back to defaults in the YAML entry and are reported as errors by `/autotitler config`.
 
 <details>
 <summary><b>All keys</b></summary>
@@ -145,7 +145,7 @@ model: "your-model"         # any model your Hermes setup can reach
 |---|---|---|
 | `enabled` | `true` | Master switch. Enabling after a disabled startup requires a restart (no hooks registered); disabling a loaded plugin takes effect immediately via the hook guard. |
 | `every_n_turns` | `2` | Evaluate every N completed foreground turns. |
-| `first_title_mode` | `plugin` | `plugin` = evaluate from turn 1, disable host title generator at load; `builtin` = Hermes owns first-title generation. Treat changes as restart-level config. |
+| `first_title_mode` | `builtin` | `builtin` = Hermes owns first-title generation; `plugin` = the plugin evaluates from turn 1. Neither mode writes host configuration. Changes take effect at plugin load (restart). |
 | `early_turn_eval` | `false` | Legacy compat key. Actual behavior is controlled by `first_title_mode`. |
 | `on_close` | `true` | On close/finalize, wait at most 100 ms for existing work and persist a typed finalize intent; never start a network call from the close hook. |
 | `recent_turns` / `opening_turns` | `2` / `2` | Context window in real user turns; each selected turn keeps the user message + last assistant reply. |
@@ -158,7 +158,7 @@ model: "your-model"         # any model your Hermes setup can reach
 | `retitle_summary_chars` | `12000` | Compaction-summary budget for blind/manual/bulk regeneration; `0` falls back to `preview_chars`. |
 | `title_style` | `concise` | `concise` = subject label · `complete` = short event/intent summary (wider display budget). |
 | `strategy` | `conservative` | `conservative` = rename only on material durable mismatch; `aggressive` = follow explicit goal abandonment or sustained new direction sooner, ignoring one-off subtasks and tool changes. |
-| `provider` / `model` | `""` / `""` | Both empty = Hermes `title_generation` auxiliary task; set either for a plugin custom route. |
+| `provider` / `title_model` | `""` / `""` | Both empty = Hermes `title_generation` auxiliary task; set either for a plugin custom route. `title_model` is the settings-panel name of the model override (`model` in `config.yaml`). |
 | `min_interval_minutes` | `5` | Minimum gap between evaluations of one session. |
 | `max_title_length` / `max_display_width` | `null` / `40` | `null` avoids hard character slicing; the prompt keeps titles brief and `max_display_width` caps display columns. `complete` style adds 12 columns. |
 | `rename_confirmations` | `1` | Require one later endorsement before llm→llm writeback. `0` = immediate; `N > 1` = N endorsements. Replacing the pending candidate restarts the count. |

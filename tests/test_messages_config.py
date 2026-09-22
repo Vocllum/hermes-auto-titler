@@ -10,16 +10,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hermes_auto_titler.config import (
     DEFAULTS,
-    disable_builtin_title_generation,
     load_config,
     save_config,
 )
+from hermes_auto_titler.policy import AutoTitler
 from hermes_auto_titler.messages import (
     clean_captured_text,
+    has_compaction_handoff,
+    is_compaction_carrier,
     load_context,
     load_context_with_summary,
     message_text,
+    strip_group_chat_envelope,
     summary_preview,
+    unpack_system_wrapper,
+    _extract_compaction_summary,
     _summary_sections,
 )
 
@@ -47,6 +52,15 @@ class FakeDB:
 
     def get_messages_as_conversation(self, session_id, include_ancestors=False):
         return self.conv
+
+
+class _NoLlmCtx:
+    """Minimal ctx: the config-set path never reaches the LLM."""
+
+    llm = None
+
+    def get_config(self, key, default=None):
+        return default
 
 
 def test_load_context_recent_turns_and_all_user():
@@ -169,9 +183,11 @@ def test_load_context_filters_system_noise():
                for _, t in recent + opening + all_user)
     assert all_user == [("user", "真实提问一"), ("user", "真实提问二")]
     assert all("[Recent" not in t for _, t in recent + opening + all_user)
-    # 有真实 opening 时，不提供 summary hint；摘要不能冒充 opening。
-    assert summary is None
+    # 摘要不冒充 opening、recent 或用户意图轨迹；它作为独立历史锚点恒常透传，
+    # 即使可见历史里已经有真实 opening（旧的 not-saw_visible_opening 门禁会在
+    # 出现任意真实用户消息时把摘要整体丢弃，实测 141/225 个会话因此看不到摘要）。
     assert opening[0] == ("user", "真实提问一")
+    assert summary == "[Recent Summary (d0, node 1)] ## 当前状态"
 
 
 def test_clean_captured_text_extracts_real_message_from_handoff_wrapper():
@@ -218,14 +234,15 @@ def test_load_context_summary_hint_only_when_opening_is_missing():
     _, all_user, opening, summary = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
-    # 摘要永远不进入 opening；最早摘要单独作为弱提示
+    # 摘要永远不进入 opening；它是独立的历史锚点，恒常透传
     # 可见轮次只有 2 轮、recent_turns=2 时 opening 落在 recent 内：
     # 降级保留首批轮次的用户消息，仍满足 opening[0] 这个 subject 线索锚点
     assert opening[0] == ("user", "m1")
     assert summary.startswith("[Session Arc Summary")
     assert all_user == [("user", "m1"), ("user", "m2")]
 
-    # 真实 opening 在摘要之前时，不提供 summary hint
+    # 真实 opening 在摘要之前时，摘要依然作为历史锚点透传（不再被门禁灭顶），
+    # 但它绝不进入 opening / recent / 用户意图轨迹
     real_opening = [
         {"role": "user", "content": "真正的开头"},
         {"role": "assistant", "content": "开头回复"},
@@ -235,7 +252,7 @@ def test_load_context_summary_hint_only_when_opening_is_missing():
     _, _, op2, summary2 = load_context_with_summary(
         FakeDB(real_opening), "s1", recent_turns=2, include_all_user=True, opening_turns=1
     )
-    assert summary2 is None
+    assert summary2 == "[Session Arc Summary (d1, node 2)] 压缩摘要"
     # 2 个真实轮次、recent_turns=2 时 opening 全部落在 recent 内：
     # 降级只保留首批轮次的用户消息，assistant 回复由 recent 段承载
     assert op2 == [("user", "真正的开头")]
@@ -671,8 +688,40 @@ def test_config_sanitizes_bad_values(tmp_path):
 def test_config_has_new_keys(tmp_path):
     cfg = load_config(path=tmp_path / "missing.yaml")
     assert cfg["early_turn_eval"] is False
-    assert cfg["first_title_mode"] == "plugin"
+    # 0.3 默认零入侵：首轮归宿主内建标题器
+    assert cfg["first_title_mode"] == "builtin"
     assert cfg["retitle_summary_chars"] == 12000
+
+
+def test_title_model_alias_feeds_internal_model_key(tmp_path):
+    """宿主保留 model 这个 settings 根，对外只能声明 title_model。
+
+    title_model 读入后必须归一化回内部 model 键，否则 Desktop 里配了
+    模型覆盖却完全不生效。
+    """
+    p = tmp_path / "config.yaml"
+    p.write_text("title_model: vendor/model-x\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["title_model"] == "vendor/model-x"
+    assert cfg["model"] == "vendor/model-x"
+
+
+def test_internal_model_wins_over_title_model(tmp_path):
+    """显式写内部 model 时不让 title_model 覆盖它。"""
+    p = tmp_path / "config.yaml"
+    p.write_text("model: internal/pick\ntitle_model: alias/pick\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["model"] == "internal/pick"
+
+
+def test_save_config_mirrors_title_model_into_model(tmp_path):
+    """落盘只保留一份 model，不把别名写进文件造成双份真相。"""
+    p = tmp_path / "config.yaml"
+    cfg = {**DEFAULTS, "title_model": "vendor/model-x"}
+    save_config(cfg, path=p)
+    data = yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert "title_model" not in data
+    assert data["model"] == "vendor/model-x"
 
 
 def test_config_example_matches_runtime_defaults(tmp_path, caplog):
@@ -690,32 +739,84 @@ def test_config_example_matches_runtime_defaults(tmp_path, caplog):
     assert "unknown key 'renames_per_hour' ignored" in caplog.text
 
 
-def test_disable_builtin_title_generation_updates_host_config(monkeypatch):
-    host = {"auxiliary": {"title_generation": {"enabled": True, "model": "Free"}}}
-    saved = []
-    fake = type("HostConfig", (), {
-        "load_config": staticmethod(lambda: host),
-        "save_config": staticmethod(lambda cfg: saved.append(cfg)),
+# -- 0.3 非侵入契约：插件永不改写宿主配置 --------------------------------
+
+def test_config_module_no_longer_writes_host_config():
+    # 卸载无法回归默认标题命名的根因，就是这两个写宿主 config 的函数。
+    # 它们必须不再存在，否则任何未来的调用点都会把副作用带回来。
+    import hermes_auto_titler.config as config_mod
+
+    assert not hasattr(config_mod, "disable_builtin_title_generation")
+    assert not hasattr(config_mod, "enable_builtin_title_generation")
+
+
+def test_register_never_touches_host_title_generation_config(monkeypatch):
+    # 加载期（plugin 与 builtin 两种模式）都不得调用宿主 config 写入路径。
+    import hermes_auto_titler as pkg
+
+    host_writes = []
+
+    def _host_save(*args, **kwargs):
+        host_writes.append(args)
+        raise AssertionError("plugin must not write host config")
+
+    fake_host = type("HostConfig", (), {
+        "load_config": staticmethod(lambda: {"auxiliary": {"title_generation": {"enabled": True}}}),
+        "save_config": staticmethod(_host_save),
     })
-    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_host)
 
-    assert disable_builtin_title_generation() is True
-    assert host["auxiliary"]["title_generation"]["enabled"] is False
-    assert saved == [host]
-    assert disable_builtin_title_generation() is False
+    hooks, cmds, lifecycle = [], [], []
+
+    class FakeCtx:
+        def register_hook(self, name, fn):
+            hooks.append(name)
+
+        def register_command(self, name, handler, **kw):
+            cmds.append(name)
+
+        def get_config(self, key, default=None):
+            return default
+
+    monkeypatch.setattr(pkg, "load_config", lambda **kw: {**DEFAULTS, "enabled": True})
+    monkeypatch.setattr(pkg.AutoTitler, "restore_state", lambda self: lifecycle.append("restore"))
+    monkeypatch.setattr(pkg.AutoTitler, "start_retry_loop", lambda self: lifecycle.append("start"))
+
+    for mode in ("builtin", "plugin"):
+        monkeypatch.setattr(
+            pkg, "load_config",
+            lambda mode=mode, **kw: {**DEFAULTS, "enabled": True, "first_title_mode": mode},
+        )
+        pkg.register(FakeCtx())
+
+    assert host_writes == []
+    assert lifecycle == ["restore", "start", "restore", "start"]
 
 
-def test_disable_builtin_title_generation_creates_missing_sections(monkeypatch):
-    host = {}
+def test_first_title_mode_switch_reports_no_host_write(monkeypatch, tmp_path):
+    # 运行期切换 first_title_mode 只落本地配置，不再顺带改宿主开关。
+    from hermes_auto_titler.commands import make_handler
+
+    p = tmp_path / "config.yaml"
     saved = []
-    fake = type("HostConfig", (), {
-        "load_config": staticmethod(lambda: host),
-        "save_config": staticmethod(lambda cfg: saved.append(cfg)),
-    })
-    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
+    monkeypatch.setattr(
+        "hermes_auto_titler.config.save_config", lambda cfg, path=None: saved.append(dict(cfg))
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", type("H", (), {
+        "load_config": staticmethod(lambda: {}),
+        "save_config": staticmethod(lambda cfg: (_ for _ in ()).throw(
+            AssertionError("switch must not write host config"))),
+    }))
 
-    assert disable_builtin_title_generation() is True
-    assert saved == [{"auxiliary": {"title_generation": {"enabled": False}}}]
+    db = FakeDB([{"role": "user", "content": "帮我排查后台任务重复触发"}])
+    t = AutoTitler(_NoLlmCtx(), {**DEFAULTS, "first_title_mode": "builtin"}, db=db)
+    h = make_handler(t)
+    out = h("config first_title_mode plugin")
+
+    assert "Invalid" not in out
+    assert t.cfg["first_title_mode"] == "plugin"
+    assert saved and saved[-1]["first_title_mode"] == "plugin"
+    assert "never" in out  # 明确告知用户宿主配置未被改动
 
 
 def test_config_coerces_bool_and_int_strings(tmp_path):
@@ -957,19 +1058,22 @@ def test_clean_assistant_dialog_strips_xml_control_tags_and_code():
     assert "已成功完成插件发布与验证。" in cleaned
 
 
-def test_first_title_mode_config_requires_restart_and_manages_host(monkeypatch, tmp_path):
-    """P2: /autotitler config first_title_mode must report restart-required and manage host config."""
+def test_first_title_mode_config_never_writes_host_config(monkeypatch, tmp_path):
+    """0.3: 切换 first_title_mode 只改本地配置，绝不触碰宿主配置。"""
     import sys
     from hermes_auto_titler.commands import make_handler
     from hermes_auto_titler.config import load_config
     from hermes_auto_titler.titler import AutoTitler
 
-    host = {"auxiliary": {"title_generation": {"enabled": False}}}
-    saved_host = []
-    fake = type("ConfigModule", (), {
-        "load_config": staticmethod(lambda: host),
-        "save_config": staticmethod(lambda cfg: saved_host.append(dict(cfg))),
-    })
+    # 宿主 config 模块若被读，立刻炸；本测试要求它一次都不被读。
+    def _explode():
+        raise AssertionError("host config must not be read or written")
+
+    fake = type(
+        "ConfigModule",
+        (),
+        {"load_config": staticmethod(_explode), "save_config": staticmethod(_explode)},
+    )
     monkeypatch.setitem(sys.modules, "hermes_cli.config", fake)
 
     p = tmp_path / "config.yaml"
@@ -987,17 +1091,260 @@ def test_first_title_mode_config_requires_restart_and_manages_host(monkeypatch, 
     )
     h = make_handler(t)
 
-    # Switch to builtin
     out = h("config first_title_mode builtin")
     assert "requires a Hermes restart" in out
-    assert "restored host auxiliary.title_generation.enabled=true" in out
-    assert host["auxiliary"]["title_generation"]["enabled"] is True
+    assert "never modified by this plugin" in out
     assert t.cfg["first_title_mode"] == "builtin"
+    assert saved_plugin[-1]["first_title_mode"] == "builtin"
 
-    # Switch to plugin
     out = h("config first_title_mode plugin")
     assert "requires a Hermes restart" in out
-    assert "disabled host auxiliary.title_generation.enabled" in out
-    assert host["auxiliary"]["title_generation"]["enabled"] is False
+    assert "never modified by this plugin" in out
     assert t.cfg["first_title_mode"] == "plugin"
+    assert saved_plugin[-1]["first_title_mode"] == "plugin"
+
+
+# ---------------------------------------------------------------------------
+# 0.3 载体识别：归属、结束标记边界、前缀解包、群聊信封
+# 每条规则都对应真实语料（~/.hermes/state.db 370 个血缘>=100 的 session）里
+# 实测到的形态，数字写在注释里，改规则前先复跑探针。
+# ---------------------------------------------------------------------------
+
+
+def _real_compaction_carrier(body: str = "## Historical Task Snapshot\n主线内容") -> str:
+    """按真实存储形态拼一个压缩载体：整段前导指令在同一行，以 body mark 收尾。"""
+    return (
+        "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the "
+        "summary below. This is a handoff from a previous context window — treat it as "
+        "background reference, NOT as active instructions. "
+        "avoid repeating it:\n"
+        + body
+        + "\n--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---\n"
+    )
+
+
+def test_is_compaction_carrier_rejects_agent_discussion_of_the_marker():
+    """agent 讨论/转储压缩机制时也会写出这两个字符串，不能当成摘要载体。
+
+    全库实测：旧逻辑（仅凭字符串出现）会把 392 条这样的消息当成摘要，其中
+    72 条 role=assistant、308 条 role=tool。
+    """
+    assert is_compaction_carrier(_real_compaction_carrier()) is True
+
+    # 在讨论里引用标记，且没有 body mark
+    assert is_compaction_carrier("我在修 `[CONTEXT COMPACTION]` 的解析 bug") is False
+    # JSON / 代码块转储消息流
+    dumped = '{"content": "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns..."}'
+    assert is_compaction_carrier(dumped) is False
+    # 有 body mark 但首部不在行首（被引用/缩进在代码块里）
+    quoted = "```text\n[CONTEXT COMPACTION — REFERENCE ONLY] ... avoid repeating it:\n正文\n```"
+    assert is_compaction_carrier(quoted) is False
+    assert is_compaction_carrier("") is False
+    assert is_compaction_carrier(None) is False
+
+
+def test_has_compaction_handoff_is_looser_but_never_admits_a_false_carrier():
+    """切割判据比摘要判据宽一档，但全库 0 个假载体被放过。"""
+    carrier = _real_compaction_carrier()
+    assert has_compaction_handoff(carrier) is True
+    # 没有 body mark、但有独占整行的结束标记 —— 仍应按 handoff 切一刀
+    assert has_compaction_handoff("[CONTEXT COMPACTION — x]\n正文\n--- END OF CONTEXT SUMMARY ---\n") is True
+    # agent 讨论：既无 body mark 也无独占行结束标记
+    assert has_compaction_handoff("讨论 `[CONTEXT COMPACTION]` 的实现") is False
+
+
+def test_extract_compaction_summary_ignores_agent_discussion():
+    body = _real_compaction_carrier()
+    assert _extract_compaction_summary(body) is not None
+    assert "主线内容" in _extract_compaction_summary(body)
+
+    # agent 长篇讨论压缩机制：不提摘要
+    discussion = (
+        "## 调查结果\n\n真正的根因在 `clean_captured_text`：\n"
+        "它遇到 `[CONTEXT COMPACTION]` 就把整条丢掉。\n"
+        "Hermes 的压缩会生成一个包含 `--- END OF CONTEXT SUMMARY ---` 的块。\n"
+    )
+    assert _extract_compaction_summary(discussion) is None
+
+
+def test_end_marker_boundary_prefers_col0_standalone_line():
+    """正文小节里反引号引用的示例文本会提前命中 end marker，必须按行判别。
+
+    真实案例 20260920_194554_afa67c：13323 字符载体，`## Key Decisions` 与
+    `## Errors & Fixes` 小节内各有一次反引号引用命中。取首次命中只得 4519
+    字符 / 7 小节；取独占整行的真边界得 11285 字符 / 13 小节，且被砍掉的
+    后半段不会再被当成「真实用户消息」回灌。
+    """
+    carrier = (
+        "[CONTEXT COMPACTION — REFERENCE ONLY] ... avoid repeating it:\n"
+        "## Anchor Index\n锚点\n\n"
+        "## Key Decisions\n判别式是「标记独占整行」：`--- end of context summary ---` 这种行内引用不算。\n\n"
+        "## Errors & Fixes\n回归见 `--- end of context summary ---` 的误命中。\n\n"
+        "## User Messages (verbatim, newest first)\n真实用户原话\n\n"
+        "--- END OF CONTEXT SUMMARY — respond to the message below ---\n"
+    )
+    summary = _extract_compaction_summary(carrier)
+    assert summary is not None
+    # 反引号引用里的小节正文必须完整保留
+    assert "## Key Decisions" in summary
+    assert "## Errors & Fixups" not in summary
+    assert "## User Messages (verbatim, newest first)" in summary
+    assert "真实用户原话" in summary
+    # 结束标记本身不进入摘要
+    assert "END OF CONTEXT SUMMARY" not in summary
+
+
+def test_end_marker_boundary_falls_back_when_no_col0_line():
+    """找不到独占整行的标记时必须回退到首次命中，不能把摘要整个丢掉。
+
+    真实案例 20260922_142944_ff6e95：唯一命中就是真边界，但 `---\\s*` 吞掉了
+    紧随的 `\\n\\n[STILL IN PROGRESS …]`，按「同行不能有后续内容」一刀切会误伤。
+    """
+    carrier = (
+        "[CONTEXT COMPACTION — REFERENCE ONLY] ... avoid repeating it:\n"
+        "## Historical Task Snapshot\n主线\n"
+        "--- END OF CONTEXT SUMMARY --- [STILL IN PROGRESS — continue the task]\n"
+        "当前真实请求\n"
+    )
+    summary = _extract_compaction_summary(carrier)
+    assert summary is not None
+    assert "主线" in summary
+    # 回退路径同样要把结束标记之后的真实用户消息交回 clean_captured_text
+    assert clean_captured_text(carrier) == "当前真实请求"
+
+
+def test_clean_captured_text_drops_agent_discussion_entirely():
+    """agent 讨论压缩机制的长篇正文不是用户消息，必须整体丢弃而不是切一刀。"""
+    discussion = (
+        "## 调查结果\n\n真正的根因在 `clean_captured_text`：\n"
+        "它遇到 `[CONTEXT COMPACTION]` 就把整条丢掉。\n"
+        "Hermes 的压缩会生成一个包含 `--- END OF CONTEXT SUMMARY ---` 的块。\n"
+    )
+    assert clean_captured_text(discussion) is None
+
+
+def test_unpack_system_wrapper_keeps_the_real_request():
+    """包装之后紧跟的正文就是用户原话，旧逻辑把整条连同请求一起丢掉。
+
+    全库实测：`model has changed` 121 条中 20 条带正文且全是人类原话，
+    `interrupted mid-run` 34 条全部带正文（其中 4 条 >40 字符是人类原话）。
+    """
+    assert unpack_system_wrapper(
+        "[System: The active model for this chat has changed to xai/grok-4.7 via "
+        "provider opencodex. From this point forward, use this runtime metadata.]\n\n"
+        "我想让你每天自己运营，然后账号知名度做大后接单之类"
+    ) == "我想让你每天自己运营，然后账号知名度做大后接单之类"
+
+    assert unpack_system_wrapper(
+        "[System note: Your previous turn was interrupted mid-run — the app or its "
+        "backend process stopped before the turn could finish.]\n\n"
+        "给aside装上浏览器拓展，现在没有，然后给它换个dia的图标"
+    ) == "给aside装上浏览器拓展，现在没有，然后给它换个dia的图标"
+
+    assert unpack_system_wrapper(
+        "[System: The previous response was cut off by a network error mid-stream. "
+        "Continue exactly where you left off.]"
+    ) is None
+
+    assert unpack_system_wrapper("真实用户消息") is None
+    assert unpack_system_wrapper("") is None
+
+
+def test_load_context_unwraps_system_wrappers_into_user_trajectory():
+    conv = [
+        {"role": "user", "content": "[System: The active model for this chat has changed to gpt-5.]"},
+        {"role": "assistant", "content": "好"},
+        {"role": "user", "content": "[System: The active model for this chat has changed to gpt-5.]\n\n我想让你每天自己运营"},
+        {"role": "assistant", "content": "了解"},
+    ]
+    _, all_user, opening, summary = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=4, include_all_user=True, opening_turns=2
+    )
+    # 空正文的包装退化成丢弃；带正文的包装解包后进入用户意图轨迹
+    assert all_user == [("user", "我想让你每天自己运营")]
+    assert all("[System" not in t for _, t in opening)
+    assert summary is None
+
+
+def test_strip_group_chat_envelope_keeps_only_the_messages_block():
+    """群聊信封的规则块对标题没有主题信息，却以「用户意图」形态进 prompt。
+
+    全库实测 116 封 / 315,175 字符：规则块 32.4% + 首部 6.9% = 39.5% 是样板。
+    """
+    envelope = (
+        '[Group chat: "Lattice"] You are @eclipse, one participant in a group chat '
+        "with @lynn, @aperture and the user.\n\n"
+        "New messages in the room since your last turn (oldest first):\n"
+        "  You (user): @lynn 我们需要推动AutoTitler到0.3\n"
+        "  Lynn: 我刚核查了上游源码\n\n"
+        "Rules for this room:\n"
+        "- Reply with ONE conversational message ONLY if you have something new.\n"
+        "- If you have nothing new to add, reply with exactly \"(pass)\".\n"
+    )
+    stripped = strip_group_chat_envelope(envelope)
+    assert stripped is not None
+    assert "我们需要推动AutoTitler到0.3" in stripped
+    assert "我刚核查了上游源码" in stripped
+    assert "Rules for this room" not in stripped
+    assert 'Group chat: "Lattice"' not in stripped
+    assert "New messages in the room" not in stripped
+
+    assert strip_group_chat_envelope("普通消息") is None
+    assert strip_group_chat_envelope("") is None
+
+
+def test_load_context_strips_group_chat_envelope_from_user_turns():
+    conv = [
+        {
+            "role": "user",
+            "content": (
+                '[Group chat: "Lattice"] You are @eclipse.\n\n'
+                "New messages in the room since your last turn (oldest first):\n"
+                "  You (user): 帮我把标题插件推进到 0.3\n\n"
+                "Rules for this room:\n"
+                "- Reply with ONE conversational message ONLY.\n"
+            ),
+        },
+        {"role": "assistant", "content": "好的"},
+    ]
+    _, all_user, opening, _ = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
+    )
+    assert all_user == [("user", "You (user): 帮我把标题插件推进到 0.3")]
+    assert all("Rules for this room" not in t for _, t in opening)
+
+
+def test_load_context_merges_multi_compaction_summaries():
+    """多轮压缩会产生多段载体，按时间顺序拼接而不是只取 summaries[0]。"""
+    conv = [
+        {"role": "user", "content": _real_compaction_carrier("## Historical Task Snapshot\n第一段主线目标")},
+        {"role": "user", "content": "继续"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": _real_compaction_carrier("## Historical Task Snapshot\n第二段最新状态")},
+        {"role": "user", "content": "再继续"},
+    ]
+    _, _, _, summary = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
+    )
+    assert summary is not None
+    assert "第一段主线目标" in summary
+    assert "第二段最新状态" in summary
+
+
+def test_summary_survives_a_visible_opening_instead_of_being_gated_away():
+    """一句「继续」不该把历史摘要整体清空。
+
+    旧的放行条件是 `not saw_visible_opening`，实测 225 个含载体会话里 141 个
+    因此完全看不到摘要。
+    """
+    conv = [
+        {"role": "user", "content": _real_compaction_carrier("## Historical Task Snapshot\n原始目标")},
+        {"role": "user", "content": "继续"},
+        {"role": "assistant", "content": "a1"},
+    ]
+    _, _, _, summary = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
+    )
+    assert summary is not None
+    assert "原始目标" in summary
 

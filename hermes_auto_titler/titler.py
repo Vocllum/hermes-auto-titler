@@ -443,8 +443,8 @@ class AutoTitler:
         self._retry_thread.start()
 
     def _early_enabled(self) -> bool:
-        """首轮命名开关：plugin（默认）=插件第 1 轮强制接管；builtin=首轮让给内建。"""
-        return str(self.cfg.get("first_title_mode", "plugin")).lower() == "plugin"
+        """首轮命名开关：plugin=插件第 1 轮即评估；builtin（默认）=首轮让给内建。"""
+        return str(self.cfg.get("first_title_mode", "builtin")).lower() == "plugin"
 
     def _early_eligible(self, session_id: str) -> bool:
         """early_turn_eval 的来源门：只对无标题或 derived 来源的会话提前评估。

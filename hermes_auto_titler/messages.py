@@ -94,6 +94,107 @@ _SUMMARY_PREFIXES = (
     "[durable summary",
 )
 
+# 真实压缩载体的首部行：必须以行首（允许前导空白）的
+# `[CONTEXT COMPACTION` 或 `[PRIOR CONTEXT` 开头，并且必须含有正文标记
+# `avoid repeating it:`。两个条件缺一不可：
+# - 只认首部：agent 在讨论、调试或用 JSON/代码块转储消息流时，会把这两个
+#   字符串连同结束标记一起引用出来。实测全库 392 条这样的消息会被旧逻辑
+#   误判成摘要，其中 308 条 role=tool（插件本就不读）、72 条 role=assistant
+#   ——它们把「讨论压缩机制的长篇大论」当成摘要喂给标题模型，是噪声注入。
+# - 要求正文标记：真实载体的前导指令段固定以 `avoid repeating it:` 收尾，
+#   引用场景极少连它一起抄。
+_COMPACTION_HEADER_LINE_RE = re.compile(
+    r"^[ \t]*\[(?:CONTEXT COMPACTION|PRIOR CONTEXT)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_COMPACTION_BODY_MARK = "avoid repeating it:"
+
+# 围栏代码块：agent 调试/转储时会把真实载体连同样式粘进 ``` 块里。判别首部行
+# 是否落在未闭合的围栏内，避免把这种复制粘贴当成真载体。
+_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})[^\n]*$", re.MULTILINE)
+
+
+def _in_fenced_block(text: str, pos: int) -> bool:
+    """``pos`` 是否落在某个未闭合的围栏代码块内部。"""
+    depth = 0
+    for m in _FENCE_RE.finditer(text):
+        if m.start() >= pos:
+            break
+        depth = 1 - depth if m.group(1)[0] * 3 == m.group(1)[:3] else depth
+        if depth < 0:
+            depth = 0
+    return depth == 1
+
+
+def is_compaction_carrier(text: str) -> bool:
+    """这条消息是不是真正的 Hermes 压缩载体（而非 agent 对压缩机制的讨论）。
+
+    判据是「首部行 + 正文标记」同时成立：行首（允许前导空白）出现
+    `[CONTEXT COMPACTION` 或 `[PRIOR CONTEXT`，且消息里含有
+    `avoid repeating it:`。全库实测：旧逻辑仅凭字符串出现就提取，会把 agent
+    讨论/转储压缩标记的 392 条消息也当成摘要（其中 72 条 role=assistant），
+    把长篇排错文字灌进标题模型。
+
+    首部行还必须不在围栏代码块内——agent 调试时会把真实载体连同样式粘进
+    ``` 块，那种复制粘贴同样不是这条消息在讲的内容。
+    """
+    if not text:
+        return False
+    if _COMPACTION_BODY_MARK not in text.lower():
+        return False
+    for m in _COMPACTION_HEADER_LINE_RE.finditer(text):
+        if not _in_fenced_block(text, m.start()):
+            return True
+    return False
+
+
+def has_compaction_handoff(text: str) -> bool:
+    """这条消息是否含「需要按 handoff 切一刀」的压缩结构。
+
+    比 ``is_compaction_carrier`` 宽一档：有正文标记、或有独占整行的结束标记
+    即可。用于 ``clean_captured_text`` 的切割决策。
+
+    **但切割有一个额外的必要条件：消息必须以压缩首部开头。** 子代理汇报会把
+    真实载体连同样式整段粘进报告正文，那种消息里的压缩文本是「被引用的材料」
+    而不是当前载体；在它身上切一刀，报告的尾部就会被当成真实用户消息回灌。
+    实测这 7 条各 8733 字符，共 52,398 字符的「用户意图」其实来自别的 agent
+    对压缩机制的讨论。因此首部行必须是全文第一个非空字符。
+    """
+    if not text:
+        return False
+    if not re.match(
+        r"^[ \t]*\[(?:CONTEXT COMPACTION|PRIOR CONTEXT)", text, re.IGNORECASE
+    ):
+        return False
+    if _COMPACTION_BODY_MARK in text.lower():
+        return True
+    return _HANDOFF_END_LINE_RE.search(text) is not None
+
+# 系统噪声包装（user 角色）：包装本身是运行时元数据，但同一user消息里
+# 包装之后紧跟的正文是用户原话。实测（370 个血缘>=100 的 session）：
+# - `interrupted mid-run`：34 条，全部带正文，其中 4 条 payload 长度 >40
+#   且是人类原话（「给aside装上浏览器拓展…」），其余是被截断的助手工作现场；
+# - `model has changed`：121 条，101 条正文为空、20 条带正文，带正文的 20 条
+#   全是真实人类原话（「我想让你每天自己运营…」）。
+# 所以正确规则是「一律解包、正文为空则丢弃」，而不是按包装类型分流：
+# 空正文自动退化成丢弃，不需要为每种包装单独设阈值。
+_UNPACK_SYSTEM_WRAPPER_RE = re.compile(
+    r"^\[(?:"
+    r"system note:\s*your previous turn was interrupted mid-run"
+    r"|system:\s*the active model for this chat has changed"
+    r"|system:\s*the previous response was cut off by a network error"
+    r")[^\]]*\]",
+    re.IGNORECASE,
+)
+
+# 群聊信封：每条群聊消息都以 `[Group chat: "<room>"] …` 开头，正文是
+# 「New messages in the room」段，尾部固定追加 `Rules for this room:`。
+# 实测 116 封 / 315,175 字符中，规则块占 32.4%、首部占 6.9%——
+# 模型看到的「用户意图」有 39.5% 是房间规则样板。剥掉首尾、只留消息段。
+_GROUP_CHAT_RE = re.compile(r"^\[Group chat:", re.IGNORECASE)
+_GROUP_MESSAGES_RE = re.compile(r"^New messages in the room[^\n]*\n", re.IGNORECASE | re.MULTILINE)
+_GROUP_RULES_RE = re.compile(r"^Rules for this room:[\s\S]*$", re.IGNORECASE | re.MULTILINE)
+
 
 def is_system_noise(text: str) -> bool:
     t = (text or "").lstrip().lower()
@@ -108,6 +209,15 @@ def is_summary(text: str) -> bool:
 _HANDOFF_END_RE = re.compile(
     r"---\s*end of context summary.*?---\s*",
     re.IGNORECASE | re.DOTALL,
+)
+# 结束标记的「可信」形态：独占一整行、位于第 0 列、匹配本身不跨行。
+# `_HANDOFF_END_RE` 的尾部 `---\s*` 会把紧随的换行吞进 group，所以按行匹配、
+# 用 `$` 锚定行尾，天然排除正文里反引号引用造成的提前命中。找不到可信行时
+# 调用方回退到 `_HANDOFF_END_RE` 的首次命中——某些载体（例如被
+# `[STILL IN PROGRESS …]` 紧跟的真实收尾）只有非独占形态。
+_HANDOFF_END_LINE_RE = re.compile(
+    r"^---\s*end of context summary[^\n]*---\s*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 _HANDOFF_REPLAY_RE = re.compile(
     r"^\s*\[still in progress[^\]]*\]\s*",
@@ -135,33 +245,90 @@ def clean_assistant_dialog(text: str) -> str:
     return " ".join(lines)
 
 
+def _compaction_body_bounds(t: str, body_start: int) -> int:
+    """摘要正文的结束下标：优先取独占整行的结束标记，否则回退首次命中。
+
+    独占整行的标记才是真正的收尾；正文小节里反引号引用的示例文本会在更早的
+    位置命中同样的 `--- end of context summary … ---`，把可用摘要砍掉一半，
+    而且被砍掉的后半段随后又被 `clean_captured_text` 当成「真实用户消息」
+    回灌——同一条摘要被当成两种东西各喂一遍（实测 afa67c：85% 的载体内容
+    重复进入 prompt）。找不到独占行时才回退，避免误伤被 `[STILL IN
+    PROGRESS …]` 紧跟的真实收尾。
+    """
+    m = _HANDOFF_END_LINE_RE.search(t, body_start)
+    if m is not None:
+        return m.start()
+    m = _HANDOFF_END_RE.search(t, body_start)
+    return m.start() if m else len(t)
+
+
 def _extract_compaction_summary(text: str) -> Optional[str]:
     """从 Hermes 压缩包装（含普通与 merged 载体）中提取摘要正文。
 
-    前导指令段以 ``avoid repeating it:`` 结尾，正文在其后；``--- END OF CONTEXT
-    SUMMARY ---`` 之前。
+    只对真实压缩载体生效（见 ``is_compaction_carrier``）。前导指令段以
+    ``avoid repeating it:`` 结尾，正文在其后、可信的结束标记之前。
     """
     t = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-    # 只要包含上下文压缩标记即可，不要求严格处于消息首字符（支持 merged carrier）
-    idx_compaction = t.lower().find("[context compaction")
-    if idx_compaction < 0:
+    if not is_compaction_carrier(t):
         return None
 
     # 优先定位 avoid repeating it:
-    marker = "avoid repeating it:"
-    idx = t.lower().find(marker, idx_compaction)
-    body_start = (idx + len(marker)) if idx >= 0 else (idx_compaction + len("[context compaction"))
+    marker = _COMPACTION_BODY_MARK
+    idx = t.lower().find(marker)
+    body_start = (idx + len(marker)) if idx >= 0 else None
+    if body_start is None:
+        # 有首部却没有正文标记的情况不该发生（载体判定已要求两者），防御性回退
+        return None
 
-    # 找到结束标记
-    end_match = _HANDOFF_END_RE.search(t, body_start)
-    body_end = end_match.start() if end_match else len(t)
-    body = t[body_start:body_end].strip()
+    body = t[body_start:_compaction_body_bounds(t, body_start)].strip()
     if not body:
         return None
     # 清洗掉 Hermes 写给主 Agent 的框架级行为指令，避免误导标题模型偏向尾部
     body = re.sub(r"(?i)historical only;\s*newer protected-tail messages after this summary win\.?", "", body)
     body = re.sub(r"(?i)respond ONLY to the latest user message.*?\n", "", body)
     return body.strip() if body.strip() else None
+
+
+def unpack_system_wrapper(text: str) -> Optional[str]:
+    """剥掉运行时元数据包装，取出同一消息里的真实用户内核。
+
+    `[System note: … interrupted mid-run]` / `[System: … model has changed]` /
+    `[System: … network error]` 这三类包装之后紧跟的正文就是用户原话（实测
+    20 条 `model has changed` 带正文的全是人类原话，34 条 `interrupted
+    mid-run` 里有 4 条 >40 字符的人类原话）。包装本身不含主题信息，但它后面
+    的东西含——旧逻辑用 `startswith` 前缀匹配把整条消息连同真实请求一起丢掉。
+
+    正文为空时返回 None，等价于「整条丢弃」，因此不需要按包装类型分流。
+    """
+    if not text:
+        return None
+    m = _UNPACK_SYSTEM_WRAPPER_RE.match(text.lstrip())
+    if not m:
+        return None
+    payload = text.lstrip()[m.end():].strip()
+    return payload or None
+
+
+def strip_group_chat_envelope(text: str) -> Optional[str]:
+    """剥掉群聊信封的首部与房间规则，只保留「New messages」段。
+
+    群聊消息的信封占 39.5% 的字符（规则块 32.4% + 首部 6.9%），这些样板对
+    标题没有主题信息，却以「用户意图」的形态进入 prompt。房间规则是固定的
+    行为约束，不是这条会话在讲什么。
+    """
+    if not text:
+        return None
+    if not _GROUP_CHAT_RE.match(text.lstrip()):
+        return None
+    m = _GROUP_MESSAGES_RE.search(text)
+    if not m:
+        return None
+    body = text[m.end():]
+    r = _GROUP_RULES_RE.search(body)
+    if r:
+        body = body[:r.start()]
+    body = body.strip()
+    return body or None
 
 
 def clean_captured_text(text: str) -> Optional[str]:
@@ -172,15 +339,40 @@ def clean_captured_text(text: str) -> Optional[str]:
     its final message after ``END OF CONTEXT SUMMARY`` is a real user turn and
     must be retained. An unfinished handoff is discarded rather than fed to
     the title model as if it were user intent.
+
+    Runtime-metadata wrappers (interrupted mid-run / model changed / network
+    error) are unwrapped: the wrapper itself carries no subject, but the text
+    that follows it is the real request. An empty payload is discarded.
     """
     t = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not t:
         return None
 
-    # 如果文本包含 context compaction 或 handoff 结束标记，提取结束标记之后的真实用户消息
-    match = _HANDOFF_END_RE.search(t)
-    if match:
-        t = t[match.end():].strip()
+    # 运行时元数据包装：先解包，正文才是真实用户请求
+    unpacked = unpack_system_wrapper(t)
+    if unpacked is not None:
+        t = unpacked
+        if not t:
+            return None
+    else:
+        # 群聊信封：剥掉首部与房间规则，只保留消息段
+        stripped = strip_group_chat_envelope(t)
+        if stripped is not None:
+            t = stripped
+            if not t:
+                return None
+
+    # 如果文本包含 context compaction 或 handoff 结束标记，提取结束标记之后的真实用户消息。
+    # 只在「这条消息含压缩 handoff 结构」时才走这条分支：agent 讨论压缩机制时
+    # 长篇引用同样的字符串，那些正文不是用户消息，必须整体丢弃而不是切一刀。
+    if has_compaction_handoff(t):
+        match = _HANDOFF_END_LINE_RE.search(t)
+        if match is not None:
+            t = t[match.end():].strip()
+        else:
+            match = _HANDOFF_END_RE.search(t)
+            if match:
+                t = t[match.end():].strip()
     elif "[context compaction" in t.lower() or "[prior context" in t.lower():
         # 未完成的 handoff 包装，丢弃
         return None
@@ -409,7 +601,6 @@ def load_context_with_summary(
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
     summaries: List[str] = []
-    saw_visible_opening = False
     saw_summary = False
     for m in conv:
         role = m.get("role")
@@ -435,8 +626,6 @@ def load_context_with_summary(
             continue
         if is_system_noise(text):
             continue
-        if not saw_summary:
-            saw_visible_opening = True
         # Handoff/replay can persist the same user turn twice without an
         # assistant response between them.  Keep later turns with the same
         # wording; only collapse the adjacent replay introduced by the
@@ -482,12 +671,21 @@ def load_context_with_summary(
             for item in turn
             if item[0] == "user"
         ]
-    # 摘要永远不进入 opening；只有它先于所有可见真实消息时，才作为独立弱提示。
+    # 摘要永远不进入 opening、recent 或用户意图轨迹，而是作为独立的历史锚点
+    # 恒常透传：压缩后可见历史再短，主线证据也不该被一句「继续」清空。
+    # 旧的 `not saw_visible_opening` 门禁会在出现任意一条真实用户消息时把
+    # 摘要整体丢弃（实测 225 个含载体会话里 141 个因此看不到摘要）。
+    # 多轮压缩会产生多段载体，按时间顺序拼接而不是只取 summaries[0]——
+    # 后一段是更新的状态，但它是在前一段的基础上推进的，丢掉前段会丢失
+    # 任务的原始目标。
     earlier_summary = None
-    if summaries and not saw_visible_opening:
-        s = summaries[0]
+    if summaries:
         n = summary_chars or preview_chars
-        earlier_summary = summary_preview(s, n) if n > 0 and len(s) > n else s
+        if n > 0:
+            merged = "\n\n".join(summaries)
+            earlier_summary = summary_preview(merged, n) if len(merged) > n else merged
+        else:
+            earlier_summary = "\n\n".join(summaries)
 
     # 用户消息 = 意图轨迹；超长单条提取首尾句，超条数分层采样
     users = [(r, t) for r, t in pairs if r == "user"]

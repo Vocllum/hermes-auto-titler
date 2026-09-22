@@ -130,13 +130,15 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 
 **要求：** Python ≥ 3.11 · 较新版本的 Hermes Agent。
 
-> **接管模式注意：** `first_title_mode: plugin` 在插件加载时通过宿主配置关闭 Hermes 内建标题器。运行期间改 `first_title_mode` 不会重新执行这一步；从 `plugin` 切回 `builtin` 也不会自动重新启用之前被关闭的宿主标题器。标题所有权切换应按"改配置 → 检查 `auxiliary.title_generation.enabled` → 重启 Hermes"处理。
+> **标题所有权注意：** `first_title_mode` 是加载期生效的配置（默认 `builtin`）：首轮标题由 Hermes 生成，插件从多轮演化阶段开始维护。若想让插件从第 1 轮就参与评估，设为 `first_title_mode: plugin`。两种模式都不写任何宿主配置，因此停用或删除插件不会影响 Hermes 自己的标题生成器。
 
 > **安装路径注意：** 请把插件直接放在 `~/.hermes/plugins/hermes-auto-titler/`。用 symlink 链接包目录时，`config.yaml` 必须放在包目录真实所在位置（配置按包目录定位）。
 
 ## ⚙️ 配置
 
 `~/.hermes/plugins/hermes-auto-titler/config.yaml` — 所有键可选；非法值回退默认值。
+
+配置逐键解析，优先级：`ctx.get_config()` → 宿主 `plugins.entries.hermes-auto-titler.settings`（由 `plugin.yaml` 的 `config_schema` 声明，在 Hermes Desktop/CLI 插件面板中渲染）→ 上述本地 `config.yaml` → 插件内置默认值。本地文件不是必须的，只写想覆盖的键即可；0.2 遗留下来的 `config.yaml` 里显式写过的键会继续生效。
 
 <details>
 <summary><b>全部配置键</b></summary>
@@ -145,7 +147,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 |---|---|---|
 | `enabled` | `true` | 总开关。启动时为 false 则没有注册 hook，之后改 true 需要重启；已加载后改 false 会被 hook 内开关立即拦住。 |
 | `every_n_turns` | `2` | 每 N 个完整前台轮次评估一次。 |
-| `first_title_mode` | `plugin` | `plugin` = 从第 1 轮评估，加载时关闭宿主标题器；`builtin` = 第一版标题归 Hermes。切换按重启级配置处理。 |
+| `first_title_mode` | `builtin` | `builtin` = 第一版标题归 Hermes；`plugin` = 插件从第 1 轮开始评估。两种模式都不写宿主配置。切换在插件加载时生效（需重启）。 |
 | `early_turn_eval` | `false` | 兼容旧配置保留。实际行为由 `first_title_mode` 控制。 |
 | `on_close` | `true` | 关闭/终局时最多等待已有工作 100ms，并持久化 typed finalize intent；关闭 hook 不发起网络请求。 |
 | `recent_turns` / `opening_turns` | `2` / `2` | 上下文窗口按真实用户轮计；每个选中轮次保留用户消息 + 最后一条 assistant 回复。 |
@@ -158,7 +160,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `retitle_summary_chars` | `12000` | blind/手动/批量重生成时的压缩摘要预算；`0` 时回退到 `preview_chars`。 |
 | `title_style` | `concise` | `concise` = 主体标签；`complete` = 简短事件/意图概括，多 12 列显示预算。 |
 | `strategy` | `conservative` | `conservative` = 只有明显、持续的失配才改；`aggressive` = 用户明确放弃旧目标或多个实质回合形成持续新方向后更快跟进，单次子任务/工具变化不算转题。 |
-| `provider` / `model` | `""` / `""` | 都为空 = Hermes `title_generation` 辅助任务；填写任一项 = 插件自定义通道。 |
+| `provider` / `title_model` | `""` / `""` | 都为空 = Hermes `title_generation` 辅助任务；填写任一项 = 插件自定义通道。`title_model` 是设置面板里的模型覆盖键名（`config.yaml` 中写作 `model`）。 |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔。 |
 | `max_title_length` / `max_display_width` | `null` / `40` | `null` 不强加代码层字符硬切，由提示词保持标题简洁，`max_display_width` 限制显示列宽；`complete` 风格额外增加 12 列。 |
 | `rename_confirmations` | `1` | 默认再要求 1 次后续背书；`0` = 一次判定后直接写；`N > 1` = 需要 N 次后续背书。候选被替换则重新计数。 |

@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from typing import List
 
 import yaml
 
@@ -330,6 +331,70 @@ def test_summary_preview_never_half_cuts_a_tail_section():
     if tail in out:
         # 整节要么完整保留，要么不出现；半截节会伪造一个结尾
         assert "先提交不 release" in out
+
+
+# 真实摘要的节长度跨度：79..24732 字符，16 节里 3 节超过 2k。
+# 均匀短节的 fixture 造不出这个 bug——尾池必须够到头部已收的节才暴露。
+REAL_DENSITY_SECTIONS = [
+    ("Historical Task Snapshot", 1480),
+    ("Goal", 492),
+    ("Constraints & Preferences", 842),
+    ("Completed Actions", 2273),
+    ("Active State", 627),
+    ("Blocked", 79),
+    ("Key Decisions", 1227),
+    ("Errors & Fixes", 666),
+    ("Resolved Questions", 332),
+    ("Relevant Files", 798),
+    ("Critical Context", 670),
+    ("Detailed Session Log (oldest first)", 3400),
+    ("Anchor Index (mechanically extracted, exact)", 2618),
+    ("User Messages (verbatim, newest first)", 24732),
+    ("Context Recovery", 361),
+]
+
+
+def _real_density_summary(scale: int = 1) -> str:
+    return "\n\n".join(
+        "## %s\n%s" % (name, ("detail line. " * 4000)[:size * scale])
+        for name, size in REAL_DENSITY_SECTIONS
+    )
+
+
+def _headings(text: str) -> List[str]:
+    return [line for line in text.splitlines() if line.startswith("## ")]
+
+
+def test_summary_preview_never_injects_the_same_section_twice():
+    """真实跨度下尾池会绕过中段够到头部已收的节；同节注入两遍比 opening/recent
+    重叠更直接——prompt 里同一段文字 literally 出现两次。"""
+    text = _real_density_summary(scale=2)
+    for budget in (1200, 2000, 3200, 12000):
+        out = summary_preview(text, budget)
+        headings = _headings(out)
+        assert len(headings) == len(set(headings)), (
+            "budget %d duplicated %r" % (budget, sorted(set(headings) - set(set(headings))))
+        )
+        assert len(out) <= budget + 1
+
+
+def test_summary_preview_head_pool_wins_then_takes_from_the_tail():
+    """头池顺序、尾池倒序，且尾池不许把头池的节再拿一次。"""
+    text = _real_density_summary(scale=2)
+    out = summary_preview(text, 12000)
+    headings = _headings(out)
+    names = [name for name, _ in REAL_DENSITY_SECTIONS]
+    positions = [names.index(h[3:]) for h in headings if h[3:] in names]
+    assert positions == sorted(positions), "sections must stay in document order"
+    assert headings[0] == "## Historical Task Snapshot"
+    assert headings[-1] == "## Context Recovery"
+
+
+def test_summary_preview_full_coverage_returns_text_unchanged():
+    """预算够吃下全部小节时直接返回，不再走尾池补满分支。"""
+    text = _real_density_summary(scale=1)
+    assert summary_preview(text, 10 ** 6) == text
+    assert len(summary_preview(text, len(text))) == len(text)
 
 
 def test_load_context_summary_hint_truncated():

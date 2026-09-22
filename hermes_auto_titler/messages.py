@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 def char_cols(ch: str) -> int:
@@ -219,7 +219,10 @@ def summary_preview(text: str, limit: int, head_share: float = 0.6) -> str:
 
     - 无 markdown 小节（自定义压缩模板）：退回 ``smart_preview`` 的句子边界行为
     - 有标题的小节：头池按顺序取整节，尾池从末尾向前取整节，中段整体丢弃
+    - 尾池按索引跳过头池已取的节：同一节被注入两遍会让模型把同一段文字当成
+      「开头和结尾各自说了同一件事」加权，比 opening/recent 重叠更直接
     - 首节单独超出预算时只切它；尾节永不切——半截尾节会伪造一个结尾
+    - 预算足够吃下全部小节时直接返回，不再走尾池补满
     - 尾池装不下整节时按句子边界补满，预算不空转；输出上限由 ``smart_preview``
       的省略号放宽到 ``limit + 1``，调用方的长度断言按此判定
     """
@@ -232,23 +235,32 @@ def summary_preview(text: str, limit: int, head_share: float = 0.6) -> str:
     tail_budget = max(1, limit - head_budget)
     chosen: List[str] = []
     used = 0
-    for section in sections:
+    taken: Set[int] = set()
+    for idx, section in enumerate(sections):
         if used >= head_budget:
             break
         room = head_budget - used
         if len(section) <= room:
             chosen.append(section)
+            taken.add(idx)
             used += len(section)
         elif not chosen:
             chosen.append(section[:room].rstrip())
+            taken.add(idx)
             used = head_budget
+    if len(taken) == len(sections):
+        return "\n\n".join(chosen)
     used_tail = 0
     tail: List[str] = []
-    for section in reversed(sections):
+    for idx in range(len(sections) - 1, -1, -1):
         if used_tail >= tail_budget:
             break
+        if idx in taken:
+            continue
+        section = sections[idx]
         if len(section) <= tail_budget - used_tail:
             tail.insert(0, section)
+            taken.add(idx)
             used_tail += len(section)
     if not tail:
         # 尾池装不下任何整节时，退回句子边界窗口，别把预算白白空着

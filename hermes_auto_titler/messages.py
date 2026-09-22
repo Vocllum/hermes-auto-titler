@@ -264,12 +264,14 @@ def summary_preview(text: str, limit: int, head_share: float = 0.6) -> str:
             used_tail += len(section)
     if not tail:
         # 尾池装不下任何整节时，退回句子边界窗口，别把预算白白空着。
-        # 窗口只能覆盖尚未选中的节：对整篇原文取首句会把头池已收的小节
-        # 标题和正文再带一遍，同一个标记就会在 prompt 里出现两次。
-        remaining = "\n\n".join(
+        # 窗口只能覆盖尚未选中的节：对整篇原文或剩余全文取首句，会把某个标题行
+        # 粘到另一节的正文前面，拼出一个冒充小节的脏标题行（下游按 `## ` 解析
+        # 就会把那段正文误判成该标题的内容）。取最后一个未选中的节，标题行与
+        # 正文必然同源。
+        remaining = [
             section for idx, section in enumerate(sections) if idx not in taken
-        )
-        return "\n\n".join(chosen + [smart_preview(remaining, tail_budget)])
+        ]
+        return "\n\n".join(chosen + [smart_preview(remaining[-1], tail_budget)])
     return "\n\n".join(chosen + tail)
 
 

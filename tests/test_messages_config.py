@@ -422,6 +422,39 @@ def test_summary_preview_fallback_never_repeats_head_sections():
     assert len(out) <= 1201
 
 
+def test_summary_preview_fallback_heading_line_is_same_section_as_its_body():
+    """补满窗口不能把标题行粘到另一节的正文上。
+
+    对剩余全文取首句时，首句是某个节的标题行、尾窗是另一节的正文，拼出的
+    `## X … <别的节的正文>` 读起来像合法小节，下游按 `## ` 解析会把那段正文
+    误判成 X 的内容。窗口只能取单个未选中的节，标题行与正文必须同源。
+    """
+    text = "\n\n".join([
+        "## A_head\n" + "aaa " * 40,
+        "## B_goal\n" + "bbb " * 40,
+        "## C_mid\n" + "ccc " * 6666,      # 20000+ 巨节，谁都不装得下
+        "## D_tail\n" + "ddd " * 200,      # 超过 tail_budget(480)
+        "## E_tail2\n" + "eee " * 300,     # 超过 tail_budget(480)
+    ])
+    for budget in (100, 200, 300, 600, 1200):
+        out = summary_preview(text, budget)
+        for line in out.splitlines():
+            if line.startswith("## ") and " … " in line:
+                # 脏形状的判据：标题名对应的正文 token 不能出现在这行里
+                heading = line.split(" … ")[0]
+                bodies = {
+                    "## A_head": "aaa", "## B_goal": "bbb",
+                    "## C_mid": "ccc", "## D_tail": "ddd", "## E_tail2": "eee",
+                }
+                assert bodies[heading] in line, (
+                    "fallback glued %r onto another section's body: %r" % (heading, line)
+                )
+    # 预算紧到只剩窗口时，标题行必须来自未选中的最后一个节
+    out = summary_preview(text, 100)
+    assert out.startswith("## A_head\n")
+    assert "## E_tail2 … eee" in out
+
+
 def test_summary_preview_fallback_branch_is_actually_reached():
     """上面那条必须真的走进 `if not tail:`；否则断言是空转的。"""
     text = "\n\n".join([

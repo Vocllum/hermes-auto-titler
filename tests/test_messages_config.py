@@ -410,7 +410,9 @@ def test_summary_preview_fallback_never_repeats_head_sections():
         "## E_tail2\n" + "eee " * 300,     # 超过 tail_budget(480)
     ])
     out = summary_preview(text, 1200)
-    # 标题和正文都要判：只判标题数会漏掉「正文重复但标题去重成功」的形状
+    # 标题和正文都要判：只判标题数会漏掉「正文重复但标题去重成功」的形状。
+    # 注意 "aaa " 是 39 而非 40：小节被 strip()，最后一个 "aaa" 后面没有空格，
+    # 不能拿 40 当期望值。
     assert out.count("## A_head") == 1
     assert out.count("aaa ") == 39
     assert out.count("## B_goal") == 1

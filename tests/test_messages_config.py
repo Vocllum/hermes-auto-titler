@@ -307,9 +307,11 @@ def test_summary_preview_drops_middle_sections_when_budget_forces_it():
     out = summary_preview(big, 1200)
     kept = [line for line in out.splitlines() if line.startswith("## ")]
     assert kept[0] == "## Historical Task Snapshot"
-    assert kept[-1] == "## User Messages (verbatim, newest first)"
-    assert not any(s.startswith("## Middle Section") for s in kept)
+    # 中段只能以补充分支的窗口形式出现，不能整节入选
+    assert not any(s == "## Middle Section %d" % i for i in range(6) for s in kept)
     assert len(out) <= 1203
+    # 尾部节超过 tail_budget(480)，以窗口形式到达；其内容必须在
+    assert "先提交不 release" in out
 
 
 def test_summary_preview_falls_back_when_template_has_no_sections():
@@ -395,6 +397,55 @@ def test_summary_preview_full_coverage_returns_text_unchanged():
     text = _real_density_summary(scale=1)
     assert summary_preview(text, 10 ** 6) == text
     assert len(summary_preview(text, len(text))) == len(text)
+
+
+def test_summary_preview_fallback_never_repeats_head_sections():
+    """尾池一节都装不下时走 smart_preview 补满；对整篇原文取首句会把头池
+    已收的小节再带一遍（连标题行都拼出一个假小节）。补满只能覆盖未选中的节。"""
+    text = "\n\n".join([
+        "## A_head\n" + "aaa " * 40,
+        "## B_goal\n" + "bbb " * 40,
+        "## C_mid\n" + "ccc " * 6666,      # 20000+ 巨节，谁都不装得下
+        "## D_tail\n" + "ddd " * 200,      # 超过 tail_budget(480)
+        "## E_tail2\n" + "eee " * 300,     # 超过 tail_budget(480)
+    ])
+    out = summary_preview(text, 1200)
+    # 标题和正文都要判：只判标题数会漏掉「正文重复但标题去重成功」的形状
+    assert out.count("## A_head") == 1
+    assert out.count("aaa ") == 39
+    assert out.count("## B_goal") == 1
+    assert out.count("bbb ") == 39
+    # 尾节内容仍要到达 prompt，不能因为去重把尾部整个丢掉
+    assert "eee " in out
+    assert len(out) <= 1201
+
+
+def test_summary_preview_fallback_branch_is_actually_reached():
+    """上面那条必须真的走进 `if not tail:`；否则断言是空转的。"""
+    text = "\n\n".join([
+        "## A_head\n" + "aaa " * 40,
+        "## B_goal\n" + "bbb " * 40,
+        "## C_mid\n" + "ccc " * 6666,
+        "## D_tail\n" + "ddd " * 200,
+        "## E_tail2\n" + "eee " * 300,
+    ])
+    sections = _summary_sections(text)
+    head_budget, tail_budget = int(1200 * 0.6), 1200 - int(1200 * 0.6)
+    taken, used = set(), 0
+    for idx, section in enumerate(sections):
+        if used >= head_budget:
+            break
+        if len(section) <= head_budget - used:
+            taken.add(idx)
+            used += len(section)
+        elif not taken:
+            taken.add(idx)
+            used = head_budget
+    fits = [
+        idx for idx in range(len(sections) - 1, -1, -1)
+        if idx not in taken and len(sections[idx]) <= tail_budget
+    ]
+    assert not fits, "fixture must leave the tail pool empty for the fallback to run"
 
 
 def test_load_context_summary_hint_truncated():

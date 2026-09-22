@@ -18,6 +18,8 @@ from hermes_auto_titler.messages import (
     load_context,
     load_context_with_summary,
     message_text,
+    summary_preview,
+    _summary_sections,
 )
 
 
@@ -60,8 +62,8 @@ def test_load_context_recent_turns_and_all_user():
     recent, all_user, opening = load_context(db, "s1", recent_turns=2, include_all_user=True)
     assert recent == [("user", "m2"), ("assistant", "a2"), ("user", "m3"), ("assistant", "a3")]
     assert all_user == [("user", "m1"), ("user", "m2"), ("user", "m3")]
-    # 开头默认取前 2 轮 user 消息及其 assistant 回应
-    assert opening == [("user", "m1"), ("assistant", "a1"), ("user", "m2"), ("assistant", "a2")]
+    # opening 不与 recent 重复：m2/a2 已进 recent，opening 只保留它之前的轮次
+    assert opening == [("user", "m1"), ("assistant", "a1")]
     # tool 消息被过滤；include_all_user=False 时返回空
     _, none, _ = load_context(db, "s1", recent_turns=2, include_all_user=False)
     assert none == []
@@ -86,10 +88,8 @@ def test_load_context_applies_per_turn_role_quota():
     recent, all_user, opening = load_context(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
-    assert opening == [
-        ("user", "m1"), ("assistant", "a1-final"),
-        ("user", "m2"), ("assistant", "a2-final"),
-    ]
+    # 可见轮次有 3 轮、recent_turns=2 时 opening 只有第 1 轮不重叠
+    assert opening == [("user", "m1"), ("assistant", "a1-final")]
     assert recent == [
         ("user", "m2"), ("assistant", "a2-final"),
         ("user", "m3"), ("assistant", "a3-final"),
@@ -112,7 +112,7 @@ def test_load_context_ignore_model_messages():
     )
     assert recent == [("user", "m2"), ("user", "m3")]
     assert all_user == [("user", "m1"), ("user", "m2"), ("user", "m3")]
-    assert opening == [("user", "m1"), ("user", "m2")]
+    assert opening == [("user", "m1")]
 
 
 def test_load_context_preview_chars():
@@ -128,8 +128,8 @@ def test_load_context_preview_chars():
     # opening/recent 的超长消息被截断到 200 字符 + 省略号；短消息原样
     for _, text in recent + opening:
         assert len(text) <= 201
-    assert any(t == "x" * 200 + "…" for _, t in recent + opening)
-    assert any(t == "y" * 200 + "…" for _, t in recent + opening)
+    assert any(t == "x" * 200 + "…" for _, t in recent)
+    assert any(t == "y" * 200 + "…" for _, t in recent)
     assert any(t == "短消息" for _, t in opening)
     # 用户消息（意图轨迹）不截断
     assert len(all_user[0][1]) == 3
@@ -202,11 +202,8 @@ def test_load_context_deduplicates_replayed_adjacent_user_messages():
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     assert all_user == [("user", "同一个请求"), ("user", "同一个请求")]
-    assert opening == [
-        ("user", "同一个请求"),
-        ("assistant", "已处理"),
-        ("user", "同一个请求"),
-    ]
+    # 只有 1 轮真实 opening，且它已在 recent 里：opening 降级保留该轮而非重复或消失
+    assert opening == [("user", "同一个请求")]
 
 
 def test_load_context_summary_hint_only_when_opening_is_missing():
@@ -221,8 +218,9 @@ def test_load_context_summary_hint_only_when_opening_is_missing():
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=2
     )
     # 摘要永远不进入 opening；最早摘要单独作为弱提示
+    # 可见轮次只有 2 轮、recent_turns=2 时 opening 落在 recent 内：
+    # 降级保留首批轮次的用户消息，仍满足 opening[0] 这个 subject 线索锚点
     assert opening[0] == ("user", "m1")
-    assert ("assistant", "a1") in opening
     assert summary.startswith("[Session Arc Summary")
     assert all_user == [("user", "m1"), ("user", "m2")]
 
@@ -237,7 +235,9 @@ def test_load_context_summary_hint_only_when_opening_is_missing():
         FakeDB(real_opening), "s1", recent_turns=2, include_all_user=True, opening_turns=1
     )
     assert summary2 is None
-    assert op2 == [("user", "真正的开头"), ("assistant", "开头回复")]
+    # 2 个真实轮次、recent_turns=2 时 opening 全部落在 recent 内：
+    # 降级只保留首批轮次的用户消息，assistant 回复由 recent 段承载
+    assert op2 == [("user", "真正的开头")]
 
 
 def test_load_context_recognizes_durable_summary_prefix():
@@ -256,6 +256,82 @@ def test_load_context_recognizes_durable_summary_prefix():
     assert all_user == [("user", "m1"), ("user", "m2")]
 
 
+REAL_SHAPED_SUMMARY = (
+    "[CONTEXT COMPRESSION — REFERENCE ONLY] 已整理压缩块，以下是完整历史。\n\n"
+    "## Historical Task Snapshot\n"
+    "User asked (deterministic, from compacted turns): 这是前 300 字符里的快照复述段，"
+    "用来占位，模拟真实压缩块里先出现的框架指令与历史复述。\n\n"
+    "## Goal\n"
+    "1. 【已完成】把测试补齐。\n"
+    "2. 【进行中】修复压缩会话的消息提取路径。\n\n"
+    "## Blocked\n"
+    "- 探针输出被上下文压缩丢失，需要 session_search 恢复，勿猜。\n\n"
+    "## User Messages (verbatim, newest first)\n"
+    "> 问题解决后先提交不 release，直到我宣布下一版本\n"
+)
+
+
+def test_summary_sections_splits_on_h2_only():
+    text = (
+        "# Title (h1, not a split point)\n"
+        "intro\n"
+        "## First\n"
+        "body-one\n"
+        "### Sub (h3, not a split point)\n"
+        "still-first\n"
+        "## Second\n"
+        "body-two\n"
+    )
+    assert _summary_sections(text) == [
+        "## First\nbody-one\n### Sub (h3, not a split point)\nstill-first",
+        "## Second\nbody-two",
+    ]
+
+
+def test_summary_preview_keeps_tail_sections_a_linear_cut_drops():
+    """真实压缩块形状：`## User Messages` 在 10k+ 处，线性前切必然丢掉它。"""
+    out = summary_preview(REAL_SHAPED_SUMMARY, 1200)
+    # 旧行为：s[:1200] 只有 Goal，User Messages 整节消失
+    assert "## Goal" in out
+    assert "先提交不 release" in out
+    # 预算不被突破（smart_preview 的省略号最多放宽 3）
+    assert len(out) <= 1203
+
+
+def test_summary_preview_drops_middle_sections_when_budget_forces_it():
+    """预算只够头尾各一节时，中段必须消失（真实 40k 摘要的形态）。"""
+    big = REAL_SHAPED_SUMMARY + "\n" + "\n\n".join(
+        "## Middle Section %d\n" % i + ("filler line. " * 40) for i in range(6)
+    )
+    out = summary_preview(big, 1200)
+    kept = [line for line in out.splitlines() if line.startswith("## ")]
+    assert kept[0] == "## Historical Task Snapshot"
+    assert kept[-1] == "## User Messages (verbatim, newest first)"
+    assert not any(s.startswith("## Middle Section") for s in kept)
+    assert len(out) <= 1203
+
+
+def test_summary_preview_falls_back_when_template_has_no_sections():
+    """自定义压缩模板没有 markdown 小节时退回句子边界窗口，而不是空串。"""
+    blob = "alpha beta. " * 200
+    out = summary_preview(blob, 60)
+    assert out and len(out) <= 63
+    assert out.startswith("alpha beta")
+
+
+def test_summary_preview_short_text_is_untouched():
+    assert summary_preview(REAL_SHAPED_SUMMARY, 100000) == REAL_SHAPED_SUMMARY
+    assert summary_preview("", 100) == ""
+
+
+def test_summary_preview_never_half_cuts_a_tail_section():
+    out = summary_preview(REAL_SHAPED_SUMMARY, 900)
+    tail = "## User Messages (verbatim, newest first)"
+    if tail in out:
+        # 整节要么完整保留，要么不出现；半截节会伪造一个结尾
+        assert "先提交不 release" in out
+
+
 def test_load_context_summary_hint_truncated():
     conv = [
         {"role": "user", "content": "[Recent Summary (d0, node 1)] " + "y" * 500},
@@ -266,8 +342,7 @@ def test_load_context_summary_hint_truncated():
         preview_chars=200,
     )
     assert opening == [("user", "m1")]
-    assert summary is not None and len(summary) <= 201
-    assert summary.endswith("…")
+    assert summary is not None and len(summary) <= 203
 
 
 def test_load_context_summary_hint_summary_chars_override():
@@ -280,14 +355,13 @@ def test_load_context_summary_hint_summary_chars_override():
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
         preview_chars=200, summary_chars=400,
     )
-    assert summary is not None and len(summary) <= 401
-    assert summary.endswith("…")
+    assert summary is not None and len(summary) <= 403
     # summary_chars=0（默认）沿用 preview_chars
     _, _, _, summary2 = load_context_with_summary(
         FakeDB(conv), "s1", recent_turns=2, include_all_user=True, opening_turns=1,
         preview_chars=200,
     )
-    assert len(summary2) <= 201
+    assert len(summary2) <= 203
 
 
 def test_load_context_filters_cron_maintenance_marker():

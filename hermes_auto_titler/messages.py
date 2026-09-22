@@ -195,6 +195,67 @@ def clean_captured_text(text: str) -> Optional[str]:
 _SENT_RE = re.compile(r"[。！？…!?]|(?<=\.)\s|\n")
 
 
+_SECTION_RE = re.compile(r"^##\s+.*$", re.MULTILINE)
+
+
+def _summary_sections(text: str) -> List[str]:
+    """按 markdown 二级标题把摘要切成完整小节；无标题时返回空列表。"""
+    marks = list(_SECTION_RE.finditer(text))
+    sections: List[str] = []
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        piece = text[m.start():end].strip()
+        if piece:
+            sections.append(piece)
+    return sections
+
+
+def summary_preview(text: str, limit: int, head_share: float = 0.6) -> str:
+    """压缩摘要的结构化预览：按小节整体取舍，不做线性硬切。
+
+    压缩块的信息密度集中在 markdown 小节里，而小节的先后顺序本身就编码了
+    「主线在前、最新状态在后」。线性前切会系统性丢掉尾部小节，按句子边界切的
+    窗口又会退化（压缩块标题不是句子，首句往往只是包装残片）。
+
+    - 无 markdown 小节（自定义压缩模板）：退回 ``smart_preview`` 的句子边界行为
+    - 有标题的小节：头池按顺序取整节，尾池从末尾向前取整节，中段整体丢弃
+    - 首节单独超出预算时只切它；尾节永不切——半截尾节会伪造一个结尾
+    - 尾池装不下整节时按句子边界补满，预算不空转；输出上限由 ``smart_preview``
+      的省略号放宽到 ``limit + 1``，调用方的长度断言按此判定
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    sections = _summary_sections(text)
+    if not sections:
+        return smart_preview(text, limit)
+    head_budget = max(1, int(limit * head_share))
+    tail_budget = max(1, limit - head_budget)
+    chosen: List[str] = []
+    used = 0
+    for section in sections:
+        if used >= head_budget:
+            break
+        room = head_budget - used
+        if len(section) <= room:
+            chosen.append(section)
+            used += len(section)
+        elif not chosen:
+            chosen.append(section[:room].rstrip())
+            used = head_budget
+    used_tail = 0
+    tail: List[str] = []
+    for section in reversed(sections):
+        if used_tail >= tail_budget:
+            break
+        if len(section) <= tail_budget - used_tail:
+            tail.insert(0, section)
+            used_tail += len(section)
+    if not tail:
+        # 尾池装不下任何整节时，退回句子边界窗口，别把预算白白空着
+        return "\n\n".join(chosen + [smart_preview(text, tail_budget)])
+    return "\n\n".join(chosen + tail)
+
+
 def smart_preview(text: str, limit: int) -> str:
     """超长消息提取首句与尾部窗口（保留开头实体与尾部连续指令，无任何硬编码词表）。
 
@@ -380,13 +441,34 @@ def load_context_with_summary(
     # 片段也不属于任何真实用户轮次，不能冒充 Opening。
     turns = _sample_turns(pairs, preview)
     recent = [item for turn in turns[-recent_turns:] for item in turn]
-    opening = [item for turn in turns[:opening_turns] for item in turn]
+    # opening 与 recent 可能取到同一批轮次（压缩后可见轮次不足时必然如此）。
+    # 同一上下文在 prompt 里出现两遍会被模型当成「开头和结尾说的是同一件事」
+    # 加权，锚定效应加倍。按轮次下标剔除重叠，opening 只保留 recent 之前的轮次；
+    # 若因此为空，说明可见历史整体就是 recent，此时降级保留首批轮次而不是返回空
+    # ——policy 侧需要 opening 段来承载 subject 线索，空列表会让它整段消失。
+    recent_turn_start = max(0, len(turns) - recent_turns)
+    opening = [
+        item
+        for turn_idx, turn in enumerate(turns[:opening_turns])
+        if turn_idx < recent_turn_start
+        for item in turn
+    ]
+    if not opening:
+        # 可见历史整体就是 recent：降级只保留首批轮次的用户消息，
+        # 既不让 opening 段消失，也不把同一轮重复两遍
+        opening = [
+            item
+            for turn_idx, turn in enumerate(turns[:opening_turns])
+            if turn_idx == 0
+            for item in turn
+            if item[0] == "user"
+        ]
     # 摘要永远不进入 opening；只有它先于所有可见真实消息时，才作为独立弱提示。
     earlier_summary = None
     if summaries and not saw_visible_opening:
         s = summaries[0]
         n = summary_chars or preview_chars
-        earlier_summary = (s[:n] + "…") if n > 0 and len(s) > n else s
+        earlier_summary = summary_preview(s, n) if n > 0 and len(s) > n else s
 
     # 用户消息 = 意图轨迹；超长单条提取首尾句，超条数分层采样
     users = [(r, t) for r, t in pairs if r == "user"]

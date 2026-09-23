@@ -203,9 +203,98 @@ def test_clean_captured_text_extracts_real_message_from_handoff_wrapper():
     assert clean_captured_text(compacted) == "当前真实请求"
 
 
+def test_load_context_prefers_latest_compaction_summary_by_timestamp():
+    # Replay/rotation can make transcript row order differ from event chronology.
+    old = "## Historical Task Snapshot\nold history"
+    new = "## Historical Task Snapshot\nnewer history"
+    conv = [
+        {
+            "role": "assistant",
+            "content": "[CONTEXT COMPACTION — REFERENCE ONLY]\navoid repeating it:\n" + new + "\n--- END OF CONTEXT SUMMARY ---",
+            "timestamp": 200,
+        },
+        {
+            "role": "user",
+            "content": "[CONTEXT COMPACTION — REFERENCE ONLY]\navoid repeating it:\n" + old + "\n--- END OF CONTEXT SUMMARY ---",
+            "timestamp": 100,
+        },
+    ]
+    _, _, _, summary = load_context_with_summary(
+        FakeDB(conv), "s1", recent_turns=2, include_all_user=True, preview_chars=0, summary_chars=0
+    )
+    assert summary is not None
+    assert summary.startswith(new)
+    assert old in summary
+
+
+def test_clean_captured_text_strips_group_envelope_after_replay_marker():
+    # Regression from SessionDB session 20260920_223346_3281b7: a persisted
+    # [STILL IN PROGRESS] line precedes the ordinary group-chat envelope.
+    wrapped = (
+        "[STILL IN PROGRESS — this is the active request, restated after the "
+        "compaction boundary because it was not finished yet. Continue it; "
+        "do not start over.]\n"
+        "[Group chat: \"Lattice\"] You are @lynn, one participant in a group chat "
+        "with @aperture, @eclipse, @voxel, @zenith and the user.\n\n"
+        "New messages in the room since your last turn (oldest first):\n"
+        "  You (user): continue the AutoTitler review\n\n"
+        "Rules for this room:\n"
+        "- Reply only when you have something new.\n"
+    )
+
+    assert clean_captured_text(wrapped) == "You (user): continue the AutoTitler review"
+
+
+def test_clean_captured_text_truncates_injected_tail_after_system_wrapper():
+    # Mirrors all five task-list payloads found in the 352-session reproduction set.
+    cases = [
+        (
+            "[System: The active model for this chat has changed to combo/Free via provider opencodex.]\n"
+            "真实请求一\n\n[Your active task list was preserved across context compression]\n- [>] 任务清单",
+            "真实请求一",
+        ),
+        (
+            "[System: The active model for this chat has changed to combo/Free via provider opencodex.]\n"
+            "真实请求二\n[Your active task list was preserved across context compression]\n- [>] 继续项",
+            "真实请求二",
+        ),
+        (
+            "[System: The active model for this chat has changed to combo/Free via provider opencodex.]\n"
+            "真实请求三\n[Your active task list was preserved across context compression]\n- [>] 检查状态",
+            "真实请求三",
+        ),
+        (
+            "[System: The active model for this chat has changed to combo/Free via provider opencodex.]\n"
+            "真实请求四\n[Your active task list was preserved across context compression]\n- [>] 完成验证",
+            "真实请求四",
+        ),
+        (
+            "[System note: Your previous turn was interrupted mid-run]\n"
+            "真实请求五\n[Your active task list was preserved across context compression]\n- [>] 继续项",
+            "真实请求五",
+        ),
+        (
+            "[System: The active model for this chat has changed to combo/Free via provider opencodex.]\n"
+            "真实请求六\n[Skills pruned during compression — reload before acting]\n"
+            "[SKILL_PRUNED: private skill body]",
+            "真实请求六",
+        ),
+    ]
+    for wrapped, expected in cases:
+        assert clean_captured_text(wrapped) == expected
+
+
+def test_clean_captured_text_truncates_task_list_in_unwrapped_message():
+    assert clean_captured_text(
+        "普通用户请求\n[Your active task list was preserved across context compression]\n- [>] 任务清单"
+    ) == "普通用户请求"
+
+
 def test_clean_captured_text_discards_unfinished_handoff_and_system_notice():
     assert clean_captured_text("[CONTEXT COMPACTION — REFERENCE ONLY] 还没有结束") is None
     assert clean_captured_text("[System: model changed]") is None
+    assert clean_captured_text("[Skills pruned during compression — reload before acting]") is None
+    assert clean_captured_text("[SKILL_PRUNED: private skill body]") is None
 
 
 def test_load_context_deduplicates_replayed_adjacent_user_messages():
@@ -1198,7 +1287,7 @@ def test_end_marker_boundary_falls_back_when_no_col0_line():
     """找不到独占整行的标记时必须回退到首次命中，不能把摘要整个丢掉。
 
     真实案例 20260922_142944_ff6e95：唯一命中就是真边界，但 `---\\s*` 吞掉了
-    紧随的 `\\n\\n[STILL IN PROGRESS …]`，按「同行不能有后续内容」一刀切会误伤。
+    紧随的 `\n\n[STILL IN PROGRESS …]`，按「同行不能有后续内容」一刀切会误伤。
     """
     carrier = (
         "[CONTEXT COMPACTION — REFERENCE ONLY] ... avoid repeating it:\n"

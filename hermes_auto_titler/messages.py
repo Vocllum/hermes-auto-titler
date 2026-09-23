@@ -79,6 +79,8 @@ _SYSTEM_NOISE_PREFIXES = (
     "[async delegation",
     "[important:",
     "[your active task list was preserved",
+    "[skills pruned",
+    "[skill_pruned:",
     # cron-memory-maintenance 的最终标记（通常以 assistant 角色写回消息流）
     "memory_maintenance_summary",
 )
@@ -187,7 +189,15 @@ _UNPACK_SYSTEM_WRAPPER_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 群聊信封：每条群聊消息都以 `[Group chat: "<room>"] …` 开头，正文是
+# 系统接管标记可能紧跟在真实请求尾部；其后的任务清单与裁剪技能正文属于
+# Agent 运行时上下文，不是用户输入。按独立标记行截断，避免把注入块计入主题。
+_SYSTEM_INJECTION_BOUNDARY_RE = re.compile(
+    r"^[ \t]*\[(?:your active task list\b|skills pruned\b|skill_pruned\s*:)[^\n]*",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+# 群聊信封：每条群聊消息都以 `[Group chat: \"<room>\"] …` 开头，正文是
 # 「New messages in the room」段，尾部固定追加 `Rules for this room:`。
 # 实测 116 封 / 315,175 字符中，规则块占 32.4%、首部占 6.9%——
 # 模型看到的「用户意图」有 39.5% 是房间规则样板。剥掉首尾、只留消息段。
@@ -348,19 +358,24 @@ def clean_captured_text(text: str) -> Optional[str]:
     if not t:
         return None
 
-    # 运行时元数据包装：先解包，正文才是真实用户请求
+    # 运行时元数据包装：先解包，但之后不短路，统一流经信封、handoff 和注入噪声清理。
     unpacked = unpack_system_wrapper(t)
     if unpacked is not None:
         t = unpacked
         if not t:
             return None
-    else:
-        # 群聊信封：剥掉首部与房间规则，只保留消息段
-        stripped = strip_group_chat_envelope(t)
-        if stripped is not None:
-            t = stripped
-            if not t:
-                return None
+
+    # Replay/handoff 前缀可能包在群聊信封之外；先去掉，才能让群聊头成为首行，
+    # 否则 strip_group_chat_envelope 无法命中，规则正文会漏进标题上下文。
+    t = _HANDOFF_REPLAY_RE.sub("", t).strip()
+    if not t:
+        return None
+    # 群聊信封：剥掉首部与房间规则，只保留消息段
+    stripped = strip_group_chat_envelope(t)
+    if stripped is not None:
+        t = stripped
+        if not t:
+            return None
 
     # 如果文本包含 context compaction 或 handoff 结束标记，提取结束标记之后的真实用户消息。
     # 只在「这条消息含压缩 handoff 结构」时才走这条分支：agent 讨论压缩机制时
@@ -378,6 +393,13 @@ def clean_captured_text(text: str) -> Optional[str]:
         return None
 
     t = _HANDOFF_REPLAY_RE.sub("", t).strip()
+    if not t:
+        return None
+
+    # 截断系统接管尾部：保留标记前的用户意图，丢弃任务清单或裁剪技能正文。
+    boundary = _SYSTEM_INJECTION_BOUNDARY_RE.search(t)
+    if boundary is not None:
+        t = t[:boundary.start()].rstrip()
     if not t or is_system_noise(t):
         return None
     return t
@@ -593,14 +615,14 @@ def load_context_with_summary(
 ]:
     """返回 (recent, all_user, opening, earlier_summary)。
 
-    earlier_summary 只在可见消息中没有真实 opening、且存在压缩摘要时提供；
-    它永远不进入 opening、recent 或用户意图轨迹。summary_chars>0 时用它
-    截断摘要（retitle 盲改场景：模型没有当前标题锚点，需要更长摘要来恢复
-    Subject）；0 = 沿用 preview_chars。提示强度由调用方决定。
+    earlier_summary 与可见用户意图轨迹分开；它永远不进入 opening、recent
+    或 all_user。summary_chars>0 时用它截断摘要（retitle 盲改场景：模型没有
+    当前标题锚点，需要更长摘要来恢复 Subject）；0 = 沿用 preview_chars。
+    提示强度由调用方决定。
     """
     conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
     pairs: List[Tuple[str, str]] = []
-    summaries: List[str] = []
+    summaries: List[Tuple[Optional[float], int, str]] = []
     saw_summary = False
     for m in conv:
         role = m.get("role")
@@ -614,14 +636,14 @@ def load_context_with_summary(
         # 但摘要正文本身包含主线信息，标题评估需要它。
         compaction_body = _extract_compaction_summary(raw_text)
         if compaction_body:
-            summaries.append(compaction_body)
+            summaries.append((m.get("timestamp"), len(summaries), compaction_body))
             saw_summary = True
             # 不 continue——继续走 clean_captured_text 提取末尾可能的真实用户消息
         text = clean_captured_text(raw_text)
         if not text:
             continue
         if is_summary(text):
-            summaries.append(text)
+            summaries.append((m.get("timestamp"), len(summaries), text))
             saw_summary = True
             continue
         if is_system_noise(text):
@@ -675,17 +697,29 @@ def load_context_with_summary(
     # 恒常透传：压缩后可见历史再短，主线证据也不该被一句「继续」清空。
     # 旧的 `not saw_visible_opening` 门禁会在出现任意一条真实用户消息时把
     # 摘要整体丢弃（实测 225 个含载体会话里 141 个因此看不到摘要）。
-    # 多轮压缩会产生多段载体，按时间顺序拼接而不是只取 summaries[0]——
-    # 后一段是更新的状态，但它是在前一段的基础上推进的，丢掉前段会丢失
-    # 任务的原始目标。
+    # 多轮压缩载体按真实事件时间排序。并发 rotation/replay 会使数据库行 id
+    # 顺序不同于 timestamp 顺序；最新压缩块应排在前面，否则 preview 的前缀
+    # 恰好会把旧任务标题判作仍有效。
     earlier_summary = None
     if summaries:
+        # SessionDB returns replay lineages by durable row id so tool-call adjacency
+        # stays intact; compaction/replay can nevertheless move later carrier events
+        # ahead in time. Timestamp is the authoritative ordering for summary payloads.
+        ordered_summaries = sorted(
+            summaries,
+            key=lambda item: (
+                item[0] is None,
+                -(item[0] or 0.0) if item[0] is not None else 0,
+                item[1],
+            ),
+        )
+        summary_texts = [item[2] for item in ordered_summaries]
         n = summary_chars or preview_chars
         if n > 0:
-            merged = "\n\n".join(summaries)
+            merged = "\n\n".join(summary_texts)
             earlier_summary = summary_preview(merged, n) if len(merged) > n else merged
         else:
-            earlier_summary = "\n\n".join(summaries)
+            earlier_summary = "\n\n".join(summary_texts)
 
     # 用户消息 = 意图轨迹；超长单条提取首尾句，超条数分层采样
     users = [(r, t) for r, t in pairs if r == "user"]

@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "classes": [
+    "compacted",
+    "repeat_compacted",
+    "noise",
+    "identifiers",
+    "shift",
+    "single_topic",
+    "multi_topic",
+    "manual_title_protected"
+  ],
+  "sessions": [
+    {
+      "id": "20260920_123615_4302a0",
+      "class": "repeat_compacted",
+      "initial_source": "llm",
+      "human_turns": 24,
+      "prefix_labels": [
+        {
+          "turn": 1,
+          "durable_subject": "会话标题偏差调查与改进",
+          "allowed_shift": false,
+          "required_identifiers": ["AutoTitler"]
+        },
+        {
+          "turn": 8,
+          "durable_subject": "AutoTitler 提示词与采样分层演化",
+          "allowed_shift": false,
+          "required_identifiers": ["AutoTitler"]
+        }
+      ]
+    },
+    {
+      "id": "20260918_234034_c811f6",
+      "class": "identifiers",
+      "initial_source": "llm",
+      "human_turns": 66,
+      "prefix_labels": [
+        {
+          "turn": 1,
+          "durable_subject": "opencodex-usage-meter 开发与用量采集",
+          "allowed_shift": false,
+          "required_identifiers": ["opencodex-usage-meter"]
+        },
+        {
+          "turn": 12,
+          "durable_subject": "opencodex-usage-meter 界面与状态栏优化",
+          "allowed_shift": false,
+          "required_identifiers": ["opencodex-usage-meter"]
+        }
+      ]
+    },
+    {
+      "id": "20260918_172644_e27106",
+      "class": "compacted",
+      "initial_source": "llm",
+      "human_turns": 111,
+      "prefix_labels": [
+        {
+          "turn": 1,
+          "durable_subject": "Hindsight 记忆治理与适配",
+          "allowed_shift": false,
+          "required_identifiers": ["Hindsight"]
+        },
+        {
+          "turn": 20,
+          "durable_subject": "Hindsight 记忆提取流水线调优",
+          "allowed_shift": false,
+          "required_identifiers": ["Hindsight"]
+        }
+      ]
+    }
+  ]
+}

@@ -5,6 +5,12 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+PRE_REGISTERED_INTERACTIONS: Dict[str, set[str]] = {
+    "summary_x_trim": {"summary_preview_chars", "ignore_model_messages"},
+    "horizon_x_summary": {"opening_turns", "recent_turns", "summary_preview_chars"},
+    "strategy_x_confirm": {"strategy", "rename_confirmations"},
+}
+
 
 @dataclass
 class MatrixCell:
@@ -33,6 +39,19 @@ class MatrixCell:
             "input_variant": self.input_variant,
             "host_title_enabled": self.host_title_enabled,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> MatrixCell:
+        return cls(
+            cell_id=data["cell_id"],
+            name=data["name"],
+            config_diff=data.get("config_diff", {}),
+            is_baseline=data.get("is_baseline", False),
+            is_interaction=data.get("is_interaction", False),
+            prompt_variant=data.get("prompt_variant"),
+            input_variant=data.get("input_variant"),
+            host_title_enabled=data.get("host_title_enabled"),
+        )
 
 
 def make_cells(
@@ -117,7 +136,7 @@ def make_cells(
 
 
 def validate_cells(cells: List[MatrixCell], base_config: Dict[str, Any]) -> bool:
-    """严格校验矩阵 cell 的正交性与完整性。"""
+    """严格校验矩阵 cell 的正交性、交互键集合与完整性。"""
     seen_ids = set()
     for c in cells:
         if c.cell_id in seen_ids:
@@ -127,7 +146,17 @@ def validate_cells(cells: List[MatrixCell], base_config: Dict[str, Any]) -> bool
         if c.is_baseline:
             if len(c.config_diff) != 0:
                 raise ValueError("baseline cell cannot have config_diff")
-        elif not c.is_interaction:
+        elif c.is_interaction:
+            # 交互 cell 必须属于预注册交互，且 key 集合严格匹配
+            if c.cell_id not in PRE_REGISTERED_INTERACTIONS:
+                raise ValueError(f"unregistered interaction cell: {c.cell_id}")
+            expected_keys = PRE_REGISTERED_INTERACTIONS[c.cell_id]
+            actual_keys = set(c.config_diff.keys())
+            if actual_keys != expected_keys:
+                raise ValueError(
+                    f"interaction cell {c.cell_id} keys mismatch: expected {expected_keys}, got {actual_keys}"
+                )
+        else:
             # 单因素必须严格为 1 个差异键，严禁 lean 等隐式改多键
             if len(c.config_diff) != 1:
                 raise ValueError(

@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import pytest
 from eval.matrix import make_cells, validate_cells, MatrixCell
 from hermes_auto_titler.config import DEFAULTS
@@ -42,15 +44,38 @@ def test_validate_cells_rejects_lean_alias():
         validate_cells([bad_cell], base_config=DEFAULTS)
 
 
-def test_production_fixture_matrix():
-    from pathlib import Path
-    import json
-    from eval.matrix import dump_matrix_fixture
+def test_validate_cells_checks_interaction_key_sets():
+    # 交互 cell 键集合不匹配预注册定义
+    bad_interaction = MatrixCell(
+        cell_id="summary_x_trim",
+        name="bad keys interaction",
+        config_diff={"summary_preview_chars": 2400},  # 缺少 ignore_model_messages
+        is_baseline=False,
+        is_interaction=True,
+    )
+    with pytest.raises(ValueError, match="interaction cell summary_x_trim keys mismatch"):
+        validate_cells([bad_interaction], base_config=DEFAULTS)
+
+    unregistered_interaction = MatrixCell(
+        cell_id="unknown_combo",
+        name="unregistered combo",
+        config_diff={"strategy": "aggressive", "preview_chars": 60},
+        is_baseline=False,
+        is_interaction=True,
+    )
+    with pytest.raises(ValueError, match="unregistered interaction cell"):
+        validate_cells([unregistered_interaction], base_config=DEFAULTS)
+
+
+def test_production_fixture_matrix_validation():
+    # 直接只读验证已固化的 fixture，杜绝自写自测
     fixture_path = Path(__file__).parent.parent / "eval" / "fixtures" / "matrix.json"
-    cells = make_cells(DEFAULTS, host_title_enabled=False)
-    dump_matrix_fixture(fixture_path, cells)
     assert fixture_path.exists()
     with open(fixture_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     assert data.get("schema") == 1
-    assert len(data.get("cells", [])) == len(cells)
+    raw_cells = data.get("cells", [])
+    assert len(raw_cells) == 15
+
+    cells = [MatrixCell.from_dict(c) for c in raw_cells]
+    assert validate_cells(cells, base_config=DEFAULTS) is True

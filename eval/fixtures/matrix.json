@@ -1,0 +1,187 @@
+{
+  "schema": 1,
+  "cells": [
+    {
+      "cell_id": "baseline",
+      "name": "Production Baseline (DEFAULTS)",
+      "config_diff": {},
+      "is_baseline": true,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "summary_2400",
+      "name": "summary_preview_chars 2400",
+      "config_diff": {
+        "summary_preview_chars": 2400
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "preview_60",
+      "name": "preview_chars 60",
+      "config_diff": {
+        "preview_chars": 60
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "opening_3",
+      "name": "opening_turns 3",
+      "config_diff": {
+        "opening_turns": 3
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "recent_4",
+      "name": "recent_turns 4",
+      "config_diff": {
+        "recent_turns": 4
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "ignore_model_true",
+      "name": "ignore_model_messages True",
+      "config_diff": {
+        "ignore_model_messages": true
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "user_threshold_20",
+      "name": "user_message_threshold 20",
+      "config_diff": {
+        "user_message_threshold": 20
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "strategy_aggressive",
+      "name": "strategy aggressive",
+      "config_diff": {
+        "strategy": "aggressive"
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "style_complete",
+      "name": "title_style complete",
+      "config_diff": {
+        "title_style": "complete"
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "rename_confirm_0",
+      "name": "rename_confirmations 0",
+      "config_diff": {
+        "rename_confirmations": 0
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "min_interval_0",
+      "name": "min_interval_minutes 0",
+      "config_diff": {
+        "min_interval_minutes": 0
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "every_1_turn",
+      "name": "every_n_turns 1",
+      "config_diff": {
+        "every_n_turns": 1
+      },
+      "is_baseline": false,
+      "is_interaction": false,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "summary_x_trim",
+      "name": "摘要预算 × 助手消息强剪裁",
+      "config_diff": {
+        "summary_preview_chars": 2400,
+        "ignore_model_messages": true
+      },
+      "is_baseline": false,
+      "is_interaction": true,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "horizon_x_summary",
+      "name": "opening/recent 视野 × 结构化长摘要",
+      "config_diff": {
+        "opening_turns": 3,
+        "recent_turns": 4,
+        "summary_preview_chars": 2400
+      },
+      "is_baseline": false,
+      "is_interaction": true,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    },
+    {
+      "cell_id": "strategy_x_confirm",
+      "name": "激进判定 × 免背书直接写",
+      "config_diff": {
+        "strategy": "aggressive",
+        "rename_confirmations": 0
+      },
+      "is_baseline": false,
+      "is_interaction": true,
+      "prompt_variant": null,
+      "input_variant": null,
+      "host_title_enabled": false
+    }
+  ]
+}

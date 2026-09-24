@@ -66,7 +66,7 @@ def select_eligible(
             continue
 
         # 检查是否为顶层会话
-        parent_id = sess.get("parent_id")
+        parent_id = sess.get("parent_id") or sess.get("parent_session_id")
         if parent_id:
             excluded.append({"session_id": sid, "reason": "has_parent_session"})
             continue

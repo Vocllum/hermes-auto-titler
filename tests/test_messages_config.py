@@ -63,6 +63,25 @@ class _NoLlmCtx:
         return default
 
 
+def test_manifest_settings_order_and_defaults_match_runtime():
+    root = Path(__file__).resolve().parent.parent
+    schema = yaml.safe_load((root / "plugin.yaml").read_text())["config_schema"]
+    keys = list(schema)
+    assert len(keys) == len(set(keys)) == len(DEFAULTS) - 1  # internal 'model' is reserved
+    assert keys[:9] == [
+        "enabled", "first_title_mode", "strategy", "title_style",
+        "every_n_turns", "on_close", "rename_confirmations",
+        "title_model", "provider",
+    ]
+    assert keys[-1] == "early_turn_eval"
+    for key, field in schema.items():
+        expected = DEFAULTS[key]
+        # Hermes' numeric field serializes an optional None default as zero.
+        if key == "max_title_length":
+            expected = 0
+        assert field["default"] == expected, key
+
+
 def test_load_context_recent_turns_and_all_user():
     conv = [
         {"role": "user", "content": "m1"},
@@ -1436,4 +1455,40 @@ def test_summary_survives_a_visible_opening_instead_of_being_gated_away():
     )
     assert summary is not None
     assert "原始目标" in summary
+
+
+def test_status_diagnoses_first_title_host_switch(monkeypatch):
+    import sys
+    from hermes_auto_titler.commands import make_handler
+    from hermes_auto_titler.titler import AutoTitler
+
+    # 1. first_title_mode=builtin 且宿主 auxiliary.title_generation.enabled=false
+    fake_disabled = type("ConfigModule", (), {
+        "load_config_readonly": staticmethod(lambda: {"auxiliary": {"title_generation": {"enabled": False}}})
+    })
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_disabled)
+
+    t = AutoTitler(type("Ctx", (), {"llm": None})(), {**DEFAULTS, "first_title_mode": "builtin"}, db=type("DB", (), {})())
+    h = make_handler(t)
+    out = h("status")
+    assert "first-title mismatch" in out
+    assert "hermes config set auxiliary.title_generation.enabled true" in out
+    assert "first_title_mode plugin" in out
+
+    # 2. first_title_mode=builtin 且宿主配置未知 (load_config_readonly 返回 None 或抛异常)
+    fake_unknown = type("ConfigModule", (), {
+        "load_config_readonly": staticmethod(lambda: None)
+    })
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_unknown)
+    out_unknown = h("status")
+    assert "first-title mismatch" not in out_unknown
+    assert "unknown" in out_unknown
+
+    # 3. first_title_mode=plugin 时提示首轮由插件负责，但不改宿主开关
+    t_plugin = AutoTitler(type("Ctx", (), {"llm": None})(), {**DEFAULTS, "first_title_mode": "plugin"}, db=type("DB", (), {})())
+    h_plugin = make_handler(t_plugin)
+    out_plugin = h_plugin("status")
+    assert "plugin" in out_plugin
+    assert "first-title mismatch" not in out_plugin
+
 

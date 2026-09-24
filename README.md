@@ -131,6 +131,13 @@ model: "your-model"         # any model your Hermes setup can reach
 **Requirements:** Python ≥ 3.11 · a recent Hermes Agent.
 
 > **Title ownership note:** `first_title_mode` is a startup-level setting (default `builtin`): Hermes owns the first-turn title and the plugin starts from its multi-turn evolution. Set `first_title_mode: plugin` if you want the plugin to evaluate from turn 1. Neither mode ever writes host configuration, so disabling or deleting the plugin leaves Hermes' own title generator fully intact.
+>
+> **First-title diagnosis:** `/autotitler status` inspects the host's `auxiliary.title_generation.enabled` setting. If `first_title_mode: builtin` but the host title generator is disabled (`auxiliary.title_generation.enabled=false`), `/autotitler status` reports a `first-title mismatch` with clear fix options:
+> - Enable Hermes first-title: `hermes config set auxiliary.title_generation.enabled true` (requires Hermes restart).
+> - Let the plugin handle first titles: `/autotitler config first_title_mode plugin`.
+>
+> If host configuration cannot be read, `/autotitler status` displays `unknown` rather than falsely reporting healthy.
+
 
 > **Install-layout note:** Place the plugin directly at `~/.hermes/plugins/hermes-auto-titler/`. If you symlink the package directory, `config.yaml` must live where the package physically resides (config resolves relative to the package).
 

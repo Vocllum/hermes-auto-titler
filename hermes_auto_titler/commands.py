@@ -42,6 +42,26 @@ def _fmt_result(r: dict[str, Any]) -> str:
     return f"  {str(r.get('session_id', ''))[:8]} {act} {extra}".rstrip()
 
 
+def _host_title_generation_enabled() -> bool | None:
+    try:
+        from hermes_cli.config import load_config_readonly
+        root = load_config_readonly()
+        if not isinstance(root, dict):
+            return None
+        aux = root.get("auxiliary")
+        if not isinstance(aux, dict):
+            return None
+        title_cfg = aux.get("title_generation")
+        if not isinstance(title_cfg, dict):
+            return None
+        enabled = title_cfg.get("enabled")
+        if isinstance(enabled, bool):
+            return enabled
+        return None
+    except Exception:
+        return None
+
+
 def make_handler(titler) -> Callable[[str], str]:
     def handler(raw: str) -> str:
         args = raw.split()
@@ -51,6 +71,25 @@ def make_handler(titler) -> Callable[[str], str]:
             c = titler.cfg
             recent_logs = "\n".join(f"  {line}" for line in list(titler._audit_log)[-5:])
             log_section = f"\nrecent audits (last {min(5, len(titler._audit_log))}):\n{recent_logs}" if recent_logs else ""
+
+            first_title_diag = ""
+            mode = str(c.get("first_title_mode", "builtin")).lower()
+            if mode == "builtin":
+                host_enabled = _host_title_generation_enabled()
+                if host_enabled is False:
+                    first_title_diag = (
+                        "\nfirst-title mismatch: host auxiliary.title_generation.enabled=false while first_title_mode=builtin.\n"
+                        "  Fix options:\n"
+                        "    1. Enable Hermes first-title: hermes config set auxiliary.title_generation.enabled true\n"
+                        "    2. Let plugin handle first title: /autotitler config first_title_mode plugin"
+                    )
+                elif host_enabled is None:
+                    first_title_diag = "\nfirst-title diagnosis: host auxiliary.title_generation.enabled=unknown (host config unreadable or not found)."
+                else:
+                    first_title_diag = "\nfirst-title diagnosis: host auxiliary.title_generation.enabled=true (builtin healthy)."
+            elif mode == "plugin":
+                first_title_diag = "\nfirst-title diagnosis: plugin mode (plugin evaluates from turn 1; host auxiliary.title_generation switch is not modified)."
+
             return (
                 f"autotitler: {'enabled' if c['enabled'] else 'disabled'}"
                 f" | every {c['every_n_turns']} turns | first_title={c.get('first_title_mode', 'builtin')}"
@@ -63,6 +102,7 @@ def make_handler(titler) -> Callable[[str], str]:
                 f" | max_renames={c.get('max_renames_per_session', 0)}"
                 f" | retry_queue={len(titler._failed_sessions)}"
                 f" | finalize_queue={len(titler._finalize_intents)}"
+                f"{first_title_diag}"
                 f"{log_section}"
             )
 

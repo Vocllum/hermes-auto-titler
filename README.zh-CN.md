@@ -131,6 +131,13 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 **要求：** Python ≥ 3.11 · 较新版本的 Hermes Agent。
 
 > **标题所有权注意：** `first_title_mode` 是加载期生效的配置（默认 `builtin`）：首轮标题由 Hermes 生成，插件从多轮演化阶段开始维护。若想让插件从第 1 轮就参与评估，设为 `first_title_mode: plugin`。两种模式都不写任何宿主配置，因此停用或删除插件不会影响 Hermes 自己的标题生成器。
+>
+> **首轮冲突状态诊断：** `/autotitler status` 会只读读取宿主 `auxiliary.title_generation.enabled` 配置。当 `first_title_mode: builtin` 但宿主首轮标题被禁用（`auxiliary.title_generation.enabled=false`）时，命令输出会明确指出 `first-title mismatch` 并提示具体修复入口：
+> - 若希望 Hermes 负责首轮：执行 `hermes config set auxiliary.title_generation.enabled true`（需重启 Hermes）。
+> - 若希望由插件负责首轮：执行 `/autotitler config first_title_mode plugin`。
+>
+> 宿主配置未知或无法读取时状态诊断显式显示 `unknown`，不得伪装健康；`plugin` 模式下明确提示首轮由插件负责、不修改宿主开关。
+
 
 > **安装路径注意：** 请把插件直接放在 `~/.hermes/plugins/hermes-auto-titler/`。用 symlink 链接包目录时，`config.yaml` 必须放在包目录真实所在位置（配置按包目录定位）。
 

@@ -17,6 +17,7 @@
 2. **阶段二：在线成对回放实验**
    - 以生产默认作为共同基线锚点（A）。
    - 单因素正交对比：`summary_preview_chars` (1200 vs 2400)、`preview_chars` (120 vs 60)、`opening_turns` (2 vs 3)、`recent_turns` (2 vs 4)、`ignore_model_messages` (false vs true)、`user_message_threshold` (40 vs 20)、`strategy` (conservative vs aggressive)、`title_style` (concise vs complete)、`rename_confirmations` (1 vs 0)、`min_interval_minutes` (5 vs 0)、`every_n_turns` (2 vs 1)。
+     *注意：`every_1_turn` 衡量的是代码默认值 `DEFAULTS["every_n_turns"]`（2 → 1）的单因素偏离，而非相对现网本地 config.yaml（现网本地已设置为 1）的偏离。报告必须明确此基线对照口径。*
    - 预注册 3 组机制交叉组合：
      1. 摘要预算 × 助手消息剪裁
      2. opening/recent 视野 × 结构化摘要

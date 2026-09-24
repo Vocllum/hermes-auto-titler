@@ -1,6 +1,106 @@
 import pytest
-from eval.metrics import compute_cell_metrics, EvaluationRecord
+from eval.metrics import (
+    compute_cell_metrics,
+    is_acceptable_title,
+    is_usurped_title,
+    EvaluationRecord,
+)
 from eval.report import format_per_turn_table, format_aggregate_summary
+
+
+def test_is_acceptable_title_exact_normalized_match():
+    # 严格杜绝双向子串误判：全词等值匹配
+    assert is_acceptable_title("cat", ["catalog"], "durable subject") is False
+    assert is_acceptable_title("API", ["API rate limiter"], "durable subject") is False
+    assert is_acceptable_title("B", None, "Title B") is False
+
+    # 规范化后全词等值匹配
+    assert is_acceptable_title("Title B", None, "Title B") is True
+    assert is_acceptable_title("  title b  ", ["Title B"], "durable subject") is True
+    assert is_acceptable_title("AutoTitler 架构重构", ["AutoTitler 架构重构"], "AutoTitler 架构") is True
+
+
+def test_is_usurped_title_mechanical_evaluation():
+    # 1. 命中次主题/排错/噪声标签
+    assert (
+        is_usurped_title(
+            title="修复局部报错",
+            acceptable_titles=["AutoTitler 架构重构"],
+            durable_subject="AutoTitler 架构重构",
+            allowed_shift=False,
+            secondary_topics=["修复局部报错", "构建脚本调试"],
+        )
+        is True
+    )
+
+    # 2. 禁止转向时脱离主线
+    assert (
+        is_usurped_title(
+            title="无关临时分支",
+            acceptable_titles=["AutoTitler 架构重构"],
+            durable_subject="AutoTitler 架构重构",
+            allowed_shift=False,
+        )
+        is True
+    )
+
+    # 3. 正常主线或允许转向时不属于篡权
+    assert (
+        is_usurped_title(
+            title="AutoTitler 架构重构",
+            acceptable_titles=["AutoTitler 架构重构"],
+            durable_subject="AutoTitler 架构重构",
+            allowed_shift=False,
+        )
+        is False
+    )
+    assert (
+        is_usurped_title(
+            title="新主线主题",
+            acceptable_titles=["新主线主题"],
+            durable_subject="旧主线主题",
+            allowed_shift=True,
+        )
+        is False
+    )
+
+
+def test_protected_session_requires_initial_title_and_detects_drift():
+    # 缺少 initial_title 抛出 ValueError
+    with pytest.raises(ValueError, match="initial_title must be explicitly provided"):
+        EvaluationRecord(
+            session_id="sess_prot_err",
+            cell_id="cell_a",
+            turn=1,
+            action="keep",
+            candidate=None,
+            pending=False,
+            applied_title="Title",
+            durable_subject="Subject",
+            initial_title=None,
+            is_manual_protected=True,
+            status="ok",
+        )
+
+    # 动作虽为 keep 但 applied_title 与 initial_title 发生漂移
+    rec_drift = [
+        EvaluationRecord(
+            session_id="sess_prot_2",
+            cell_id="cell_a",
+            turn=1,
+            action="keep",
+            candidate=None,
+            pending=False,
+            applied_title="Drifted Title",
+            durable_subject="Protected Subject",
+            initial_title="Original Protected Title",
+            is_manual_protected=True,
+            status="ok",
+        )
+    ]
+    metrics_drift = compute_cell_metrics("cell_a", rec_drift)
+    assert metrics_drift["protected_violation_count"] == 1
+    assert metrics_drift["hard_fail"] is True
 
 
 def test_rename_counts_and_pending_distinction():
@@ -49,48 +149,6 @@ def test_rename_counts_and_pending_distinction():
     assert metrics["eligible_turns"] == 3
     assert metrics["observed_turns"] == 3
     assert metrics["failed_turns"] == 0
-
-
-def test_protected_session_violation_triggers_hard_fail_on_action_and_drift():
-    # 动作违规
-    rec_action = [
-        EvaluationRecord(
-            session_id="sess_prot_1",
-            cell_id="cell_a",
-            turn=1,
-            action="rename",
-            candidate="Malicious Rewrite",
-            pending=False,
-            applied_title="Malicious Rewrite",
-            durable_subject="Protected Subject",
-            initial_title="Protected Subject",
-            is_manual_protected=True,
-            status="ok",
-        )
-    ]
-    metrics = compute_cell_metrics("cell_a", rec_action)
-    assert metrics["protected_violation_count"] == 1
-    assert metrics["hard_fail"] is True
-
-    # 动作虽为 keep 但 applied_title 与 initial_title 发生漂移
-    rec_drift = [
-        EvaluationRecord(
-            session_id="sess_prot_2",
-            cell_id="cell_a",
-            turn=1,
-            action="keep",
-            candidate=None,
-            pending=False,
-            applied_title="Drifted Title",
-            durable_subject="Protected Subject",
-            initial_title="Original Protected Title",
-            is_manual_protected=True,
-            status="ok",
-        )
-    ]
-    metrics_drift = compute_cell_metrics("cell_a", rec_drift)
-    assert metrics_drift["protected_violation_count"] == 1
-    assert metrics_drift["hard_fail"] is True
 
 
 def test_errors_excluded_from_quality_denominator_and_token_availability():
@@ -145,6 +203,7 @@ def test_shift_latency_verified_against_acceptable_titles():
             pending=False,
             applied_title="Title A",
             durable_subject="Subject A",
+            acceptable_titles=["Title A"],
             allowed_shift=False,
             status="ok",
         ),
@@ -157,6 +216,7 @@ def test_shift_latency_verified_against_acceptable_titles():
             pending=True,
             applied_title="Title A",
             durable_subject="Subject B",
+            acceptable_titles=["Title B"],
             allowed_shift=True,
             intended_shift_turn=4,
             status="ok",
@@ -170,7 +230,7 @@ def test_shift_latency_verified_against_acceptable_titles():
             pending=False,
             applied_title="Title B",
             durable_subject="Subject B",
-            acceptable_titles=["Title B", "Subject B"],
+            acceptable_titles=["Title B"],
             allowed_shift=True,
             intended_shift_turn=4,
             status="ok",
@@ -178,7 +238,6 @@ def test_shift_latency_verified_against_acceptable_titles():
     ]
 
     metrics = compute_cell_metrics("cell_a", valid_records)
-    # 明确钉住断言：turn 4 触发，turn 5 完成写入有效标题，延迟为 1
     assert metrics["shift_latency_turns"] == [1]
     assert metrics["failed_shifts"] == 0
 
@@ -193,7 +252,7 @@ def test_shift_latency_verified_against_acceptable_titles():
             pending=False,
             applied_title="UNRELATED",
             durable_subject="Subject B",
-            acceptable_titles=["Title B", "Subject B"],
+            acceptable_titles=["Title B"],
             allowed_shift=True,
             intended_shift_turn=4,
             status="ok",
@@ -213,11 +272,11 @@ def test_mainline_coverage_usurpation_and_identifiers():
             action="keep",
             candidate=None,
             pending=False,
-            applied_title="AutoTitler 架构重构与优化",
+            applied_title="AutoTitler 架构重构",
             durable_subject="AutoTitler 架构重构",
-            acceptable_titles=["AutoTitler 架构重构", "AutoTitler 优化"],
+            acceptable_titles=["AutoTitler 架构重构"],
             required_identifiers=["AutoTitler"],
-            is_local_usurpation=False,
+            allowed_shift=False,
             status="ok",
             input_tokens=100,
             output_tokens=10,
@@ -229,11 +288,12 @@ def test_mainline_coverage_usurpation_and_identifiers():
             action="keep",
             candidate=None,
             pending=False,
-            applied_title="修复某个局部报错",  # 发生局部篡权，丢掉主线与标识符
+            applied_title="修复某个局部报错",  # 发生局部篡权，偏离主线
             durable_subject="AutoTitler 架构重构",
             acceptable_titles=["AutoTitler 架构重构"],
+            secondary_topics=["修复某个局部报错"],
             required_identifiers=["AutoTitler"],
-            is_local_usurpation=True,
+            allowed_shift=False,
             status="ok",
             input_tokens=120,
             output_tokens=12,
@@ -268,7 +328,6 @@ def test_report_formatting_includes_cell_id_and_all_metrics():
         )
     ]
     table = format_per_turn_table(records)
-    # 明确验证 Cell ID 列存在
     assert "| `sess_123...` | `baseline` | 1 | Subject | `rename` | Cand | True | **Init** | `ok` | 100/10 |" in table
 
     metrics = compute_cell_metrics("baseline", records)

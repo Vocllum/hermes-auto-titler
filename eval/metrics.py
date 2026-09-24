@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+import unicodedata
 
 
 @dataclass
@@ -16,16 +17,30 @@ class EvaluationRecord:
     durable_subject: str
     initial_title: Optional[str] = None
     acceptable_titles: Optional[List[str]] = None
+    secondary_topics: Optional[List[str]] = None
     required_identifiers: Optional[List[str]] = None
     allowed_shift: bool = False
     intended_shift_turn: Optional[int] = None
     is_manual_protected: bool = False
-    is_local_usurpation: bool = False
     status: str = "ok"  # ok, rate_limit, timeout, auth_error, parse_error, etc.
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     reasoning_tokens: Optional[int] = None
     elapsed_ms: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.is_manual_protected and not (self.initial_title and self.initial_title.strip()):
+            raise ValueError(
+                f"session {self.session_id} turn {self.turn} is manual protected: "
+                f"initial_title must be explicitly provided and non-empty"
+            )
+
+
+def normalize_title(t: str) -> str:
+    """Unicode NFKC 归一化，去除首尾空白，小写折叠。"""
+    if not t:
+        return ""
+    return unicodedata.normalize("NFKC", t).strip().lower()
 
 
 def is_acceptable_title(
@@ -33,18 +48,42 @@ def is_acceptable_title(
     acceptable_titles: Optional[List[str]],
     durable_subject: str,
 ) -> bool:
-    """判定标题是否命中可接受标题集合或主线主题。"""
+    """判定标题是否命中可接受标题集合或主线主题（全词等值精确匹配，禁止子串误判）。"""
     if not title:
         return False
-    t_clean = title.strip().lower()
+    t_norm = normalize_title(title)
+    if not t_norm:
+        return False
     if acceptable_titles:
-        return any(
-            acc.strip().lower() in t_clean or t_clean in acc.strip().lower()
-            for acc in acceptable_titles
-            if acc.strip()
-        )
-    subj_clean = durable_subject.strip().lower()
-    return subj_clean in t_clean or t_clean in subj_clean
+        return t_norm in {normalize_title(acc) for acc in acceptable_titles if acc and acc.strip()}
+    return t_norm == normalize_title(durable_subject)
+
+
+def is_usurped_title(
+    title: str,
+    acceptable_titles: Optional[List[str]],
+    durable_subject: str,
+    allowed_shift: bool,
+    secondary_topics: Optional[List[str]] = None,
+) -> bool:
+    """判定标题是否被局部噪声、排错或未授权次主题篡权（机械判定，非人工透传旗标）。"""
+    if not title:
+        return False
+    t_norm = normalize_title(title)
+    if not t_norm:
+        return False
+
+    # 1. 标题等值命中了已声明的次级/局部排错/噪声主题
+    if secondary_topics:
+        if t_norm in {normalize_title(sec) for sec in secondary_topics if sec and sec.strip()}:
+            return True
+
+    # 2. 在明确禁止转向的前提下，标题脱离了可接受主线集合，判定为主线被局部篡权
+    if not allowed_shift:
+        if not is_acceptable_title(title, acceptable_titles, durable_subject):
+            return True
+
+    return False
 
 
 def compute_cell_metrics(cell_id: str, records: List[EvaluationRecord]) -> Dict[str, Any]:
@@ -67,7 +106,8 @@ def compute_cell_metrics(cell_id: str, records: List[EvaluationRecord]) -> Dict[
         if r.is_manual_protected:
             has_action_violation = r.action in ("rename", "approve")
             has_title_drift = (
-                r.initial_title is not None and r.applied_title != r.initial_title
+                r.initial_title is None
+                or normalize_title(r.applied_title) != normalize_title(r.initial_title)
             )
             if has_action_violation or has_title_drift:
                 protected_violation_count += 1
@@ -99,15 +139,21 @@ def compute_cell_metrics(cell_id: str, records: List[EvaluationRecord]) -> Dict[
             if r.status != "ok":
                 continue
 
-            # 主线覆盖评估
+            # 主线覆盖评估（全词等值匹配）
             if is_acceptable_title(r.applied_title, r.acceptable_titles, r.durable_subject):
                 mainline_covered_turns += 1
 
-            # 局部篡权评估
-            if r.is_local_usurpation:
+            # 局部篡权评估（机械逻辑判定）
+            if is_usurped_title(
+                r.applied_title,
+                r.acceptable_titles,
+                r.durable_subject,
+                r.allowed_shift,
+                r.secondary_topics,
+            ):
                 local_usurped_turns += 1
 
-            # 标识符保真度评估
+            # 标识符保真度评估（精确大小写与字符匹配）
             if r.required_identifiers:
                 identifiers_eligible_turns += 1
                 if all(ident in r.applied_title for ident in r.required_identifiers):
@@ -127,9 +173,6 @@ def compute_cell_metrics(cell_id: str, records: List[EvaluationRecord]) -> Dict[
                         latency = r.turn - r.intended_shift_turn
                         shift_latency_turns.append(latency)
                         shift_resolved_for_session = True
-                    else:
-                        # 写进无关/错误标题，不计为解决转向
-                        pass
 
             # 检查漏改：已经进入转向阶段且非 pending，但动作仍为 keep 且标题仍是旧主题
             if (

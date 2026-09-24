@@ -79,9 +79,14 @@ class SandboxSqliteSessionDB:
     会话创建、标题更新、消息追加与查询接口。
     """
 
+    MAX_TITLE_LENGTH = 100
+    TITLE_SOURCE_USER = "user"
+    TITLE_SOURCE_LLM = "llm"
+    TITLE_SOURCE_DERIVED = "derived"
+
     def __init__(self, db_path: Union[str, Path]) -> None:
         self.db_path = Path(db_path)
-        self.conn = sqlite3.connect(str(self.db_path), isolation_level=None)
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
 
@@ -140,6 +145,16 @@ class SandboxSqliteSessionDB:
     def set_session_title_source(self, session_id: str, source: str) -> bool:
         cur = self.conn.execute("UPDATE sessions SET title_source = ? WHERE id = ?", (source, session_id))
         return cur.rowcount > 0
+
+    def set_auto_title(self, session_id: str, title: str, source: str = "llm") -> bool:
+        cur = self.conn.execute(
+            "UPDATE sessions SET title = ?, title_source = ? WHERE id = ?",
+            (title, source, session_id),
+        )
+        return cur.rowcount > 0
+
+    def record_auxiliary_usage(self, session_id: str, task: str, **kwargs: Any) -> None:
+        pass
 
     def get_session_title(self, session_id: str) -> Optional[str]:
         row = self.conn.execute("SELECT title FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -303,3 +318,178 @@ def make_sandbox(
                 )
 
     return sandbox_db
+
+
+class ReplayClock:
+    """可由测试/回放框架受控推进的虚拟单调时钟与挂钟时间。"""
+
+    def __init__(self, initial_monotonic: float = 1000.0, initial_time: float = 1727170000.0) -> None:
+        self._mono = float(initial_monotonic)
+        self._wall = float(initial_time)
+
+    def monotonic(self) -> float:
+        return self._mono
+
+    def time(self) -> float:
+        return self._wall
+
+    def advance(self, seconds: float) -> None:
+        self._mono += float(seconds)
+        self._wall += float(seconds)
+
+
+class ReplayHarness:
+    """生产 evaluate() 状态机沙箱回放容器。
+
+    保证：
+    1. 每个 harness 实例绑定独立沙箱 SessionDB 与独立临时 state.json，严禁写穿生产；
+    2. 注入受控 ReplayClock，支持精确模拟 5 分钟冷却退避；
+    3. 支持通过 evaluate() 或 on_session_end / on_session_finalize 触发，并提供 drain_inflight 确定性同步执行；
+    4. 记录每轮动作、候选、待审 pending、最终标题与 title_source。
+    """
+
+    def __init__(
+        self,
+        workdir: Union[str, Path],
+        cfg: Optional[Dict[str, Any]] = None,
+        clock: Optional[ReplayClock] = None,
+        mock_llm: Optional[Any] = None,
+    ) -> None:
+        from unittest.mock import MagicMock
+        from hermes_auto_titler.policy import AutoTitler
+
+        self.workdir = Path(workdir)
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        self.clock = clock or ReplayClock()
+
+        base_cfg: Dict[str, Any] = {
+            "enabled": True,
+            "min_interval_minutes": 5,
+            "rename_confirmations": 1,
+            "every_n_turns": 2,
+            "strategy": "conservative",
+            "title_style": "concise",
+            "summary_preview_chars": 1200,
+            "preview_chars": 100,
+            "user_message_threshold": 40,
+            "user_message_preview_chars": 300,
+            "include_all_user_messages": True,
+            "ignore_model_messages": False,
+        }
+        if cfg:
+            base_cfg.update(cfg)
+        self.cfg = base_cfg
+
+        # 独立沙箱 SessionDB
+        db_path = self.workdir / "state.db"
+        if is_real_session_db_available():
+            import hermes_state
+            self.db = hermes_state.SessionDB(db_path=db_path)
+        else:
+            self.db = SandboxSqliteSessionDB(db_path=db_path)
+
+        # 独立上下文与 LLM
+        self.mock_llm = mock_llm or MagicMock()
+        self.ctx = MagicMock()
+        self.ctx.llm = self.mock_llm
+
+        # 实例化 policy.AutoTitler
+        self.titler = AutoTitler(self.ctx, self.cfg, db=self.db)
+
+        # 锁死沙箱 state.json，杜绝写穿现网
+        self.titler._state_path = self.workdir / "state.json"
+
+        # 启动时钟 patch
+        self._mono_patch = None
+        self._time_patch = None
+        self.start_clock_patch()
+
+    def start_clock_patch(self) -> None:
+        from unittest.mock import patch
+        if self._mono_patch is None:
+            self._mono_patch = patch("time.monotonic", side_effect=self.clock.monotonic)
+            self._mono_patch.start()
+        if self._time_patch is None:
+            self._time_patch = patch("time.time", side_effect=self.clock.time)
+            self._time_patch.start()
+
+    def stop_clock_patch(self) -> None:
+        if self._mono_patch is not None:
+            try:
+                self._mono_patch.stop()
+            except Exception:
+                pass
+            self._mono_patch = None
+        if self._time_patch is not None:
+            try:
+                self._time_patch.stop()
+            except Exception:
+                pass
+            self._time_patch = None
+
+    def evaluate(
+        self,
+        session_id: str,
+        force: bool = False,
+        blind: bool = False,
+    ) -> Dict[str, Any]:
+        """同步运行一次状态机 evaluate() 并捕获完整决策结果。"""
+        return self.titler.evaluate(session_id, force=force, blind=blind)
+
+    def on_session_end(self, **payload: Any) -> None:
+        """通过真实宿主 hook 路径触发评估调度。"""
+        self.titler.on_session_end(**payload)
+
+    def on_session_finalize(self, session_id: str, **payload: Any) -> None:
+        """通过真实宿主 hook 终局路径触发收尾评估。"""
+        payload["session_id"] = session_id
+        self.titler.on_session_finalize(**payload)
+        self.titler._retry_failed_sessions()
+
+    def drain_inflight(self, session_id: Optional[str] = None, timeout: float = 5.0) -> None:
+        """确定性等待后台 worker 完成，杜绝 sleep 掩盖竞态。"""
+        if session_id:
+            event = None
+            with self.titler._inflight_lock:
+                event = self.titler._inflight.get(session_id)
+            if event:
+                event.wait(timeout)
+        else:
+            with self.titler._inflight_lock:
+                events = list(self.titler._inflight.values())
+            for ev in events:
+                ev.wait(timeout)
+
+    def record_transition(
+        self,
+        session_id: str,
+        result: Dict[str, Any],
+        candidate: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """记录完整的状态转移审计快照。"""
+        import copy
+        return {
+            "session_id": session_id,
+            "action": result.get("action"),
+            "candidate": candidate or result.get("candidate") or result.get("title"),
+            "reason": result.get("reason"),
+            "pending": copy.deepcopy(self.titler._pending.get(session_id)),
+            "db_title": self.db.get_session_title(session_id),
+            "db_source": self.db.get_session_title_source(session_id),
+            "monotonic": self.clock.monotonic(),
+        }
+
+    def close(self) -> None:
+        self.stop_clock_patch()
+        if hasattr(self.db, "close"):
+            try:
+                self.db.close()
+            except Exception:
+                pass
+
+    def __enter__(self) -> ReplayHarness:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+

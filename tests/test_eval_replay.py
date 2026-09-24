@@ -252,3 +252,224 @@ print("SMOKE_PASS")
     )
     assert result.returncode == 0, f"Host smoke failed with stderr: {result.stderr}"
     assert "SMOKE_PASS" in result.stdout
+
+
+def test_replay_harness_confirmations_and_keep(tmp_path):
+    from eval.replay import ReplayHarness
+
+    harness = ReplayHarness(
+        workdir=tmp_path / "harness_1",
+        cfg={
+            "enabled": True,
+            "rename_confirmations": 1,
+            "min_interval_minutes": 0,  # 禁用冷却以专注测试确认机制
+        },
+    )
+
+    sid = "sess_conf"
+    harness.db.create_session(sid, source="cli")
+    harness.db.set_session_title(sid, "原标题")
+    harness.db.set_session_title_source(sid, "llm")
+    harness.db.append_messages_batch(
+        sid,
+        [
+            {"role": "user", "content": "第一轮讨论：评测设计"},
+            {"role": "assistant", "content": "好的，这是评测设计"},
+        ],
+    )
+
+    # 1. 第一轮模型建议改名为 "新标题-候选"
+    # rename_confirmations=1 下，由于当前已有 llm 标题，首次应进入 pending
+    harness.mock_llm.complete.return_value = MagicMock(text='{"action": "rename", "title": "新标题-候选"}')
+    res1 = harness.evaluate(sid)
+    assert res1["action"] == "pending"
+    assert res1["candidate"] == "新标题-候选"
+    assert harness.titler._pending.get(sid)["title"] == "新标题-候选"
+    # 沙箱 DB 中标题尚未被修改
+    assert harness.db.get_session_title(sid) == "原标题"
+
+    # 2. 第二轮插入新消息后，模型输出 approve
+    harness.db.append_messages_batch(
+        sid,
+        [
+            {"role": "user", "content": "第二轮补充：确认这个方向"},
+            {"role": "assistant", "content": "好的已记录"},
+        ],
+    )
+    harness.mock_llm.complete.return_value = MagicMock(text='{"action": "approve"}')
+    res2 = harness.evaluate(sid)
+    assert res2["action"] == "renamed"
+    assert harness.db.get_session_title(sid) == "新标题-候选"
+    assert harness.titler._pending.get(sid) is None
+
+    # 3. 第三轮一次插问，模型输出 keep，标题不变
+    harness.db.append_messages_batch(
+        sid,
+        [
+            {"role": "user", "content": "第三轮：问一个局部小问题"},
+            {"role": "assistant", "content": "小问题解答"},
+        ],
+    )
+    harness.mock_llm.complete.return_value = MagicMock(text='{"action": "keep"}')
+    res3 = harness.evaluate(sid)
+    assert res3["action"] == "keep"
+    assert harness.db.get_session_title(sid) == "新标题-候选"
+
+
+def test_replay_harness_throttling_and_clock_advance(tmp_path):
+    from eval.replay import ReplayClock, ReplayHarness
+
+    clock = ReplayClock(initial_monotonic=100.0)
+    harness = ReplayHarness(
+        workdir=tmp_path / "harness_throttling",
+        cfg={
+            "enabled": True,
+            "min_interval_minutes": 5,
+            "rename_confirmations": 0,
+        },
+        clock=clock,
+    )
+
+    sid = "sess_throttle"
+    harness.db.create_session(sid, source="cli")
+    harness.db.append_messages_batch(
+        sid,
+        [
+            {"role": "user", "content": "开始任务"},
+            {"role": "assistant", "content": "任务开始"},
+        ],
+    )
+    harness.mock_llm.complete.return_value = MagicMock(text='{"action": "rename", "title": "任务标题"}')
+
+    # 首次触发
+    res1 = harness.evaluate(sid)
+    assert res1["action"] == "renamed"
+    assert harness.db.get_session_title(sid) == "任务标题"
+
+    # 立即（时钟未推进）再次触发，由于小于 5 分钟，必须 throttled
+    res2 = harness.evaluate(sid)
+    assert res2["action"] == "throttled"
+
+    # 推进 299 秒，依然 throttled
+    clock.advance(299.0)
+    res3 = harness.evaluate(sid)
+    assert res3["action"] == "throttled"
+
+    # 推进 2 秒（总共 301 秒，超过 5 分钟），成功恢复评估
+    clock.advance(2.0)
+    harness.mock_llm.complete.return_value = MagicMock(text='{"action": "keep"}')
+    res4 = harness.evaluate(sid)
+    assert res4["action"] == "keep"
+
+
+def test_replay_harness_user_source_protection_and_finalize(tmp_path):
+    from eval.replay import ReplayHarness
+
+    harness = ReplayHarness(
+        workdir=tmp_path / "harness_prot",
+        cfg={"enabled": True},
+    )
+
+    # 1. 人工 user 来源恒 skipped
+    sid_user = "sess_user_prot"
+    harness.db.create_session(sid_user, source="cli")
+    harness.db.set_session_title(sid_user, "用户手动固定标题")
+    harness.db.set_session_title_source(sid_user, "user")
+    harness.db.append_messages_batch(
+        sid_user,
+        [
+            {"role": "user", "content": "随意输入"},
+            {"role": "assistant", "content": "回复"},
+        ],
+    )
+    res_user = harness.evaluate(sid_user)
+    assert res_user["action"] == "skipped"
+    assert "user title is authoritative" in res_user.get("reason", "")
+    assert harness.db.get_session_title(sid_user) == "用户手动固定标题"
+
+    # 2. finalize 走宿主 hook，候选不直接被当成已提交标题
+    sid_fin = "sess_fin"
+    harness.db.create_session(sid_fin, source="cli")
+    harness.db.append_messages_batch(
+        sid_fin,
+        [
+            {"role": "user", "content": "终局测试"},
+            {"role": "assistant", "content": "终局回复"},
+        ],
+    )
+    harness.mock_llm.complete.return_value = MagicMock(text='{"action": "rename", "title": "终局标题"}')
+    # finalize 触发
+    harness.on_session_finalize(sid_fin)
+    harness.drain_inflight(sid_fin)
+    assert harness.db.get_session_title(sid_fin) == "终局标题"
+
+
+def test_replay_harness_every_n_turns_scheduling(tmp_path):
+    from eval.replay import ReplayHarness
+
+    harness = ReplayHarness(
+        workdir=tmp_path / "harness_sched",
+        cfg={
+            "enabled": True,
+            "every_n_turns": 2,
+            "min_interval_minutes": 0,
+            "early_triggers": False,
+        },
+    )
+
+    sid = "sess_turn_sched"
+    harness.db.create_session(sid, source="cli")
+    harness.mock_llm.complete.return_value = MagicMock(text='{"action": "rename", "title": "第二轮命名"}')
+
+    # 轮次 1：通过 on_session_end 触发，n=1，n%2 != 0，不应触发评估
+    harness.db.append_messages_batch(
+        sid,
+        [
+            {"role": "user", "content": "轮次 1 内容"},
+            {"role": "assistant", "content": "回复 1"},
+        ],
+    )
+    harness.on_session_end(session_id=sid, completed=True)
+    harness.drain_inflight(sid)
+    assert harness.db.get_session_title(sid) is None
+
+    # 轮次 2：n=2，n%2 == 0，应触发并评估
+    harness.db.append_messages_batch(
+        sid,
+        [
+            {"role": "user", "content": "轮次 2 内容"},
+            {"role": "assistant", "content": "回复 2"},
+        ],
+    )
+    harness.on_session_end(session_id=sid, completed=True)
+    harness.drain_inflight(sid)
+    assert harness.db.get_session_title(sid) == "第二轮命名"
+
+
+def test_replay_harness_multi_session_isolation(tmp_path):
+    from eval.replay import ReplayHarness
+
+    harness = ReplayHarness(
+        workdir=tmp_path / "harness_multi",
+        cfg={"enabled": True, "min_interval_minutes": 0},
+    )
+
+    s1, s2 = "sess_1", "sess_2"
+    harness.db.create_session(s1, source="cli")
+    harness.db.create_session(s2, source="cli")
+    harness.db.append_messages_batch(s1, [{"role": "user", "content": "S1"}, {"role": "assistant", "content": "R1"}])
+    harness.db.append_messages_batch(s2, [{"role": "user", "content": "S2"}, {"role": "assistant", "content": "R2"}])
+
+    harness.mock_llm.complete.side_effect = [
+        MagicMock(text='{"action": "rename", "title": "S1标题"}'),
+        MagicMock(text='{"action": "rename", "title": "S2标题"}'),
+    ]
+
+    harness.evaluate(s1)
+    harness.evaluate(s2)
+
+    assert harness.db.get_session_title(s1) == "S1标题"
+    assert harness.db.get_session_title(s2) == "S2标题"
+    # 沙箱 state.json 落在 workdir 内部
+    assert (tmp_path / "harness_multi" / "state.json").exists()
+

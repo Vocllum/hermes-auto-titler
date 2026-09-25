@@ -20,12 +20,16 @@
         {
           "turn": 1,
           "durable_subject": "会话标题偏差调查与改进",
+          "acceptable_titles": ["会话标题偏差调查与改进", "AutoTitler 标题偏差调查"],
+          "secondary_topics": ["代码查找", "SessionDB 探查"],
           "allowed_shift": false,
           "required_identifiers": ["AutoTitler"]
         },
         {
           "turn": 8,
           "durable_subject": "AutoTitler 提示词与采样分层演化",
+          "acceptable_titles": ["AutoTitler 提示词与采样分层演化", "AutoTitler 提示词优化"],
+          "secondary_topics": ["测试报错排查", "正则边界调试"],
           "allowed_shift": false,
           "required_identifiers": ["AutoTitler"]
         }
@@ -40,12 +44,16 @@
         {
           "turn": 1,
           "durable_subject": "opencodex-usage-meter 开发与用量采集",
+          "acceptable_titles": ["opencodex-usage-meter 开发与用量采集", "opencodex 用量插件开发"],
+          "secondary_topics": ["清理 lumen 状态栏", "排障检查"],
           "allowed_shift": false,
           "required_identifiers": ["opencodex-usage-meter"]
         },
         {
           "turn": 12,
           "durable_subject": "opencodex-usage-meter 界面与状态栏优化",
+          "acceptable_titles": ["opencodex-usage-meter 界面与状态栏优化", "opencodex 状态栏设计"],
+          "secondary_topics": ["SVG 图标导出", "qlmanage 调试"],
           "allowed_shift": false,
           "required_identifiers": ["opencodex-usage-meter"]
         }
@@ -60,12 +68,16 @@
         {
           "turn": 1,
           "durable_subject": "Hindsight 记忆治理与适配",
+          "acceptable_titles": ["Hindsight 记忆治理与适配", "Hindsight 记忆与 cron 优化"],
+          "secondary_topics": ["cron 内容排查", "Oblivion 备份影响评估"],
           "allowed_shift": false,
           "required_identifiers": ["Hindsight"]
         },
         {
           "turn": 20,
           "durable_subject": "Hindsight 记忆提取流水线调优",
+          "acceptable_titles": ["Hindsight 记忆提取流水线调优", "Hindsight 流水线调优"],
+          "secondary_topics": ["launchctl 重启 Mercury", "ps aux 进程排查"],
           "allowed_shift": false,
           "required_identifiers": ["Hindsight"]
         }

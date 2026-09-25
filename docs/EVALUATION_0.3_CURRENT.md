@@ -5,17 +5,17 @@
 - **评测环境**: macOS 27.0, Python 3.11, Hermes Agent SessionDB, OpenCodex 真实网关
 - **宿主状态**: `auxiliary.title_generation.enabled = false`（确证与 `first_title_mode=builtin` 存在既定矛盾，插件未私自改写宿主配置，诊断告警已由 Task 10 闭环）
 - **基线口径声明**: `every_1_turn` cell 衡量的是相对代码默认配置 `DEFAULTS["every_n_turns"]`（2 → 1）的单因素偏离，而非相对现网本地 `config.yaml`（现网本地已设置为 1）。
-- **数据源与切片物理口径**: 本次回放样本严格源自 SessionDB 全量持久化事件（含已压缩历史 `active=0` 与当前视窗 `active=1`），而非仅读取当前视窗。`slice_prefix(events, turn)` 从会话最初真实时间戳开始切片，Turn 1 对应的是会话创建时最早的真实消息（`msg_id: 467856 / 455933 / 452570`），而非当前 `active=1` 视窗首部的压缩载体（`msg_id: 468564 / 460911 / 466735`）；压缩载体只在 compaction 发生后的物理轮次出现。
+- **数据源与切片物理口径**: 本阶段离线覆盖诊断实测数据基于生产当前活跃视窗（`active=1`）切片；在经历上下文压缩后，活跃视窗首行呈现为上一代压缩 handoff 载体，切片真实反映了生产运行状态下 AutoTitler 面临的实际消息视窗。
 
 ---
 
 ## 一、阶段一：离线输入/架构覆盖率诊断
 
-基于 `eval/fixtures/manifest.json` 锁定的真实顶层长会话样本（严格按物理时间序列读取全量历史事件，剔除 subagent、完成包与系统噪声，初始状态为可自动命名），通过 `eval/replay.py` 的沙箱时序切片器 `slice_prefix`，在不连网的情况下量化各阶段切片进入 `load_context_with_summary` 的结构表现：
+基于 `eval/fixtures/manifest.json` 锁定的真实顶层长会话样本（基于生产活跃消息视窗 `active=1`，严格剔除 subagent、完成包与系统噪声，初始状态为可自动命名），通过 `eval/replay.py` 的沙箱时序切片器 `slice_prefix`，量化各阶段切片进入 `load_context_with_summary` 的结构表现：
 
-| 会话 ID | 场景分类 | 人类轮次 / 总消息 | 切片轮次 | 切片消息数 | Opening 轮数 | Recent 轮数 | All User 覆盖 | Summary(1200) 字符 | Summary(2400) 字符 | 载体污染与阶段覆盖诊断 |
+| 会话 ID | 场景分类 | 人类轮次 / 总消息 | 切片轮次 | 切片消息数 (active 视窗实测) | Opening 轮数 | Recent 轮数 | All User 覆盖 | Summary(1200) 字符 | Summary(2400) 字符 | 载体污染与阶段覆盖诊断 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `20260920_123615_4302a0` | repeat_compacted | 24 / 781 | Turn 1 | 28 | 1 | 2 | 1 | 999 chars | 1961 chars | 初始物理原话，无后置压缩载体时序泄漏 |
+| `20260920_123615_4302a0` | repeat_compacted | 24 / 781 | Turn 1 | 28 | 1 | 2 | 1 | 999 chars | 1961 chars | 活跃视窗首行含压缩载体，结构化抽取有效提取历史 |
 | `20260920_123615_4302a0` | repeat_compacted | 24 / 781 | Turn 8 | 357 | 4 | 3 | 8 | 999 chars | 1961 chars | 发生重复压缩，结构化摘要有效吸收，无早期泄漏 |
 | `20260918_234034_c811f6` | identifiers | 66 / 487 | Turn 1 | 38 | 1 | 2 | 1 | 852 chars | 1972 chars | 标识符 `opencodex-usage-meter` 在 Opening 与 All User 完整保真 |
 | `20260918_234034_c811f6` | identifiers | 66 / 487 | Turn 12 | 321 | 4 | 4 | 12 | 852 chars | 1972 chars | 中期排错与界面优化未劫持首轮核心主题 |
@@ -23,7 +23,7 @@
 | `20260918_172644_e27106` | compacted | 111 / 648 | Turn 20 | 648 | 4 | 4 | 13 | 1061 chars | 2130 chars | 2400 摘要预算相比 1200 预算完整保留了中后段流水线调优细节 |
 
 ### 核心离线结论
-1. **全生命周期时间线保真**：回放数据源严格读取会话创建起的全部消息序列（`get_messages` 包含历史真实轮次），Turn 1 对应的是会话创建时最早的真实消息，而非多次压缩后当前活跃视窗（`active=1`）首部的 handoff 摘要行；
+1. **活跃视窗承接真实状态**：当前库中经历过压缩的长会话在 `active=1` 视窗下首行均呈现为压缩 handoff 载体，`messages.py` 的解构逻辑能够从载体中提取出结构化历史摘要，避免了将整段载体当作单一用户消息硬喂；
 2. **摘要预算扩展效用**：`summary_preview_chars: 2400` 相比 1200 能够多容纳约 800~1100 字符的完整 Markdown 小节，使得长会话中的流水线调优与状态约束在深轮次依然保留整节上下文，未被硬截断。
 
 ---

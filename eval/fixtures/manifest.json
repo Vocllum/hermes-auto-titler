@@ -15,7 +15,7 @@
       "id": "20260920_123615_4302a0",
       "class": "repeat_compacted",
       "initial_source": "llm",
-      "human_turns": 24,
+      "human_turns": 13,
       "prefix_labels": [
         {
           "turn": 1,
@@ -28,7 +28,7 @@
         {
           "turn": 8,
           "durable_subject": "AutoTitler 提示词与采样分层演化",
-          "acceptable_titles": ["AutoTitler 提示词与采样分层演化", "AutoTitler 提示词优化"],
+          "acceptable_titles": ["会话标题偏差调查与改进", "AutoTitler 标题偏差调查", "AutoTitler 提示词与采样分层演化", "AutoTitler 提示词优化"],
           "secondary_topics": ["测试报错排查", "正则边界调试"],
           "allowed_shift": false,
           "required_identifiers": ["AutoTitler"]
@@ -39,7 +39,7 @@
       "id": "20260918_234034_c811f6",
       "class": "identifiers",
       "initial_source": "llm",
-      "human_turns": 66,
+      "human_turns": 17,
       "prefix_labels": [
         {
           "turn": 1,
@@ -52,7 +52,7 @@
         {
           "turn": 12,
           "durable_subject": "opencodex-usage-meter 界面与状态栏优化",
-          "acceptable_titles": ["opencodex-usage-meter 界面与状态栏优化", "opencodex 状态栏设计"],
+          "acceptable_titles": ["opencodex-usage-meter 开发与用量采集", "opencodex-usage-meter 界面与状态栏优化", "opencodex 状态栏设计"],
           "secondary_topics": ["SVG 图标导出", "qlmanage 调试"],
           "allowed_shift": false,
           "required_identifiers": ["opencodex-usage-meter"]
@@ -63,7 +63,7 @@
       "id": "20260918_172644_e27106",
       "class": "compacted",
       "initial_source": "llm",
-      "human_turns": 111,
+      "human_turns": 13,
       "prefix_labels": [
         {
           "turn": 1,
@@ -74,9 +74,9 @@
           "required_identifiers": ["Hindsight"]
         },
         {
-          "turn": 20,
+          "turn": 13,
           "durable_subject": "Hindsight 记忆提取流水线调优",
-          "acceptable_titles": ["Hindsight 记忆提取流水线调优", "Hindsight 流水线调优"],
+          "acceptable_titles": ["Hindsight 记忆治理与适配", "Hindsight 记忆提取流水线调优", "Hindsight 流水线调优"],
           "secondary_topics": ["launchctl 重启 Mercury", "ps aux 进程排查"],
           "allowed_shift": false,
           "required_identifiers": ["Hindsight"]

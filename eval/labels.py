@@ -86,10 +86,10 @@ def validate_manifest(source: Union[str, Path, Dict[str, Any]]) -> bool:
                 if req_ids is not None and not isinstance(req_ids, list):
                     raise ValueError(f"session {sid} required_identifiers must be list")
                 acc_titles = pl.get("acceptable_titles")
-                if acc_titles is not None and not isinstance(acc_titles, list):
-                    raise ValueError(f"session {sid} acceptable_titles must be list")
+                if not isinstance(acc_titles, list) or len(acc_titles) == 0:
+                    raise ValueError(f"session {sid} acceptable_titles must be a non-empty list")
                 sec_topics = pl.get("secondary_topics")
-                if sec_topics is not None and not isinstance(sec_topics, list):
-                    raise ValueError(f"session {sid} secondary_topics must be list")
+                if not isinstance(sec_topics, list) or len(sec_topics) == 0:
+                    raise ValueError(f"session {sid} secondary_topics must be a non-empty list")
 
     return True

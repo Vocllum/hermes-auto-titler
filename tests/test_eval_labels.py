@@ -18,6 +18,8 @@ def test_validate_manifest_valid_structure(tmp_path):
                     {
                         "turn": 1,
                         "durable_subject": "Hermes AutoTitler 架构重构",
+                        "acceptable_titles": ["Hermes AutoTitler 架构重构"],
+                        "secondary_topics": ["局部排错"],
                         "allowed_shift": False,
                         "required_identifiers": ["AutoTitler", "SessionDB"],
                     }
@@ -40,14 +42,32 @@ def test_validate_manifest_rejects_duplicate_id(tmp_path):
                 "class": "compacted",
                 "initial_source": "llm",
                 "human_turns": 8,
-                "prefix_labels": [{"turn": 1, "durable_subject": "主题", "allowed_shift": False, "required_identifiers": []}],
+                "prefix_labels": [
+                    {
+                        "turn": 1,
+                        "durable_subject": "主题",
+                        "acceptable_titles": ["主题"],
+                        "secondary_topics": ["次主题"],
+                        "allowed_shift": False,
+                        "required_identifiers": [],
+                    }
+                ],
             },
             {
                 "id": "sess_dup",
                 "class": "compacted",
                 "initial_source": "llm",
                 "human_turns": 8,
-                "prefix_labels": [{"turn": 1, "durable_subject": "主题2", "allowed_shift": False, "required_identifiers": []}],
+                "prefix_labels": [
+                    {
+                        "turn": 1,
+                        "durable_subject": "主题2",
+                        "acceptable_titles": ["主题2"],
+                        "secondary_topics": ["次主题2"],
+                        "allowed_shift": False,
+                        "required_identifiers": [],
+                    }
+                ],
             },
         ],
     }
@@ -67,7 +87,16 @@ def test_validate_manifest_rejects_insufficient_turns(tmp_path):
                 "class": "compacted",
                 "initial_source": "llm",
                 "human_turns": 5,  # < 8
-                "prefix_labels": [{"turn": 1, "durable_subject": "主题", "allowed_shift": False, "required_identifiers": []}],
+                "prefix_labels": [
+                    {
+                        "turn": 1,
+                        "durable_subject": "主题",
+                        "acceptable_titles": ["主题"],
+                        "secondary_topics": ["次主题"],
+                        "allowed_shift": False,
+                        "required_identifiers": [],
+                    }
+                ],
             }
         ],
     }
@@ -88,7 +117,16 @@ def test_validate_manifest_rejects_sensitive_or_dialog_keys(tmp_path):
                 "initial_source": "llm",
                 "human_turns": 8,
                 "messages": ["some text"],  # 泄漏原始对话/密钥字段
-                "prefix_labels": [{"turn": 1, "durable_subject": "主题", "allowed_shift": False, "required_identifiers": []}],
+                "prefix_labels": [
+                    {
+                        "turn": 1,
+                        "durable_subject": "主题",
+                        "acceptable_titles": ["主题"],
+                        "secondary_topics": ["次主题"],
+                        "allowed_shift": False,
+                        "required_identifiers": [],
+                    }
+                ],
             }
         ],
     }
@@ -108,13 +146,51 @@ def test_validate_manifest_rejects_empty_durable_subject(tmp_path):
                 "class": "compacted",
                 "initial_source": "llm",
                 "human_turns": 8,
-                "prefix_labels": [{"turn": 1, "durable_subject": "   ", "allowed_shift": False, "required_identifiers": []}],
+                "prefix_labels": [
+                    {
+                        "turn": 1,
+                        "durable_subject": "   ",
+                        "acceptable_titles": ["主题"],
+                        "secondary_topics": ["次主题"],
+                        "allowed_shift": False,
+                        "required_identifiers": [],
+                    }
+                ],
             }
         ],
     }
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="durable_subject"):
+        validate_manifest(str(path))
+
+
+def test_validate_manifest_rejects_empty_acceptable_titles(tmp_path):
+    data = {
+        "schema": 1,
+        "classes": ["compacted"],
+        "sessions": [
+            {
+                "id": "sess_empty_acc",
+                "class": "compacted",
+                "initial_source": "llm",
+                "human_turns": 8,
+                "prefix_labels": [
+                    {
+                        "turn": 1,
+                        "durable_subject": "主题",
+                        "acceptable_titles": [],  # 强制要求非空
+                        "secondary_topics": ["次主题"],
+                        "allowed_shift": False,
+                        "required_identifiers": [],
+                    }
+                ],
+            }
+        ],
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="acceptable_titles must be a non-empty list"):
         validate_manifest(str(path))
 
 

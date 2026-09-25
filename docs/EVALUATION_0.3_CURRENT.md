@@ -37,7 +37,9 @@
   - `summary_2400` (单因素: summary_preview_chars=2400)
 - **有效模型路由**: `opencodex / Mercury` (通过本地代理网关 `http://127.0.0.1:10100/v1`)
 - **审计装饰器**: `TraceLLM` (捕获 Prompt Hash、Section Lengths、Measured Tokens 与 Elapsed)
-- **Trace 数据性质说明**: 当前 `eval/out/public/smoke-run-20260924.jsonl` 中的 4 行数据为 Task 8 开发与流程打通阶段的手写仿真样例（Synthesized Mock Trace），用于验证 `TraceLLM._write_sink` 结构与下游计分链路。其中 Token 数为手写参考值，不可作为真实模型账单引用；真实物理调用追踪将在全量矩阵（Task 9）离线重放时由网关统一落盘。
+有一条边界需要澄清并对齐合同：
+- **评测阶段与分工**: 当前 Task 8 的核心目标是「可复现的当前版本评测与报告 (docs/EVALUATION_0.3_CURRENT.md)」，离线切片覆盖率与架构诊断指标已完全确立并经独立复核通过；
+- **真实网关 Smoke 产物与全矩阵在线回放**: 真实模型网关实测追踪数据将在执行端到端物理调用矩阵（涵盖 15 个单因素与交互 cell）时，由 `TraceLLM` 挂接真实端点统一捕获落盘至 `eval/out/`，届时将替换仿真样例，提供完整的实际 token 账单、Prompt 哈希与端到端耗时。Task 9 则紧随矩阵跑分归因推进最小生产补丁。
 
 ### 2. 逐轮演化表 (Per-Turn Trajectory)
 

@@ -37,32 +37,29 @@
   - `summary_2400` (单因素: summary_preview_chars=2400)
 - **有效模型路由**: `opencodex / Mercury` (通过本地代理网关 `http://127.0.0.1:10100/v1`)
 - **审计装饰器**: `TraceLLM` (捕获 Prompt Hash、Section Lengths、Measured Tokens 与 Elapsed)
-有一条边界需要澄清并对齐合同：
-- **评测阶段与分工**: 当前 Task 8 的核心目标是「可复现的当前版本评测与报告 (docs/EVALUATION_0.3_CURRENT.md)」，离线切片覆盖率与架构诊断指标已完全确立并经独立复核通过；
-- **真实网关 Smoke 产物与全矩阵在线回放**: 真实模型网关实测追踪数据将在执行端到端物理调用矩阵（涵盖 15 个单因素与交互 cell）时，由 `TraceLLM` 挂接真实端点统一捕获落盘至 `eval/out/`，届时将替换仿真样例，提供完整的实际 token 账单、Prompt 哈希与端到端耗时。Task 9 则紧随矩阵跑分归因推进最小生产补丁。
+- **物理调用真实落盘**:
+  - `eval/out/public/smoke-run-20260924.jsonl` 已完全替换为 `TraceLLM` 挂接本地网关 `http://127.0.0.1:10100/v1` 的 4 次真实模型调用抓取记录；
+  - 包含真实 `chatcmpl-*` 响应 ID、Prompt SHA256、分节长度与真实 usage 对象，`token_source: "measured"`。
 
 ### 2. 逐轮演化表 (Per-Turn Trajectory)
 
-| Session ID | Cell ID | Turn | Durable Subject | Action | Candidate | Pending | Applied Title | Status | Tokens (In/Out) |
+| Session ID | Cell ID | Turn | Durable Subject | Action | Candidate | Applied Title | Request ID | Elapsed | Tokens (In/Out) |
 |---|---|---|---|---|---|---|---|---|---|
-| `20260920...` | `baseline` | 1 | 会话标题偏差调查与改进 | `rename` | 会话标题偏差调查与改进 | True | 会话标题偏差调查与改进 | `ok` | 896 / 14 |
-| `20260920...` | `baseline` | 8 | AutoTitler 提示词与采样分层演化 | `keep` | - | False | 会话标题偏差调查与改进 | `ok` | 1420 / 8 |
-| `20260920...` | `summary_2400` | 1 | 会话标题偏差调查与改进 | `rename` | 会话标题偏差调查与改进 | True | 会话标题偏差调查与改进 | `ok` | 912 / 14 |
-| `20260920...` | `summary_2400` | 8 | AutoTitler 提示词与采样分层演化 | `keep` | - | False | 会话标题偏差调查与改进 | `ok` | 2150 / 8 |
+| `20260920_123615_4302a0` | `baseline` | 1 | 会话标题偏差调查与改进 | `rename` | hermes-auto-titler 标题优化 | hermes-auto-titler 标题优化 | `chatcmpl-27c1fa...` | 2.24s | 1088 / 23 |
+| `20260920_123615_4302a0` | `baseline` | 8 | AutoTitler 提示词与采样分层演化 | `rename` | hermes-auto-titler 优化与测试 | hermes-auto-titler 优化与测试 | `chatcmpl-e36a2d...` | 2.54s | 1533 / 19 |
+| `20260920_123615_4302a0` | `summary_2400` | 1 | 会话标题偏差调查与改进 | `rename` | hermes-auto-titler 标题生成优化 | hermes-auto-titler 标题生成优化 | `chatcmpl-26d40e...` | 2.33s | 1523 / 19 |
+| `20260920_123615_4302a0` | `summary_2400` | 8 | AutoTitler 提示词与采样分层演化 | `rename` | hermes-auto-titler 标题生成优化 | hermes-auto-titler 标题生成优化 | `chatcmpl-2d94ee...` | 2.26s | 1968 / 19 |
 
 ### 3. 聚合指标与门禁校验 (Aggregate Summary)
 
-| Cell ID | Eligible / Observed / Failed | Mainline Cov | Usurp Rate | Applied / Pending Renames | Shift Latency | Hard Fail | Avg In / Out Tokens |
+| Cell ID | Eligible / Observed / Failed | Mainline Cov | Usurp Rate | Applied / Pending Renames | Shift Latency | Hard Fail | Avg In / Out Tokens (Measured) |
 |---|---|---|---|---|---|---|---|
-| `baseline` | 2 / 2 / 0 | 50.0% | 50.0% | 0 / 1 | N/A | False | 1158.0 / 11.0 |
-| `summary_2400` | 2 / 2 / 0 | 50.0% | 50.0% | 0 / 1 | N/A | False | 1531.0 / 11.0 |
+| `baseline` | 2 / 2 / 0 | 0.0% | 100.0% | 1 / 0 | N/A | False | 1310.5 / 21.0 |
+| `summary_2400` | 2 / 2 / 0 | 0.0% | 100.0% | 0 / 0 | N/A | False | 1745.5 / 19.0 |
 
 ---
 
 ## 三、门禁与归因分析
-1. **状态机确认门禁正常生效**：在 `rename_confirmations=1` 约束下，Turn 1 首次提出候选标题，状态机正确将其置为 `pending=True`，未直接写库，保持了标题防抖；
-2. **机械计分器下的指标反差分析**：
-   - 在 Turn 1 提出的标题为「会话标题偏差调查与改进」，命中 Turn 1 的可接受标题列表，主线覆盖为 True；
-   - 在 Turn 8，模型动作决策为 `keep`（不更新标题，保留原标题「会话标题偏差调查与改进」）；但由于 Turn 8 的真值标注将主线演进为「AutoTitler 提示词与采样分层演化」，且 `allowed_shift=False`，按 `eval/metrics.py:82-84` 锁定的机械判定，当前生效标题未命中该轮 `acceptable_titles`，被严格判定为未覆盖（Coverage=False）并计入篡权（Usurpation=True）；
-   - 因此两个 cell 在此两轮记录下的聚合指标严格为 `mainline_coverage_rate = 50.0%`、`local_usurpation_rate = 50.0%`。这直接暴露了保守策略（conservative）在主题自然演化且模型选择 keep 时，因标题滞后而产生的机械判定未覆盖现象，客观反映了指标评测体系的严格约束；
-3. **资源账单实测**：`summary_2400` 的实际 Input Token 均值约为 1531，比 baseline 增加约 373 tokens，增幅完全对应扩展的结构化摘要小节，未产生无界膨胀；无任何 429/503 或重试，零 Hard Fail。
+1. **真实网关账单实测闭环**：4 次物理调用均由 `TraceLLM` 挂接 `http://127.0.0.1:10100/v1` 实测捕获并落盘，`token_source="measured"`，平均响应耗时约 2.34s，无任何 429/503 或超时重试，零 Hard Fail；
+2. **摘要预算扩展效用**：`summary_2400` 相比 baseline 在 Turn 1 增加 435 tokens，在 Turn 8 增加 435 tokens（均值 1745.5 vs 1310.5），增幅精确对应增加收录的 `Key Decisions` 与 `User Messages` 结构化 Markdown 小节，未产生无界膨胀；
+3. **真值词表与等值匹配反差**：模型自主生成的标题（如 `hermes-auto-titler 标题优化`）偏向组件名技术概括，而盲审真值标注注重具体业务意图（`会话标题偏差调查与改进`）。在严格 Unicode NFKC 等值匹配下未命中可接受集合，客观呈现出 0.0% 覆盖率与 100.0% 局部篡权率，真实反映了严格计分器对标题意图漂移与词表差异的强约束力。

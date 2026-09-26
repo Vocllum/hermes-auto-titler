@@ -55,11 +55,13 @@
 | Cell ID | Eligible / Observed / Failed | Mainline Cov | Usurp Rate | Applied / Pending Renames | Shift Latency | Hard Fail | Avg In / Out Tokens (Measured) |
 |---|---|---|---|---|---|---|---|
 | `baseline` | 2 / 2 / 0 | 0.0% | 100.0% | 1 / 0 | N/A | False | 1310.5 / 18.0 |
-| `summary_2400` | 2 / 2 / 0 | 0.0% | 100.0% | 0 / 0 | N/A | False | 1745.5 / 255.5 |
+| `summary_2400` | 2 / 2 / 0 | 0.0% | 100.0% | 0 / 0 | N/A | False | 1745.5 / 255.5 (含离群值; 剔除后 18.0) |
 
 ---
 
 ## 三、门禁与归因分析
-1. **真实网关账单实测闭环**：4 次物理调用均由 `TraceLLM` 挂接 `http://127.0.0.1:10100/v1` 实测捕获并落盘，`token_source="measured"`，平均响应耗时约 2.34s，无任何 429/503 或超时重试，零 Hard Fail；
-2. **摘要预算扩展效用**：`summary_2400` 相比 baseline 在 Turn 1 增加 435 tokens，在 Turn 8 增加 435 tokens（均值 1745.5 vs 1310.5），增幅精确对应增加收录的 `Key Decisions` 与 `User Messages` 结构化 Markdown 小节，未产生无界膨胀；
+1. **真实网关账单实测闭环**：4 次物理调用均由 `TraceLLM` 挂接 `http://127.0.0.1:10100/v1` 实测捕获并落盘，`token_source="measured"`，四次调用耗时分别为 3.64s / 3.06s / 6.11s / 6.08s，平均响应耗时约 4.72s，无任何 429/503 或超时重试，零 Hard Fail；
+2. **摘要预算扩展效用与输出离群值标注**：
+   - **输入 Token 扩展**：`summary_2400` 相比 baseline 在 Turn 1 增加 435 tokens，在 Turn 8 增加 435 tokens（均值 1745.5 vs 1310.5），增幅精确对应增加收录的 `Key Decisions` 与 `User Messages` 结构化 Markdown 小节，未产生无界膨胀；
+   - **输出 Token 离群值归因**：`summary_2400` Turn 1 产生了 493 output_tokens（模型在决策时附带了长段分析推理），将该 cell 的 Out 均值拉升至 255.5；剔除该离群值后正常样本 Out 均值为 18.0，与 baseline 的 18.0 完全持平。此现象真实记录了长上下文可能诱导偶发冗长响应的特性；
 3. **真值词表与等值匹配反差**：模型自主生成的标题（如 `hermes-auto-titler 标题优化`）偏向组件名技术概括，而盲审真值标注注重具体业务意图（`会话标题偏差调查与改进`）。在严格 Unicode NFKC 等值匹配下未命中可接受集合，客观呈现出 0.0% 覆盖率与 100.0% 局部篡权率，真实反映了严格计分器对标题意图漂移与词表差异的强约束力。

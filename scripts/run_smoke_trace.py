@@ -77,6 +77,9 @@ def main():
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
     trace = TraceLLM(gw, sink=captured.append)
+    clock = None
+    from eval.replay import ReplayClock
+    clock = ReplayClock()
 
     runs = [
         ("baseline", 1, 1200),
@@ -99,12 +102,16 @@ def main():
                 "model": "Mercury",
                 "provider": "opencodex",
             }
-            harness = ReplayHarness(tmpdir, cfg=cfg, mock_llm=trace)
+            harness = ReplayHarness(tmpdir, cfg=cfg, clock=clock, mock_llm=trace)
             trace.set_context(session_id=sid, prefix=turn, config_id=cell_id)
 
             res = harness.evaluate(sid, force=True)
             print(f"Result for {cell_id} Turn {turn}: {res}")
             eval_records.append((cell_id, turn, res))
+            # Advance clock by elapsed time + small interval so timestamps show sequential progress
+            if captured:
+                elapsed_sec = captured[-1].get("elapsed", 2.0)
+                clock.advance(elapsed_sec + 1.0)
         finally:
             if harness:
                 harness.stop_clock_patch()

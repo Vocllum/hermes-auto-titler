@@ -45,17 +45,17 @@
 
 | Session ID | Cell ID | Turn | Durable Subject | Action | Candidate | Applied Title | Request ID | Elapsed | Tokens (In/Out) |
 |---|---|---|---|---|---|---|---|---|---|
-| `20260920_123615_4302a0` | `baseline` | 1 | 会话标题偏差调查与改进 | `rename` | hermes-auto-titler 标题优化 | hermes-auto-titler 标题优化 | `chatcmpl-27c1fa...` | 2.24s | 1088 / 23 |
-| `20260920_123615_4302a0` | `baseline` | 8 | AutoTitler 提示词与采样分层演化 | `rename` | hermes-auto-titler 优化与测试 | hermes-auto-titler 优化与测试 | `chatcmpl-e36a2d...` | 2.54s | 1533 / 19 |
-| `20260920_123615_4302a0` | `summary_2400` | 1 | 会话标题偏差调查与改进 | `rename` | hermes-auto-titler 标题生成优化 | hermes-auto-titler 标题生成优化 | `chatcmpl-26d40e...` | 2.33s | 1523 / 19 |
-| `20260920_123615_4302a0` | `summary_2400` | 8 | AutoTitler 提示词与采样分层演化 | `rename` | hermes-auto-titler 标题生成优化 | hermes-auto-titler 标题生成优化 | `chatcmpl-2d94ee...` | 2.26s | 1968 / 19 |
+| `20260920_123615_4302a0` | `baseline` | 1 | 会话标题偏差调查与改进 | `rename` | hermes-auto-titler 标题优化 | hermes-auto-titler 标题优化 | `chatcmpl-e800c4...` | 3.64s | 1088 / 18 |
+| `20260920_123615_4302a0` | `baseline` | 8 | AutoTitler 提示词与采样分层演化 | `rename` | hermes-auto-titler 测试与优化 | hermes-auto-titler 测试与优化 | `chatcmpl-226bd7...` | 3.06s | 1533 / 18 |
+| `20260920_123615_4302a0` | `summary_2400` | 1 | 会话标题偏差调查与改进 | `rename` | hermes-auto-titler 标题偏差分析与测试 | hermes-auto-titler 标题偏差分析与测试 | `chatcmpl-ce1561...` | 6.11s | 1523 / 493 |
+| `20260920_123615_4302a0` | `summary_2400` | 8 | AutoTitler 提示词与采样分层演化 | `rename` | hermes-auto-titler 标题优化 | hermes-auto-titler 标题优化 | `chatcmpl-cdac28...` | 6.08s | 1968 / 18 |
 
 ### 3. 聚合指标与门禁校验 (Aggregate Summary)
 
 | Cell ID | Eligible / Observed / Failed | Mainline Cov | Usurp Rate | Applied / Pending Renames | Shift Latency | Hard Fail | Avg In / Out Tokens (Measured) |
 |---|---|---|---|---|---|---|---|
-| `baseline` | 2 / 2 / 0 | 0.0% | 100.0% | 1 / 0 | N/A | False | 1310.5 / 21.0 |
-| `summary_2400` | 2 / 2 / 0 | 0.0% | 100.0% | 0 / 0 | N/A | False | 1745.5 / 19.0 |
+| `baseline` | 2 / 2 / 0 | 0.0% | 100.0% | 1 / 0 | N/A | False | 1310.5 / 18.0 |
+| `summary_2400` | 2 / 2 / 0 | 0.0% | 100.0% | 0 / 0 | N/A | False | 1745.5 / 255.5 |
 
 ---
 

@@ -15,203 +15,98 @@ config_schema:
     type: bool
     default: true
     description: "Register the title hooks and the /autotitler command. Requires a Hermes restart when switched."
-    localizations:
-      zh:
-        label: "启用自动标题"
-        description: "注册标题钩子与 /autotitler 命令。\n修改后需重启 Hermes 生效。"
   first_title_mode:
     type: str
     default: builtin
     choices: [builtin, plugin]
     description: "builtin leaves the first title to Hermes; plugin evaluates from turn 1. Neither mode changes the host title-generation switch."
-    localizations:
-      zh:
-        label: "首轮标题模式"
-        description: "决定首个标题由谁生成，两种模式都不会改动宿主的标题生成开关。"
-        choices:
-          builtin: "原生 (Hermes)"
-          plugin: "插件评估"
   strategy:
     type: str
     default: conservative
     choices: [conservative, aggressive]
     description: "conservative preserves the whole-session subject until a durable mismatch; aggressive follows a sustained new main line sooner."
-    localizations:
-      zh:
-        label: "改名判定策略"
-        description: "决定主题偏离时多快跟进改名。"
-        choices:
-          conservative: "保守\n主题明显且持续偏离才改名"
-          aggressive: "激进\n用户形成持续新主线即跟进"
   title_style:
     type: str
     default: concise
     choices: [concise, complete]
     description: "concise = compact subject label; complete = short summary of the main intent."
-    localizations:
-      zh:
-        label: "标题生成风格"
-        description: "决定生成标题的信息密度。"
-        choices:
-          concise: "简洁\n紧凑的主题标签"
-          complete: "完整\n简短的主要意图概括"
   every_n_turns:
     type: int
     default: 2
     description: "Evaluate after this many completed foreground turns; a separate minimum interval can defer evaluations."
-    localizations:
-      zh:
-        label: "评估轮次间隔"
-        description: "每完成指定数量的前台轮次评估一次。"
   on_close:
     type: bool
     default: true
     description: "Queue a final evaluation on session close or finalize; the write may finish after the session ends."
-    localizations:
-      zh:
-        label: "会话结束时评估"
-        description: "会话关闭时补一次最终评估，写入可能在会话结束后完成。"
   rename_confirmations:
     type: int
     default: 1
     description: "Number of follow-up endorsements before replacing an existing automatic title; 0 accepts the first verdict."
-    localizations:
-      zh:
-        label: "改名确认背书轮数"
-        description: "替换已有自动标题前所需的后续背书次数，0 为直接采纳首次判定。"
   title_model:
     type: str
     default: ""
     description: "Optional title model override. Empty uses Hermes title_generation auxiliary routing."
-    localizations:
-      zh:
-        label: "标题模型"
-        description: "留空则复用 Hermes 的 title_generation 辅助路由。"
   provider:
     type: str
     default: ""
     description: "Optional provider override. Empty uses Hermes title_generation auxiliary routing."
-    localizations:
-      zh:
-        label: "服务商 (Provider)"
-        description: "留空则复用 Hermes 的 title_generation 辅助路由。"
   custom_instructions:
     type: str
     default: ""
     description: "Optional instructions appended to the title model system prompt."
-    localizations:
-      zh:
-        label: "自定义提示词"
-        description: "追加到标题模型系统提示词末尾的指令。"
   min_interval_minutes:
     type: float
     default: 5
     description: "Minimum minutes between routine evaluations of the same session."
-    localizations:
-      zh:
-        label: "评估最小间隔（分钟）"
-        description: "同一会话两次例行评估的最短间隔。"
   opening_turns:
     type: int
     default: 2
     description: "Opening turns sampled as the conversation subject anchor."
-    localizations:
-      zh:
-        label: "开头采样轮数"
-        description: "作为主题锚点采样的开头轮次数。"
   recent_turns:
     type: int
     default: 2
     description: "Recent turns sampled to detect current state and sustained changes."
-    localizations:
-      zh:
-        label: "最近采样轮数"
-        description: "用于检测当前状态与持续变化的最近轮次数。"
   summary_preview_chars:
     type: int
     default: 1200
     description: "Character budget for historical compaction summaries in routine evaluations."
-    localizations:
-      zh:
-        label: "历史压缩摘要字数"
-        description: "例行评估提取历史摘要的字符预算。"
   preview_chars:
     type: int
     default: 120
     description: "Preview cap per opening/recent message, including assistant conclusions."
-    localizations:
-      zh:
-        label: "消息预览字数上限"
-        description: "开头与最近单条消息的采样字符上限。"
   include_all_user_messages:
     type: bool
     default: true
     description: "Include the sampled user-intent trajectory alongside opening and recent windows."
-    localizations:
-      zh:
-        label: "包含用户意图轨迹"
-        description: "在开头与最近轮次之外附加用户意图轨迹。"
   user_message_threshold:
     type: int
     default: 40
     description: "Maximum sampled user messages in the trajectory (0 = unlimited)."
-    localizations:
-      zh:
-        label: "意图轨迹用户消息上限"
-        description: "意图轨迹保留的用户消息条数，0 为不限制。"
   user_message_preview_chars:
     type: int
     default: 300
     description: "Per-user-message preview cap in the intent trajectory."
-    localizations:
-      zh:
-        label: "单条意图消息截取字数"
-        description: "轨迹中单条用户消息的字符预算上限。"
   ignore_model_messages:
     type: bool
     default: false
     description: "Remove assistant conclusions from opening and recent evidence. May lose task outcomes."
-    localizations:
-      zh:
-        label: "忽略助手回复内容"
-        description: "证据只取用户消息，可能丢失任务完成结果。"
   retitle_summary_chars:
     type: int
     default: 12000
     description: "Historical summary budget for blind/manual/batch regeneration (0 = preview_chars)."
-    localizations:
-      zh:
-        label: "重命名历史摘要字数"
-        description: "手动与批量重新生成时的历史摘要预算，0 为回退至消息预览上限。"
   max_display_width:
     type: int
     default: 40
     description: "Display-width budget when fitting a generated title."
-    localizations:
-      zh:
-        label: "标题最大显示列宽"
-        description: "生成标题适配侧边栏的列宽预算。"
   max_title_length:
     type: int
     default: 0
     description: "Optional hard character cap; 0 disables it, positive values enforce at least 10 characters."
-    localizations:
-      zh:
-        label: "标题最大字符硬上限"
-        description: "硬性截断上限，0 为不限制。"
   max_renames_per_session:
     type: int
     default: 0
     description: "Per-process automatic rename cap for a session (0 = unlimited). First naming and manual renames are exempt."
-    localizations:
-      zh:
-        label: "单会话自动改名上限"
-        description: "单个会话内自动改名的最大次数，0 为不限制。"
   early_turn_eval:
     type: bool
     default: false
     description: "Legacy compatibility option. First-turn behavior is controlled by first_title_mode."
-    localizations:
-      zh:
-        label: "旧版早期轮次评估"
-        description: "兼容旧配置的遗留选项，首轮行为由首轮标题模式控制。"

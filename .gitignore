@@ -10,3 +10,6 @@ config.yaml
 *.egg-info/
 build/
 dist/
+
+# Hermes agent scratch (plans, local state)
+.hermes/

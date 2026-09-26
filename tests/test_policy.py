@@ -280,6 +280,94 @@ def test_production_prompt_fallback_is_concise():
     assert llm_default.calls[-1]["messages"][0]["content"] == llm_concise.calls[-1]["messages"][0]["content"]
 
 
+def test_production_prompt_grounds_subject_in_user_purpose_before_title():
+    _, llm, titler = make()
+    titler.evaluate("s1", force=True)
+    system = llm.calls[-1]["messages"][0]["content"]
+    user = llm.calls[-1]["messages"][1]["content"]
+
+    assert "Infer the durable subject from the user's goals before comparing title hypotheses" in system
+    assert "purpose" in system
+    assert "tool and file names" in system
+    assert user.index("Recent context:") < user.index("Current title:")
+    assert "Sampled user-intent trajectory" not in user  # overlapping turns carry no extra weight
+
+
+def test_compacted_prompt_presents_historical_anchor_before_visible_continuation():
+    _, llm, titler = make()
+    titler._generate(
+        "既有标题",
+        recent=[("user", "最近的排错")],
+        all_user=[("user", "继续排错")],
+        opening=[("user", "继续局部排错")],
+        earlier_summary="历史上的长期目标与核心主题",
+    )
+    prompt = llm.calls[-1]["messages"][1]["content"]
+
+    assert prompt.index("Earlier-history summary") < prompt.index("Visible continuation")
+    assert prompt.index("Visible continuation") < prompt.index("Recent context")
+    assert prompt.index("Recent context") < prompt.index("Current title:")
+    assert "历史上的长期目标与核心主题" in prompt
+    assert "继续局部排错" in prompt
+
+
+def test_first_title_prompt_does_not_instruct_incumbent_preservation():
+    _, llm, titler = make(title=None, source=None)
+    titler.evaluate("s1", force=True)
+    system = llm.calls[-1]["messages"][0]["content"]
+
+    assert '"action":"rename"' in system
+    assert "current title is the incumbent" not in system
+    assert "Keep the current title" not in system
+    assert "Keep an accurate title" not in system
+
+
+def test_compacted_prompt_labels_are_clear_and_monomodal():
+    _, llm, titler = make()
+    titler._generate(
+        "既有标题",
+        recent=[("user", "最近的排错")],
+        all_user=[("user", "继续排错")],
+        opening=[("user", "继续局部排错")],
+        earlier_summary="历史上的长期目标与核心主题",
+    )
+    prompt = llm.calls[-1]["messages"][1]["content"]
+
+    assert "Earlier-history summary:" in prompt
+    assert "Visible continuation:" in prompt
+    assert " / 用户" not in prompt
+    assert " / 历史摘要" not in prompt
+
+
+def test_sampled_trajectory_does_not_repeat_context_lines():
+    _, llm, titler = make()
+    titler._generate(
+        "既有标题",
+        recent=[("user", "当前真实问题")],
+        all_user=[("user", "最初目标"), ("user", "中途阶段"), ("user", "当前真实问题")],
+        opening=[("user", "最初目标")],
+    )
+    prompt = llm.calls[-1]["messages"][1]["content"]
+
+    assert prompt.count("user: 最初目标") == 1
+    assert prompt.count("user: 当前真实问题") == 1
+    assert "user: 中途阶段" in prompt
+
+
+def test_trajectory_preserves_distinct_repeated_user_turns():
+    _, llm, titler = make()
+    titler._generate(
+        "旧标题",
+        recent=[("user", "最终问题")],
+        all_user=[("user", "初始目标"), ("user", "持续优化"), ("user", "持续优化"), ("user", "最终问题")],
+        opening=[("user", "初始目标")],
+    )
+    prompt = llm.calls[-1]["messages"][1]["content"]
+    assert prompt.count("user: 持续优化") == 2
+    assert prompt.count("user: 初始目标") == 1
+    assert prompt.count("user: 最终问题") == 1
+
+
 def test_custom_instructions_appended_to_system_prompt():
     _, llm, t = make()
     t.cfg["custom_instructions"] = "Always use English for titles."

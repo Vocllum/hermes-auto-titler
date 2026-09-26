@@ -473,3 +473,215 @@ def test_replay_harness_multi_session_isolation(tmp_path):
     # 沙箱 state.json 落在 workdir 内部
     assert (tmp_path / "harness_multi" / "state.json").exists()
 
+
+def test_make_sandbox_with_raw_sqlite_connection(tmp_path):
+    import sqlite3
+
+    # 创建原生 sqlite3 数据库作为 source_db
+    src_db_file = tmp_path / "raw_source.db"
+    conn = sqlite3.connect(str(src_db_file))
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            title TEXT,
+            title_source TEXT,
+            model TEXT,
+            parent_session_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL,
+            active INTEGER DEFAULT 1
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO sessions (id, source, title, title_source, model)
+        VALUES ('raw_s1', 'desktop', '原生库既有标题', 'llm', 'mock-model')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO messages (session_id, role, content, timestamp, active)
+        VALUES ('raw_s1', 'user', '第一条原生消息', 100.0, 1),
+               ('raw_s1', 'assistant', '原生回复', 101.0, 1)
+        """
+    )
+    conn.commit()
+
+    workdir = tmp_path / "sandbox_raw"
+    sandbox_db = make_sandbox(conn, "raw_s1", workdir)
+
+    # 验证原生 sqlite3.Connection 的标题与来源被忠实继承
+    assert sandbox_db.get_session_title("raw_s1") == "原生库既有标题"
+    assert sandbox_db.get_session_title_source("raw_s1") == "llm"
+
+    # 验证默认读取消息
+    conv = sandbox_db.get_messages_as_conversation("raw_s1")
+    assert len(conv) == 2
+    assert conv[0]["content"] == "第一条原生消息"
+
+    # 沙箱内修改不污染源连接
+    sandbox_db.set_session_title("raw_s1", "沙箱改动")
+    assert sandbox_db.get_session_title("raw_s1") == "沙箱改动"
+
+    row = conn.execute("SELECT title, title_source FROM sessions WHERE id = 'raw_s1'").fetchone()
+    assert row[0] == "原生库既有标题"
+    assert row[1] == "llm"
+
+    sandbox_db.close()
+    conn.close()
+
+
+def test_make_sandbox_explicit_title_overrides(tmp_path):
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, title_source TEXT)")
+    conn.execute("INSERT INTO sessions VALUES ('s_override', 'cli', '库内标题', 'llm')")
+    conn.commit()
+
+    workdir = tmp_path / "sandbox_override"
+    sandbox_db = make_sandbox(
+        conn,
+        "s_override",
+        workdir,
+        initial_title="强制覆盖标题",
+        initial_title_source="user",
+    )
+
+    assert sandbox_db.get_session_title("s_override") == "强制覆盖标题"
+    assert sandbox_db.get_session_title_source("s_override") == "user"
+
+    sandbox_db.close()
+    conn.close()
+
+
+def test_replay_harness_replay_turn_helper(tmp_path):
+    from eval.replay import ReplayClock, ReplayHarness
+
+    clock = ReplayClock(initial_monotonic=100.0)
+    harness = ReplayHarness(
+        workdir=tmp_path / "harness_replay_turn",
+        cfg={"enabled": True, "min_interval_minutes": 5, "rename_confirmations": 1},
+        clock=clock,
+    )
+    sid = "sess_replay_turn"
+    harness.db.create_session(sid, source="cli")
+    harness.db.set_session_title(sid, "原标题")
+    harness.db.set_session_title_source(sid, "llm")
+
+    turn1_msgs = [
+        {"role": "user", "content": "轮次 1 输入"},
+        {"role": "assistant", "content": "轮次 1 回复"},
+    ]
+    harness.mock_llm.complete.return_value = MagicMock(text='{"action": "rename", "title": "候选标题"}')
+
+    # 第一轮重放
+    rec1 = harness.replay_turn(sid, turn1_msgs)
+    assert rec1["action"] == "pending"
+    assert rec1["candidate"] == "候选标题"
+    assert rec1["db_title"] == "原标题"
+
+    # 探针：时钟仅推进 10 秒，未达 5 分钟冷却，应返回 throttled
+    rec_throttled = harness.replay_turn(sid, turn1_msgs, advance_clock=10.0)
+    assert rec_throttled["action"] == "throttled"
+
+    # 第二轮：推进 300 秒，追加新消息，模型输出 approve
+    turn2_msgs = turn1_msgs + [
+        {"role": "user", "content": "轮次 2 输入"},
+        {"role": "assistant", "content": "轮次 2 回复"},
+    ]
+    harness.mock_llm.complete.return_value = MagicMock(text='{"action": "approve"}')
+    rec2 = harness.replay_turn(sid, turn2_msgs, advance_clock=300.0)
+    assert rec2["action"] == "renamed"
+    assert rec2["db_title"] == "候选标题"
+    assert rec2["pending"] is None
+
+
+def test_make_sandbox_historical_replay_requires_explicit_provenance(tmp_path):
+    """验证 make_sandbox 在 historical_replay 模式下要求显式标题溯源，禁止盲目继承当前终态标题。"""
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, title_source TEXT)")
+    conn.execute("INSERT INTO sessions VALUES ('s_hist', 'cli', '库内最终标题', 'user')")
+    conn.commit()
+
+    workdir = tmp_path / "sandbox_hist"
+
+    # 1. 缺少 initial_title 与 initial_title_source 时抛出 ValueError
+    with pytest.raises(ValueError, match="Historical prefix replay requires explicit initial_title"):
+        make_sandbox(conn, "s_hist", workdir, mode="historical_replay")
+
+    # 2. 显式提供后正常创建
+    s_db = make_sandbox(
+        conn,
+        "s_hist",
+        workdir,
+        mode="historical_replay",
+        initial_title="历史初始标题",
+        initial_title_source="llm",
+    )
+    assert s_db.get_session_title("s_hist") == "历史初始标题"
+    assert s_db.get_session_title_source("s_hist") == "llm"
+    s_db.close()
+    conn.close()
+
+
+def test_sandbox_sqlite_preserves_active_field(tmp_path):
+    """验证 SandboxSqliteSessionDB 能够正确保存消息的 active 字段。"""
+    from eval.replay import SandboxSqliteSessionDB
+    db_file = tmp_path / "test_active.db"
+    s_db = SandboxSqliteSessionDB(db_path=db_file)
+    sid = "sess_active_test"
+    s_db.create_session(sid)
+
+    msgs = [
+        {"role": "user", "content": "已压缩旧消息", "timestamp": 10.0, "active": 0},
+        {"role": "user", "content": "活跃新消息", "timestamp": 20.0, "active": 1},
+    ]
+    s_db.append_messages_batch(sid, msgs)
+
+    # get_messages 仅查询 active = 1
+    active_msgs = s_db.get_messages(sid)
+    assert len(active_msgs) == 1
+    assert active_msgs[0]["content"] == "活跃新消息"
+
+    # 原始表中 active=0 依然存在
+    cur = s_db.conn.execute("SELECT active, content FROM messages WHERE session_id = ? ORDER BY id ASC", (sid,))
+    all_rows = cur.fetchall()
+    assert len(all_rows) == 2
+    assert all_rows[0]["active"] == 0
+    assert all_rows[1]["active"] == 1
+
+    s_db.close()
+
+
+def test_replay_clock_clone_isolation():
+    """验证 ReplayClock.clone() 生成具有完全相同基线但在推进时相互隔离的独立时钟。"""
+    from eval.replay import ReplayClock
+
+    c1 = ReplayClock(initial_monotonic=100.0, initial_time=1700000000.0)
+    c2 = c1.clone()
+
+    assert c2.monotonic() == 100.0
+    assert c2.time() == 1700000000.0
+
+    c1.advance(350.0)
+    assert c1.monotonic() == 450.0
+    assert c1.time() == 1700000350.0
+
+    # c2 不受 c1 影响
+    assert c2.monotonic() == 100.0
+    assert c2.time() == 1700000000.0
+

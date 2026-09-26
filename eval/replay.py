@@ -75,8 +75,10 @@ def is_real_session_db_available() -> bool:
 class SandboxSqliteSessionDB:
     """轻量 SQLite 沙箱存储。
 
-    在未注入宿主 hermes-agent 源码的 unit test 环境下提供与 SessionDB 完全一致的
-    会话创建、标题更新、消息追加与查询接口。
+    在未注入宿主 hermes-agent 源码的测试环境下提供会话与消息的基础沙箱存储。
+    重要边界说明：
+    本沙箱仅存储基础字段与 active 标志，不具备生产 SessionDB 的压缩载体结构（如 compacted、
+    _compressed_summary、token_count 等），不可据此声称全历史高保真回放。
     """
 
     MAX_TITLE_LENGTH = 100
@@ -174,15 +176,16 @@ class SandboxSqliteSessionDB:
         role: str,
         content: Optional[str] = None,
         timestamp: Optional[float] = None,
+        active: int = 1,
         **kwargs: Any,
     ) -> int:
         ts = timestamp if timestamp is not None else time.time()
         cur = self.conn.execute(
             """
             INSERT INTO messages (session_id, role, content, timestamp, active)
-            VALUES (?, ?, ?, ?, 1)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (session_id, role, content, ts),
+            (session_id, role, content, ts, int(active)),
         )
         return cur.lastrowid
 
@@ -199,6 +202,7 @@ class SandboxSqliteSessionDB:
                 role=m.get("role", "user"),
                 content=m.get("content"),
                 timestamp=m.get("timestamp"),
+                active=m.get("active", 1),
             )
             count += 1
         return count
@@ -226,11 +230,18 @@ class SandboxSqliteSessionDB:
             })
         return conv
 
+    def list_sessions_rich(self, **kwargs: Any) -> List[Dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM sessions").fetchall()
+        return [dict(r) for r in rows]
+
     def close(self) -> None:
         try:
             self.conn.close()
         except Exception:
             pass
+
+
+_UNSET = object()
 
 
 def make_sandbox(
@@ -239,14 +250,32 @@ def make_sandbox(
     workdir: Union[str, Path],
     *,
     events: Optional[List[Dict[str, Any]]] = None,
+    initial_title: Any = _UNSET,
+    initial_title_source: Any = _UNSET,
+    mode: str = "active_window",
+    require_explicit_provenance: bool = False,
 ) -> Any:
     """在指定 workdir 创建完全隔离的沙箱 SessionDB，并载入会话与前缀切片消息。
 
-    保证：
+    保证与来源保真约定：
     1. 沙箱数据库与状态文件严格落在 workdir 内部；
-    2. 源数据库只读，运行前后不被写穿或篡改；
-    3. 支持宿主真实 SessionDB 与轻量沙箱适配器。
+    2. 源数据库只读，运行前后绝不被写穿或篡改；
+    3. 支持原生 sqlite3.Connection、宿主真实 SessionDB 与轻量沙箱适配器；
+    4. 模式与标题溯源明确分离：
+       - historical_replay 模式（或 require_explicit_provenance=True）：必须显式传入
+         initial_title 与 initial_title_source。因为源会话表仅保存当前最终状态（可能经历
+         用户干预或终态收敛），不具备初始状态的有效历史溯源证据；
+       - active_window 模式（默认）：作为活跃视窗诊断。若未显式指定，读取源数据库当前状态作为
+         该视窗的基线，但明确不宣称其为全历史或原始第 1 轮。
     """
+    if mode in ("historical", "historical_replay") or require_explicit_provenance:
+        if initial_title is _UNSET or initial_title_source is _UNSET:
+            raise ValueError(
+                "Historical prefix replay requires explicit initial_title and initial_title_source. "
+                "The source database only records current/final session state, which lacks "
+                "defensible initial title provenance."
+            )
+
     workdir_path = Path(workdir)
     workdir_path.mkdir(parents=True, exist_ok=True)
     sandbox_db_path = workdir_path / "state.db"
@@ -257,22 +286,37 @@ def make_sandbox(
         raw_sess = source_db.get_session(session_id)
         if raw_sess:
             source_session = dict(raw_sess)
+    elif isinstance(source_db, sqlite3.Connection) or hasattr(source_db, "execute"):
+        try:
+            cur = source_db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+            cols = [d[0] for d in cur.description] if cur.description else []
+            row = cur.fetchone()
+            if row:
+                source_session = dict(zip(cols, row))
+        except Exception:
+            pass
 
     source = source_session.get("source") or "cli"
     model = source_session.get("model")
     parent_id = source_session.get("parent_session_id") or source_session.get("parent_id")
 
     title = None
-    if hasattr(source_db, "get_session_title"):
-        title = source_db.get_session_title(session_id)
-    if title is None:
-        title = source_session.get("title")
+    if initial_title is not _UNSET:
+        title = initial_title
+    else:
+        if hasattr(source_db, "get_session_title"):
+            title = source_db.get_session_title(session_id)
+        if title is None:
+            title = source_session.get("title")
 
     title_source = None
-    if hasattr(source_db, "get_session_title_source"):
-        title_source = source_db.get_session_title_source(session_id)
-    if title_source is None:
-        title_source = source_session.get("title_source")
+    if initial_title_source is not _UNSET:
+        title_source = initial_title_source
+    else:
+        if hasattr(source_db, "get_session_title_source"):
+            title_source = source_db.get_session_title_source(session_id)
+        if title_source is None:
+            title_source = source_session.get("title_source")
 
     # 获取消息切片
     if events is None:
@@ -282,6 +326,21 @@ def make_sandbox(
             events = source_db.get_session_messages(session_id)
         elif hasattr(source_db, "get_messages_as_conversation"):
             events = source_db.get_messages_as_conversation(session_id)
+        elif isinstance(source_db, sqlite3.Connection) or hasattr(source_db, "execute"):
+            try:
+                if mode in ("historical", "historical_replay"):
+                    cur = source_db.execute(
+                        "SELECT role, content, timestamp, active FROM messages WHERE session_id = ? ORDER BY id ASC",
+                        (session_id,),
+                    )
+                else:
+                    cur = source_db.execute(
+                        "SELECT role, content, timestamp, active FROM messages WHERE session_id = ? AND active = 1 ORDER BY id ASC",
+                        (session_id,),
+                    )
+                events = [{"role": r[0], "content": r[1], "timestamp": r[2], "active": r[3] if len(r) > 3 else 1} for r in cur.fetchall()]
+            except Exception:
+                events = []
         else:
             events = []
 
@@ -310,11 +369,15 @@ def make_sandbox(
             sandbox_db.append_messages_batch(session_id, events)
         elif hasattr(sandbox_db, "append_message"):
             for m in events:
+                kwargs: Dict[str, Any] = {}
+                if "active" in m:
+                    kwargs["active"] = m["active"]
                 sandbox_db.append_message(
                     session_id,
                     role=m.get("role", "user"),
                     content=m.get("content"),
                     timestamp=m.get("timestamp"),
+                    **kwargs,
                 )
 
     return sandbox_db
@@ -337,6 +400,10 @@ class ReplayClock:
         self._mono += float(seconds)
         self._wall += float(seconds)
 
+    def clone(self) -> ReplayClock:
+        """克隆具有完全相同起始基线的独立时钟实例，防止跨 Cell 发生时钟累积污染。"""
+        return ReplayClock(initial_monotonic=self._mono, initial_time=self._wall)
+
 
 class ReplayHarness:
     """生产 evaluate() 状态机沙箱回放容器。
@@ -354,6 +421,7 @@ class ReplayHarness:
         cfg: Optional[Dict[str, Any]] = None,
         clock: Optional[ReplayClock] = None,
         mock_llm: Optional[Any] = None,
+        db: Optional[Any] = None,
     ) -> None:
         from unittest.mock import MagicMock
         from hermes_auto_titler.policy import AutoTitler
@@ -381,12 +449,15 @@ class ReplayHarness:
         self.cfg = base_cfg
 
         # 独立沙箱 SessionDB
-        db_path = self.workdir / "state.db"
-        if is_real_session_db_available():
-            import hermes_state
-            self.db = hermes_state.SessionDB(db_path=db_path)
+        if db is not None:
+            self.db = db
         else:
-            self.db = SandboxSqliteSessionDB(db_path=db_path)
+            db_path = self.workdir / "state.db"
+            if is_real_session_db_available():
+                import hermes_state
+                self.db = hermes_state.SessionDB(db_path=db_path)
+            else:
+                self.db = SandboxSqliteSessionDB(db_path=db_path)
 
         # 独立上下文与 LLM
         self.mock_llm = mock_llm or MagicMock()
@@ -435,6 +506,40 @@ class ReplayHarness:
     ) -> Dict[str, Any]:
         """同步运行一次状态机 evaluate() 并捕获完整决策结果。"""
         return self.titler.evaluate(session_id, force=force, blind=blind)
+
+    def replay_turn(
+        self,
+        session_id: str,
+        events: List[Dict[str, Any]],
+        *,
+        advance_clock: Optional[float] = None,
+        force: bool = False,
+        blind: bool = False,
+    ) -> Dict[str, Any]:
+        """向沙箱追加当前轮次新增消息，根据需要推进时钟，并执行 evaluate()。
+
+        支持在同一沙箱内进行多轮连续状态转移回放，维护 pending 与标题继承。
+        """
+        if advance_clock is not None and advance_clock > 0:
+            self.clock.advance(advance_clock)
+
+        existing = self.db.get_messages(session_id) if hasattr(self.db, "get_messages") else []
+        existing_count = len(existing)
+        if len(events) > existing_count:
+            new_events = events[existing_count:]
+            if hasattr(self.db, "append_messages_batch"):
+                self.db.append_messages_batch(session_id, new_events)
+            elif hasattr(self.db, "append_message"):
+                for m in new_events:
+                    self.db.append_message(
+                        session_id,
+                        role=m.get("role", "user"),
+                        content=m.get("content"),
+                        timestamp=m.get("timestamp"),
+                    )
+
+        result = self.evaluate(session_id, force=force, blind=blind)
+        return self.record_transition(session_id, result)
 
     def on_session_end(self, **payload: Any) -> None:
         """通过真实宿主 hook 路径触发评估调度。"""

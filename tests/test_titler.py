@@ -915,7 +915,7 @@ def test_generate_blind_omits_current_title_and_forces_rename():
     assert "durable subject" in system
     assert "identifiers exactly" in system
     assert "当前标题：" not in user_prompt
-    assert "开头内容" in user_prompt
+    assert "Opening context:" in user_prompt
     assert "Current title:" not in user_prompt
 
 
@@ -944,9 +944,9 @@ def test_generate_blind_renders_summary_as_primary_historical_context():
     )
     assert (action, title) == ("rename", "X 项目开发")
     prompt = ctx.llm.calls[0]["messages"][1]["content"]
-    opening_block = prompt.split("可见开头", 1)[1].split("历史摘要", 1)[0]
+    opening_block = prompt.split("Visible continuation:", 1)[1].split("Recent context:", 1)[0]
     assert "Session Arc Summary" not in opening_block
-    assert "历史摘要" in prompt
+    assert "Earlier-history summary:" in prompt
     assert "弱提示" not in prompt
     assert "Session Arc Summary" in prompt
 
@@ -970,13 +970,10 @@ def test_generate_nonblind_with_summary_anchors_subject_on_summary():
     assert (action, title) == ("rename", "账号体系注册运营")
     system = ctx.llm.calls[0]["messages"][0]["content"]
     user_prompt = ctx.llm.calls[0]["messages"][1]["content"]
-    # 有摘要时：opening 标记为局部续段，摘要提供历史主线
-    assert "可见开头" in user_prompt
-    assert "历史摘要" in user_prompt
-    assert "开头内容（用于识别会话主体和主线）" not in user_prompt
-    assert "历史摘要（原始开头已被压缩；用于识别更早的主线）" in user_prompt
+    # 有摘要时：历史主线先于局部续段，且不会重复注入为 opening。
+    assert user_prompt.index("Earlier-history summary:") < user_prompt.index("Visible continuation:")
+    assert "Opening context:" not in user_prompt
     assert "弱提示" not in user_prompt
-    assert "压缩后的局部续段" in user_prompt
     assert "durable subject" in system
 
 
@@ -1016,9 +1013,8 @@ def test_evaluate_blind_with_summary_keeps_user_continuation_but_omits_assistant
     assert result["action"] == "renamed"
     prompt = ctx.llm.calls[0]["messages"][1]["content"]
     assert "Hermes 自动标题插件开发" in prompt
-    assert "摘要之后的用户消息" in prompt
-    assert "后续持续转向 WSP 搜索配置" in prompt
-    assert "用户:" in prompt
+    assert "User messages after the summary:" in prompt
+    assert "user: 后续持续转向 WSP 搜索配置" in prompt
     assert "参数已调整" not in prompt
 
 

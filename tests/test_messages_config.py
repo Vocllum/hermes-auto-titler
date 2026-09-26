@@ -1492,3 +1492,198 @@ def test_status_diagnoses_first_title_host_switch(monkeypatch):
     assert "first-title mismatch" not in out_plugin
 
 
+class PhysicalSqliteSessionDB:
+    """真实物理 SQLite DB 形态，精确复现 hermes_state_messages.py 的表结构与查询语义。"""
+
+    def __init__(self):
+        import sqlite3
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def _init_schema(self):
+        self.conn.executescript("""
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                title TEXT,
+                title_source TEXT
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                compacted INTEGER NOT NULL DEFAULT 0,
+                timestamp REAL DEFAULT 0.0,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                display_metadata TEXT,
+                _compressed_summary INTEGER DEFAULT 0
+            );
+        """)
+
+    def insert_session(self, sid: str, parent_id: str = None):
+        self.conn.execute("INSERT INTO sessions (id, parent_session_id) VALUES (?, ?)", (sid, parent_id))
+
+    def insert_message(self, session_id: str, role: str, content: str, active: int = 1, compacted: int = 0, timestamp: float = 0.0):
+        self.conn.execute(
+            "INSERT INTO messages (session_id, role, content, active, compacted, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, role, content, active, compacted, timestamp)
+        )
+
+    def _resolve_lineage(self, session_id: str) -> List[str]:
+        lineage = []
+        cur = session_id
+        while cur:
+            lineage.append(cur)
+            row = self.conn.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (cur,)).fetchone()
+            cur = row["parent_session_id"] if row else None
+        return list(reversed(lineage))
+
+    def get_messages_as_conversation(
+        self,
+        session_id: str,
+        include_ancestors: bool = False,
+        include_inactive: bool = False,
+        repair_alternation: bool = False,
+        include_row_ids: bool = False,
+        include_compacted: bool = False,
+    ) -> List[dict]:
+        """与宿主 hermes_state_messages.py:1157-1160 _active_clause 严格一致。"""
+        if include_inactive:
+            active_clause = ""
+        elif include_compacted:
+            active_clause = " AND (active = 1 OR compacted = 1)"
+        else:
+            active_clause = " AND active = 1"
+
+        sids = self._resolve_lineage(session_id) if include_ancestors else [session_id]
+        placeholders = ",".join("?" for _ in sids)
+        rows = self.conn.execute(
+            f"SELECT id, role, content, timestamp FROM messages WHERE session_id IN ({placeholders}){active_clause} ORDER BY id ASC",
+            sids
+        ).fetchall()
+        return [{"role": r["role"], "content": r["content"], "timestamp": r["timestamp"]} for r in rows]
+
+
+def test_compacted_session_recovers_original_human_opening_from_physical_db():
+    """测试物理 DB 形态下，原地压缩会话能正确恢复压缩前首轮人类意图，且不引入撤回消息。"""
+    db = PhysicalSqliteSessionDB()
+    db.insert_session("sess_1")
+    # 压缩前的历史轮次 (compacted=1, active=0)
+    db.insert_message("sess_1", "user", "请帮我实现一个基于 Rust 的高并发任务调度器", active=0, compacted=1)
+    db.insert_message("sess_1", "assistant", "好的，我们用 tokio 来实现...", active=0, compacted=1)
+    # 撤回消息 (compacted=0, active=0) - 宿主 rewind 产生，严禁作为人类意图恢复
+    db.insert_message("sess_1", "user", "撤回的错误输入：先别写调度器了", active=0, compacted=0)
+    # 压缩载体 (active=1, compacted=0)
+    carrier = _real_compaction_carrier("## Historical Task Snapshot\n主线是构建 Rust 任务调度器")
+    db.insert_message("sess_1", "user", carrier, active=1, compacted=0)
+    # 压缩后的后续活跃轮次 (active=1, compacted=0)
+    db.insert_message("sess_1", "user", "增加支持优先级的 worker 队列", active=1, compacted=0)
+    db.insert_message("sess_1", "assistant", "已添加基于 BinaryHeap 的优先级队列实现", active=1, compacted=0)
+    db.insert_message("sess_1", "user", "运行单元测试", active=1, compacted=0)
+    db.insert_message("sess_1", "assistant", "所有 15 个测试通过", active=1, compacted=0)
+
+    recent, all_user, opening, summary = load_context_with_summary(
+        db, "sess_1", recent_turns=2, include_all_user=True, opening_turns=2
+    )
+
+    # 1. 原始人类首轮意图成功恢复
+    assert opening[0] == ("user", "请帮我实现一个基于 Rust 的高并发任务调度器")
+    # 2. 撤回消息（active=0, compacted=0）严禁恢复为人类意图
+    assert not any("撤回" in text for _, text in opening)
+    assert not any("撤回" in text for _, text in all_user)
+    assert not any("撤回" in text for _, text in recent)
+    # 3. 压缩摘要作为独立锚点保留
+    assert summary is not None and "主线是构建 Rust 任务调度器" in summary
+    # 4. 最近轮次正确对应活跃尾部
+    assert recent[-1] == ("assistant", "所有 15 个测试通过")
+
+
+def test_compacted_session_lineage_recovers_original_human_opening_from_physical_db():
+    """测试物理 DB 形态下，祖先血缘（parent-child 分叉）压缩会话正确恢复祖先根部的首轮人类意图。"""
+    db = PhysicalSqliteSessionDB()
+    db.insert_session("parent_sess")
+    db.insert_session("child_sess", parent_id="parent_sess")
+    # 父会话轮次（父会话被压缩后整体转为 compacted=1, active=0）
+    db.insert_message("parent_sess", "user", "设计 AutoTitler 评估指标与回放流水线", active=0, compacted=1)
+    db.insert_message("parent_sess", "assistant", "好的，设计如下流水线...", active=0, compacted=1)
+    # 父会话中的撤回草稿 (active=0, compacted=0)
+    db.insert_message("parent_sess", "user", "草稿：放弃 AutoTitler", active=0, compacted=0)
+    # 子会话轮次 (active=1, compacted=0)
+    carrier = _real_compaction_carrier("## Historical Task Snapshot\n设计 AutoTitler 评估指标")
+    db.insert_message("child_sess", "user", carrier, active=1, compacted=0)
+    db.insert_message("child_sess", "user", "运行回放指标测试", active=1, compacted=0)
+    db.insert_message("child_sess", "assistant", "指标均已达标", active=1, compacted=0)
+
+    recent, all_user, opening, summary = load_context_with_summary(
+        db, "child_sess", recent_turns=1, include_all_user=True, opening_turns=1
+    )
+
+    # 1. 祖先原始人类首轮意图恢复
+    assert opening[0] == ("user", "设计 AutoTitler 评估指标与回放流水线")
+    # 2. 撤回草稿不出现
+    assert not any("草稿" in text for _, text in all_user)
+    # 3. 摘要保留
+    assert summary is not None and "设计 AutoTitler 评估指标" in summary
+
+
+def test_load_context_fallback_when_db_lacks_include_compacted():
+    """测试当宿主/Mock DB 签名不支持 include_compacted 时，优雅降级而不是抛出 TypeError。"""
+    class LegacyDuckDB:
+        def __init__(self, conv):
+            self.conv = conv
+
+        def get_messages_as_conversation(self, session_id, include_ancestors=True):
+            return self.conv
+
+    legacy_db = LegacyDuckDB([
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "你好！有什么我可以帮你的？"},
+    ])
+    recent, all_user, opening, summary = load_context_with_summary(
+        legacy_db, "s_legacy", recent_turns=1, include_all_user=True
+    )
+    assert opening[0] == ("user", "你好")
+
+
+def test_provenance_contrast_compacted_vs_inactive_vs_default():
+    """对比证明：
+    1. 默认 include_compacted=False 会使压缩前 active=0 消息丢失，首轮被后续轮次篡改。
+    2. 旧审查误建议的 include_inactive=True 会把 active=0, compacted=0 的撤回消息复活为人意图。
+    3. 唯有 include_compacted=True 既能找回压缩前首轮意图，又严格排除撤回消息。
+    """
+    db = PhysicalSqliteSessionDB()
+    db.insert_session("sess_contrast")
+    # 真实首轮（压缩后 active=0, compacted=1）
+    db.insert_message("sess_contrast", "user", "真实意图：搭建流式处理服务", active=0, compacted=1)
+    db.insert_message("sess_contrast", "assistant", "已确认目标", active=0, compacted=1)
+    # 撤回消息（active=0, compacted=0）
+    db.insert_message("sess_contrast", "user", "已撤回的错误指令", active=0, compacted=0)
+    # 压缩载体与后续轮次（active=1, compacted=0）
+    carrier = _real_compaction_carrier("## Historical Task Snapshot\n搭建流式处理服务")
+    db.insert_message("sess_contrast", "user", carrier, active=1, compacted=0)
+    db.insert_message("sess_contrast", "user", "后续调试", active=1, compacted=0)
+    db.insert_message("sess_contrast", "assistant", "调试完毕", active=1, compacted=0)
+
+    # 1. 默认模式（include_compacted=False, include_inactive=False）：首轮丢失
+    raw_default = db.get_messages_as_conversation("sess_contrast", include_ancestors=True, include_compacted=False)
+    default_user_msgs = [m["content"] for m in raw_default if m["role"] == "user"]
+    assert "真实意图：搭建流式处理服务" not in default_user_msgs
+    assert "已撤回的错误指令" not in default_user_msgs
+
+    # 2. 错误建议模式（include_inactive=True）：撤回消息被错误复活
+    raw_inactive = db.get_messages_as_conversation("sess_contrast", include_ancestors=True, include_inactive=True)
+    inactive_user_msgs = [m["content"] for m in raw_inactive if m["role"] == "user"]
+    assert "真实意图：搭建流式处理服务" in inactive_user_msgs
+    assert "已撤回的错误指令" in inactive_user_msgs  # 缺陷：撤回消息被污染进意图！
+
+    # 3. 正确模式（include_compacted=True, include_inactive=False）：精准恢复首轮，严密排除撤回
+    raw_correct = db.get_messages_as_conversation("sess_contrast", include_ancestors=True, include_compacted=True)
+    correct_user_msgs = [m["content"] for m in raw_correct if m["role"] == "user"]
+    assert "真实意图：搭建流式处理服务" in correct_user_msgs
+    assert "已撤回的错误指令" not in correct_user_msgs
+

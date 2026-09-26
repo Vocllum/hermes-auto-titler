@@ -2,6 +2,8 @@ import pytest
 from eval.metrics import (
     compute_cell_metrics,
     is_acceptable_title,
+    is_strict_whitelist_hit,
+    classify_usurpation,
     is_usurped_title,
     EvaluationRecord,
 )
@@ -15,13 +17,14 @@ def test_is_acceptable_title_exact_normalized_match():
     assert is_acceptable_title("B", None, "Title B") is False
 
     # 规范化后全词等值匹配
+    assert is_strict_whitelist_hit("Title B", None, "Title B") is True
     assert is_acceptable_title("Title B", None, "Title B") is True
     assert is_acceptable_title("  title b  ", ["Title B"], "durable subject") is True
     assert is_acceptable_title("AutoTitler 架构重构", ["AutoTitler 架构重构"], "AutoTitler 架构") is True
 
 
 def test_is_usurped_title_mechanical_evaluation():
-    # 1. 命中次主题/排错/噪声标签
+    # 1. 命中次主题/排错/噪声标签：具备独立正向证据，判定为篡权
     assert (
         is_usurped_title(
             title="修复局部报错",
@@ -32,8 +35,18 @@ def test_is_usurped_title_mechanical_evaluation():
         )
         is True
     )
+    assert (
+        classify_usurpation(
+            title="修复局部报错",
+            acceptable_titles=["AutoTitler 架构重构"],
+            durable_subject="AutoTitler 架构重构",
+            allowed_shift=False,
+            secondary_topics=["修复局部报错", "构建脚本调试"],
+        )
+        == "usurped"
+    )
 
-    # 2. 禁止转向时脱离主线
+    # 2. 禁止转向时脱离短词表，但无篡权证据且缺失标识符：判定为 undetermined，绝不误判为 100% 严重篡权
     assert (
         is_usurped_title(
             title="无关临时分支",
@@ -41,10 +54,43 @@ def test_is_usurped_title_mechanical_evaluation():
             durable_subject="AutoTitler 架构重构",
             allowed_shift=False,
         )
-        is True
+        is False
+    )
+    assert (
+        classify_usurpation(
+            title="无关临时分支",
+            acceptable_titles=["AutoTitler 架构重构"],
+            durable_subject="AutoTitler 架构重构",
+            allowed_shift=False,
+        )
+        == "undetermined"
     )
 
-    # 3. 正常主线或允许转向时不属于篡权
+    # 3. 保留必要标识符但脱离短白名单：仅能判定未定，实体正确不保证目标正确
+    assert (
+        is_usurped_title(
+            title="AutoTitler 提示词调优",
+            acceptable_titles=["AutoTitler 架构重构"],
+            durable_subject="AutoTitler 架构重构",
+            allowed_shift=False,
+            secondary_topics=["修复局部报错"],
+            required_identifiers=["AutoTitler"],
+        )
+        is False
+    )
+    assert (
+        classify_usurpation(
+            title="AutoTitler 提示词调优",
+            acceptable_titles=["AutoTitler 架构重构"],
+            durable_subject="AutoTitler 架构重构",
+            allowed_shift=False,
+            secondary_topics=["修复局部报错"],
+            required_identifiers=["AutoTitler"],
+        )
+        == "undetermined"
+    )
+
+    # 4. 正常主线或允许转向时不属于篡权
     assert (
         is_usurped_title(
             title="AutoTitler 架构重构",
@@ -63,6 +109,23 @@ def test_is_usurped_title_mechanical_evaluation():
         )
         is False
     )
+
+
+def test_identifier_or_allowed_shift_alone_does_not_prove_mainline_quality():
+    assert classify_usurpation(
+        title="AutoTitler 断网排查",
+        acceptable_titles=["AutoTitler 会话标题治理"],
+        durable_subject="AutoTitler 会话标题治理",
+        allowed_shift=False,
+        secondary_topics=["断网排查"],
+        required_identifiers=["AutoTitler"],
+    ) == "undetermined"
+    assert classify_usurpation(
+        title="完全无关的话题",
+        acceptable_titles=["原主线"],
+        durable_subject="原主线",
+        allowed_shift=True,
+    ) == "undetermined"
 
 
 def test_protected_session_requires_initial_title_and_detects_drift():
@@ -334,4 +397,112 @@ def test_report_formatting_includes_cell_id_and_all_metrics():
     summary = format_aggregate_summary([metrics])
     assert "| `baseline` | 1 / 1 / 0 |" in summary
     assert "Hard Fail" in summary
-    assert "Mainline Cov" in summary
+    assert "Exact Label Hit" in summary
+    assert "Undetermined" in summary
+    assert "Confirmed Usurp" in summary
+    assert "Mainline Cov" not in summary
+
+
+def test_conservative_scoring_and_undetermined_bounds():
+    """验证保守、诚实的可验证计分：
+
+    - 轮次 1：严格白名单命中（严格命中白名单，未被篡权）
+    - 轮次 2：确诊篡权（脱离主线，具备正向证据命中 secondary_topics）
+    - 轮次 3：仅标识符命中，主线语义未定
+    - 轮次 4：标识符也丢失，主线语义未定
+    """
+    records = [
+        EvaluationRecord(
+            session_id="sess_bounds",
+            cell_id="cell_b",
+            turn=1,
+            action="keep",
+            candidate=None,
+            pending=False,
+            applied_title="AutoTitler 架构重构",
+            durable_subject="AutoTitler 架构重构",
+            acceptable_titles=["AutoTitler 架构重构"],
+            secondary_topics=["测试报错排查"],
+            required_identifiers=["AutoTitler"],
+            allowed_shift=False,
+            status="ok",
+            input_tokens=100,
+            output_tokens=10,
+        ),
+        EvaluationRecord(
+            session_id="sess_bounds",
+            cell_id="cell_b",
+            turn=2,
+            action="keep",
+            candidate=None,
+            pending=False,
+            applied_title="测试报错排查",
+            durable_subject="AutoTitler 架构重构",
+            acceptable_titles=["AutoTitler 架构重构"],
+            secondary_topics=["测试报错排查"],
+            required_identifiers=["AutoTitler"],
+            allowed_shift=False,
+            status="ok",
+            input_tokens=100,
+            output_tokens=10,
+        ),
+        EvaluationRecord(
+            session_id="sess_bounds",
+            cell_id="cell_b",
+            turn=3,
+            action="keep",
+            candidate=None,
+            pending=False,
+            applied_title="AutoTitler 提示词调优",
+            durable_subject="AutoTitler 架构重构",
+            acceptable_titles=["AutoTitler 架构重构"],
+            secondary_topics=["测试报错排查"],
+            required_identifiers=["AutoTitler"],
+            allowed_shift=False,
+            status="ok",
+            input_tokens=100,
+            output_tokens=10,
+        ),
+        EvaluationRecord(
+            session_id="sess_bounds",
+            cell_id="cell_b",
+            turn=4,
+            action="keep",
+            candidate=None,
+            pending=False,
+            applied_title="无关临时分支",
+            durable_subject="AutoTitler 架构重构",
+            acceptable_titles=["AutoTitler 架构重构"],
+            secondary_topics=["测试报错排查"],
+            required_identifiers=["AutoTitler"],
+            allowed_shift=False,
+            status="ok",
+            input_tokens=100,
+            output_tokens=10,
+        ),
+    ]
+
+    metrics = compute_cell_metrics("cell_b", records)
+    assert metrics["observed_turns"] == 4
+    # 严格白名单命中诊断（仅轮次 1）
+    assert metrics["strict_whitelist_hit_turns"] == 1
+    assert metrics["strict_whitelist_hit_rate"] == 0.25
+    assert metrics["mainline_covered_turns"] == 1
+    assert metrics["mainline_coverage_rate"] == 0.25
+
+    # 确诊局部篡权（仅轮次 2 命中 secondary_topics）
+    assert metrics["local_usurped_turns"] == 1
+    assert metrics["local_usurpation_rate"] == 0.25
+
+    # 两轮脱离短词表均未获语义审查，标识符正确也不能判作成功。
+    assert metrics["undetermined_turns"] == 2
+    assert metrics["undetermined_rate"] == 0.5
+
+    # 唯有精确标注命中可判为明确未篡权。
+    assert metrics["safe_mainline_turns"] == 1
+    assert metrics["safe_mainline_rate"] == 0.25
+
+    # 标识符保真度（轮次 1 与轮次 3）
+    assert metrics["identifiers_preserved_turns"] == 2
+    assert metrics["identifiers_eligible_turns"] == 4
+    assert metrics["identifiers_preserved_rate"] == 0.5

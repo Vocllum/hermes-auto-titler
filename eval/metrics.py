@@ -48,7 +48,14 @@ def is_acceptable_title(
     acceptable_titles: Optional[List[str]],
     durable_subject: str,
 ) -> bool:
-    """判定标题是否命中可接受标题集合或主线主题（全词等值精确匹配，禁止子串误判）。"""
+    """判定标题是否严格命中可接受标题白名单或主线主题（全词等值精确匹配，禁止子串误判）。
+
+    诊断定义：
+    此函数仅作为「严格白名单命中诊断（strict_whitelist_hit）」，代表真值标注中
+    人工短词表的机械全词等值下界。
+    不可将其直接命名或等同为「语义主线覆盖（semantic mainline coverage）」，
+    因为有限的人工白名单无法穷举合法的语义同义/缩写/语序表达。
+    """
     if not title:
         return False
     t_norm = normalize_title(title)
@@ -59,31 +66,74 @@ def is_acceptable_title(
     return t_norm == normalize_title(durable_subject)
 
 
+is_strict_whitelist_hit = is_acceptable_title
+
+
+def classify_usurpation(
+    title: str,
+    acceptable_titles: Optional[List[str]],
+    durable_subject: str,
+    allowed_shift: bool,
+    secondary_topics: Optional[List[str]] = None,
+    required_identifiers: Optional[List[str]] = None,
+) -> str:
+    """对标题的篡权与主线状态进行基于独立明确证据的分类判定。
+
+    返回值：
+    - "usurped": 标题全词等值命中明确标注的局部次主题。
+    - "not_usurped": 标题全词等值命中短白名单（仅机械标签结果）。
+    - "undetermined": 其余情况，须结合会话证据人工盲审；标识符保留、
+      合法转向及包含次级主题的复合标题都不足以单独证明语义质量。
+      按严谨评测原则，不可武断计入成功，也绝不可直接判为 100% 严重篡权失败。
+    """
+    if not title:
+        return "undetermined"
+    t_norm = normalize_title(title)
+    if not t_norm:
+        return "undetermined"
+
+    # 1. 严格命中白名单或主线主题，明确未被篡权
+    if is_acceptable_title(title, acceptable_titles, durable_subject):
+        return "not_usurped"
+
+    # 2. 检查局部次级话题/排错/噪声明确篡权证据
+    sec_norms = {
+        normalize_title(sec)
+        for sec in (secondary_topics or [])
+        if sec and sec.strip()
+    }
+    if sec_norms:
+        # 2a. 标题完全等值命中次级主题
+        if t_norm in sec_norms:
+            return "usurped"
+        # 含有次级主题的复合标题也可能保留主线；仅凭子串不能断定篡权。
+
+    # 标识符存在、允许转向或不在已列举的副主题中，都不足以证明标题忠于主线。
+    return "undetermined"
+
+
 def is_usurped_title(
     title: str,
     acceptable_titles: Optional[List[str]],
     durable_subject: str,
     allowed_shift: bool,
     secondary_topics: Optional[List[str]] = None,
+    required_identifiers: Optional[List[str]] = None,
 ) -> bool:
-    """判定标题是否被局部噪声、排错或未授权次主题篡权（机械判定，非人工透传旗标）。"""
-    if not title:
-        return False
-    t_norm = normalize_title(title)
-    if not t_norm:
-        return False
+    """判定标题是否被局部噪声、排错或未授权次主题篡权（明确证据独立判定）。
 
-    # 1. 标题等值命中了已声明的次级/局部排错/噪声主题
-    if secondary_topics:
-        if t_norm in {normalize_title(sec) for sec in secondary_topics if sec and sec.strip()}:
-            return True
-
-    # 2. 在明确禁止转向的前提下，标题脱离了可接受主线集合，判定为主线被局部篡权
-    if not allowed_shift:
-        if not is_acceptable_title(title, acceptable_titles, durable_subject):
-            return True
-
-    return False
+    仅当存在明确正向证据（例如命中 secondary_topics 等局部噪声/排错主题）时返回 True。
+    对于不能识别或缺乏充分证据的脱离短白名单标题，标记为未定（undetermined），返回 False。
+    严禁在 allowed_shift=False 时把一切不在短词表的未知标题等同于 100% 严重篡权。
+    """
+    return classify_usurpation(
+        title=title,
+        acceptable_titles=acceptable_titles,
+        durable_subject=durable_subject,
+        allowed_shift=allowed_shift,
+        secondary_topics=secondary_topics,
+        required_identifiers=required_identifiers,
+    ) == "usurped"
 
 
 def compute_cell_metrics(cell_id: str, records: List[EvaluationRecord]) -> Dict[str, Any]:
@@ -120,8 +170,10 @@ def compute_cell_metrics(cell_id: str, records: List[EvaluationRecord]) -> Dict[
     shift_latency_turns: List[int] = []
     failed_shifts = 0
     missed_renames = 0
-    mainline_covered_turns = 0
+    strict_whitelist_hit_turns = 0
     local_usurped_turns = 0
+    undetermined_turns = 0
+    safe_mainline_turns = 0
     identifiers_preserved_turns = 0
     identifiers_eligible_turns = 0
 
@@ -139,19 +191,25 @@ def compute_cell_metrics(cell_id: str, records: List[EvaluationRecord]) -> Dict[
             if r.status != "ok":
                 continue
 
-            # 主线覆盖评估（全词等值匹配）
+            # 严格白名单命中诊断（全词等值精确匹配，作为可验证下界）
             if is_acceptable_title(r.applied_title, r.acceptable_titles, r.durable_subject):
-                mainline_covered_turns += 1
+                strict_whitelist_hit_turns += 1
 
-            # 局部篡权评估（机械逻辑判定）
-            if is_usurped_title(
+            # 局部篡权评估（独立明确正向证据判定，不可将未知等同于篡权）
+            usurp_status = classify_usurpation(
                 r.applied_title,
                 r.acceptable_titles,
                 r.durable_subject,
                 r.allowed_shift,
                 r.secondary_topics,
-            ):
+                r.required_identifiers,
+            )
+            if usurp_status == "usurped":
                 local_usurped_turns += 1
+            elif usurp_status == "undetermined":
+                undetermined_turns += 1
+            elif usurp_status == "not_usurped":
+                safe_mainline_turns += 1
 
             # 标识符保真度评估（精确大小写与字符匹配）
             if r.required_identifiers:
@@ -209,8 +267,14 @@ def compute_cell_metrics(cell_id: str, records: List[EvaluationRecord]) -> Dict[
             "token_source": "measured",
         }
 
-    mainline_cov_rate = (mainline_covered_turns / observed_turns) if observed_turns else 0.0
+    # 历史兼容字段 mainline_coverage_rate 沿用精确标签命中值，
+    # 消费者必须将其标为严格词表诊断，不能解释成语义主线覆盖。
+    mainline_covered_turns = strict_whitelist_hit_turns
+    mainline_cov_rate = (strict_whitelist_hit_turns / observed_turns) if observed_turns else 0.0
+    strict_whitelist_hit_rate = mainline_cov_rate
     local_usurp_rate = (local_usurped_turns / observed_turns) if observed_turns else 0.0
+    undetermined_rate = (undetermined_turns / observed_turns) if observed_turns else 0.0
+    safe_mainline_rate = (safe_mainline_turns / observed_turns) if observed_turns else 0.0
     ident_preserve_rate = (
         (identifiers_preserved_turns / identifiers_eligible_turns)
         if identifiers_eligible_turns
@@ -230,10 +294,16 @@ def compute_cell_metrics(cell_id: str, records: List[EvaluationRecord]) -> Dict[
         "shift_latency_turns": shift_latency_turns,
         "failed_shifts": failed_shifts,
         "missed_renames": missed_renames,
+        "strict_whitelist_hit_turns": strict_whitelist_hit_turns,
+        "strict_whitelist_hit_rate": strict_whitelist_hit_rate,
         "mainline_covered_turns": mainline_covered_turns,
         "mainline_coverage_rate": mainline_cov_rate,
         "local_usurped_turns": local_usurped_turns,
         "local_usurpation_rate": local_usurp_rate,
+        "undetermined_turns": undetermined_turns,
+        "undetermined_rate": undetermined_rate,
+        "safe_mainline_turns": safe_mainline_turns,
+        "safe_mainline_rate": safe_mainline_rate,
         "identifiers_preserved_turns": identifiers_preserved_turns,
         "identifiers_eligible_turns": identifiers_eligible_turns,
         "identifiers_preserved_rate": ident_preserve_rate,

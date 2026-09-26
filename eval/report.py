@@ -22,13 +22,14 @@ def format_per_turn_table(records: List[EvaluationRecord]) -> str:
 def format_aggregate_summary(cell_metrics_list: List[Dict[str, Any]]) -> str:
     """生成聚合指标对照表，必须带明确的 eligible/observed/failed 分母及质量维度指标。"""
     lines = [
-        "| Cell ID | Eligible / Observed / Failed | Mainline Cov | Usurp Rate | Applied / Pending Renames | Shift Latency | Hard Fail | Avg In / Out Tokens |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Cell ID | Eligible / Observed / Failed | Exact Label Hit | Confirmed Usurp | Undetermined | Applied / Pending Renames | Shift Latency | Hard Fail | Avg In / Out Tokens |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for m in cell_metrics_list:
         denoms = f"{m['eligible_turns']} / {m['observed_turns']} / {m['failed_turns']}"
-        cov_str = f"{m['mainline_coverage_rate']:.1%}" if m['observed_turns'] else "N/A"
+        cov_str = f"{m['strict_whitelist_hit_rate']:.1%}" if m['observed_turns'] else "N/A"
         usurp_str = f"{m['local_usurpation_rate']:.1%}" if m['observed_turns'] else "N/A"
+        undetermined_str = f"{m['undetermined_rate']:.1%}" if m['observed_turns'] else "N/A"
         renames_str = f"{m['applied_renames']} / {m['pending_renames']}"
         latencies = m.get("shift_latency_turns", [])
         lat_str = f"{sum(latencies)/len(latencies):.1f}t" if latencies else "N/A"
@@ -38,6 +39,6 @@ def format_aggregate_summary(cell_metrics_list: List[Dict[str, Any]]) -> str:
         else:
             tok_str = "unavailable"
         lines.append(
-            f"| `{m['cell_id']}` | {denoms} | {cov_str} | {usurp_str} | {renames_str} | {lat_str} | {m['hard_fail']} | {tok_str} |"
+            f"| `{m['cell_id']}` | {denoms} | {cov_str} | {usurp_str} | {undetermined_str} | {renames_str} | {lat_str} | {m['hard_fail']} | {tok_str} |"
         )
     return "\n".join(lines)

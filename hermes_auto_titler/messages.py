@@ -620,7 +620,21 @@ def load_context_with_summary(
     当前标题锚点，需要更长摘要来恢复 Subject）；0 = 沿用 preview_chars。
     提示强度由调用方决定。
     """
-    conv = db.get_messages_as_conversation(session_id, include_ancestors=True) or []
+    # 宿主 SessionDB (hermes_state_messages.py) 的真实 provenance：
+    # - active=1: 当前活跃消息
+    # - active=0, compacted=1: 经上下文压缩软归档的历史消息（包含原始首轮意图）
+    # - active=0, compacted=0: 撤回/Rewind/删除的消息，严禁当作有效人类意图恢复
+    # 因此传入 include_compacted=True（保持 include_inactive=False），既能取回压缩前的
+    # 真实首轮轮次，又严格排除撤回消息。若对端为不支持该参数的旧版/Mock DB，则降级兼容。
+    try:
+        conv = db.get_messages_as_conversation(
+            session_id, include_ancestors=True, include_compacted=True
+        )
+    except TypeError:
+        conv = db.get_messages_as_conversation(
+            session_id, include_ancestors=True
+        )
+    conv = conv or []
     pairs: List[Tuple[str, str]] = []
     summaries: List[Tuple[Optional[float], int, str]] = []
     saw_summary = False

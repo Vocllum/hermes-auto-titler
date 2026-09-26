@@ -106,7 +106,3 @@ config_schema:
     type: int
     default: 0
     description: "Per-process automatic rename cap for a session (0 = unlimited). First naming and manual renames are exempt."
-  early_turn_eval:
-    type: bool
-    default: false
-    description: "Legacy compatibility option. First-turn behavior is controlled by first_title_mode."

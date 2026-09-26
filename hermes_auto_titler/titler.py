@@ -15,7 +15,7 @@
   只对已有 worker 等待最多 100ms，随后将 typed finalize intent 原子持久化，由后续正常生命周期续跑
 - 轮次评估在 daemon worker 中执行（携带当前 profile Context），hook 立即
   返回；同一会话 in-flight 去重
-- early_turn_eval 的早期评估只对无标题或 derived 来源的会话触发
+- first_title_mode=plugin 的早期评估只对无标题或 derived 来源的会话触发
   （llm/user/legacy 不提前调用模型；正常 every_n_turns 边界不受影响）
 """
 
@@ -447,7 +447,7 @@ class AutoTitler:
         return str(self.cfg.get("first_title_mode", "builtin")).lower() == "plugin"
 
     def _early_eligible(self, session_id: str) -> bool:
-        """early_turn_eval 的来源门：只对无标题或 derived 来源的会话提前评估。
+        """早期评估的来源门：只对无标题或 derived 来源的会话提前评估。
 
         source=llm/user 与 legacy（NULL 来源 + 已有标题）在早期不额外提交
         （不产生模型调用）；正常 every_n_turns 边界不受此门影响。来源发现

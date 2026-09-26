@@ -93,7 +93,6 @@ def make_handler(titler) -> Callable[[str], str]:
             return (
                 f"autotitler: {'enabled' if c['enabled'] else 'disabled'}"
                 f" | every {c['every_n_turns']} turns | first_title={c.get('first_title_mode', 'builtin')}"
-                f" | early_turn_eval={c['early_turn_eval']}"
                 f" | on_close={c['on_close']}"
                 f" | strategy={c['strategy']}"
                 f" | provider={c['provider'] or '(host default)'}"

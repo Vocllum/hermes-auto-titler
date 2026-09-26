@@ -153,7 +153,6 @@ Settings resolve per key, in this order: `ctx.get_config()` → host `plugins.en
 | `enabled` | `true` | Master switch. Enabling after a disabled startup requires a restart (no hooks registered); disabling a loaded plugin takes effect immediately via the hook guard. |
 | `every_n_turns` | `2` | Evaluate every N completed foreground turns. |
 | `first_title_mode` | `builtin` | `builtin` = Hermes owns first-title generation; `plugin` = the plugin evaluates from turn 1. Neither mode writes host configuration. Changes take effect at plugin load (restart). |
-| `early_turn_eval` | `false` | Legacy compat key. Actual behavior is controlled by `first_title_mode`. |
 | `on_close` | `true` | On close/finalize, wait at most 100 ms for existing work and persist a typed finalize intent; never start a network call from the close hook. |
 | `recent_turns` / `opening_turns` | `2` / `2` | Context window in real user turns; each selected turn keeps the user message + last assistant reply. |
 | `ignore_model_messages` | `false` | Exclude assistant messages from captured context (A/B testing). |

@@ -5,7 +5,6 @@
 enabled: true
 every_n_turns: 2
 on_close: true
-early_turn_eval: false  # 旧键（保留兼容）：当前实际行为由 first_title_mode 决定
 # first_title_mode: builtin  # builtin（默认）=首轮归内建，插件只做后续演进 | plugin=插件首轮即评估
 # 两种模式都不改写宿主 auxiliary.title_generation：卸载或停用插件后，宿主原生标题链路零残留。
 recent_turns: 2

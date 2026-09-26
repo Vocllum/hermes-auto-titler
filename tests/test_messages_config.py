@@ -73,7 +73,7 @@ def test_manifest_settings_order_and_defaults_match_runtime():
         "every_n_turns", "on_close", "rename_confirmations",
         "title_model", "provider",
     ]
-    assert keys[-1] == "early_turn_eval"
+    assert keys[-1] == "max_renames_per_session"
     for key, field in schema.items():
         expected = DEFAULTS[key]
         # Hermes' numeric field serializes an optional None default as zero.
@@ -795,7 +795,6 @@ def test_config_sanitizes_bad_values(tmp_path):
 
 def test_config_has_new_keys(tmp_path):
     cfg = load_config(path=tmp_path / "missing.yaml")
-    assert cfg["early_turn_eval"] is False
     # 0.3 默认零入侵：首轮归宿主内建标题器
     assert cfg["first_title_mode"] == "builtin"
     assert cfg["retitle_summary_chars"] == 12000
@@ -930,13 +929,13 @@ def test_first_title_mode_switch_reports_no_host_write(monkeypatch, tmp_path):
 def test_config_coerces_bool_and_int_strings(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text(
-        "enabled: \"true\"\nevery_n_turns: \"2\"\nearly_turn_eval: \"false\"\non_close: \"on\"\n",
+        "enabled: \"true\"\nevery_n_turns: \"2\"\nignore_model_messages: \"false\"\non_close: \"on\"\n",
         encoding="utf-8",
     )
     cfg = load_config(path=p)
     assert cfg["enabled"] is True
     assert cfg["every_n_turns"] == 2
-    assert cfg["early_turn_eval"] is False
+    assert cfg["ignore_model_messages"] is False
     assert cfg["on_close"] is True
 
 
@@ -1017,20 +1016,20 @@ def test_max_renames_per_session_defaults_off_and_clamps(tmp_path):
 
 def test_config_rejects_numeric_bool_outside_01(tmp_path):
     p = tmp_path / "config.yaml"
-    p.write_text("enabled: 2\non_close: -1\nearly_turn_eval: 0.5\n", encoding="utf-8")
+    p.write_text("enabled: 2\non_close: -1\nignore_model_messages: 0.5\n", encoding="utf-8")
     cfg = load_config(path=p)
     assert cfg["enabled"] is True  # 回退默认，不静默按 truthy/falsy 解释
     assert cfg["on_close"] is True
-    assert cfg["early_turn_eval"] is False
+    assert cfg["ignore_model_messages"] is False
 
 
 def test_config_accepts_numeric_bool_01(tmp_path):
     p = tmp_path / "config.yaml"
-    p.write_text("enabled: 0\non_close: 1\nearly_turn_eval: 0\n", encoding="utf-8")
+    p.write_text("enabled: 0\non_close: 1\nignore_model_messages: 0\n", encoding="utf-8")
     cfg = load_config(path=p)
     assert cfg["enabled"] is False
     assert cfg["on_close"] is True
-    assert cfg["early_turn_eval"] is False
+    assert cfg["ignore_model_messages"] is False
 
 
 def test_config_rejects_fractional_integer_values(tmp_path):

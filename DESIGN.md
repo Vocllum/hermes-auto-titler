@@ -66,8 +66,6 @@ on_session_end
 
 0.3 起两种模式都**不写任何宿主配置**。此前 `plugin` 会在加载时把宿主 `auxiliary.title_generation.enabled` 置为 `false`，由于 Hermes 没有插件卸载回调（`hermes plugins disable` 只改 config，不触发进程内 unload），插件停用或删除后宿主原生标题器会被永久静默——这正是 0.3 废除该写操作的根因。现在插件加载、卸载、切换模式都不留任何宿主侧残留。
 
-`early_turn_eval` 只为兼容旧配置保留；当前实际 early 行为由 `first_title_mode` 决定。
-
 `first_title_mode` 在加载期读取，运行期切换只改插件本地配置，并明确报告需要重启才生效。
 
 ## 4. 触发、节流与调用成本

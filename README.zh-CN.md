@@ -155,7 +155,6 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `enabled` | `true` | 总开关。启动时为 false 则没有注册 hook，之后改 true 需要重启；已加载后改 false 会被 hook 内开关立即拦住。 |
 | `every_n_turns` | `2` | 每 N 个完整前台轮次评估一次。 |
 | `first_title_mode` | `builtin` | `builtin` = 第一版标题归 Hermes；`plugin` = 插件从第 1 轮开始评估。两种模式都不写宿主配置。切换在插件加载时生效（需重启）。 |
-| `early_turn_eval` | `false` | 兼容旧配置保留。实际行为由 `first_title_mode` 控制。 |
 | `on_close` | `true` | 关闭/终局时最多等待已有工作 100ms，并持久化 typed finalize intent；关闭 hook 不发起网络请求。 |
 | `recent_turns` / `opening_turns` | `2` / `2` | 上下文窗口按真实用户轮计；每个选中轮次保留用户消息 + 最后一条 assistant 回复。 |
 | `ignore_model_messages` | `false` | 从捕获上下文中排除 assistant 消息（主要用于 A/B 测试）。 |

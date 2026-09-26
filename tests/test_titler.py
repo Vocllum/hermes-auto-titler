@@ -557,7 +557,7 @@ def test_first_title_mode_builtin_suppresses_early(recording_threads):
     # builtin：明确配置 builtin 时插件首轮不抢（交回内建）
     db = FakeDB(messages=MSGS, title=None)
     t, _ = make_titler(db, text=_dec("keep"), cfg={
-        "every_n_turns": 3, "early_turn_eval": True, "first_title_mode": "builtin",
+        "every_n_turns": 3, "first_title_mode": "builtin",
     })
     t.on_session_end(session_id="s1", completed=True)  # n=1
     t.on_session_end(session_id="s1", completed=True)  # n=2
@@ -585,11 +585,10 @@ def test_first_title_mode_config_validation(tmp_path):
     assert load_config(path=p)["first_title_mode"] == "builtin"  # 非法回退默认
 
 
-def test_early_turn_eval_submits_early_turns(recording_threads):
-    # 旧开关兼容：未配 first_title_mode 时默认 builtin 会压住 early；
-    # 此处显式切 plugin 还原旧行为
+def test_first_title_mode_plugin_submits_early_turns(recording_threads):
+    # plugin 模式：未到 every_n_turns 边界时每轮都提前评估
     db = FakeDB(messages=MSGS, title=None)
-    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "early_turn_eval": True, "first_title_mode": "plugin"})
+    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "first_title_mode": "plugin"})
     t.on_session_end(session_id="s1", completed=True)  # n=1 < 3 → 提交
     run_recorded(recording_threads)  # 完成评估（清 in-flight）
     t.on_session_end(session_id="s1", completed=True)  # n=2 < 3 → 提交
@@ -605,18 +604,18 @@ def test_early_turn_eval_submits_early_turns(recording_threads):
     assert len(recording_threads.instances) == 4
 
 
-def test_early_turn_eval_noop_when_every_n_is_one(recording_threads):
+def test_plugin_mode_noop_when_every_n_is_one(recording_threads):
     db = FakeDB(messages=MSGS, title=None)
-    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 1, "early_turn_eval": True, "first_title_mode": "plugin"})
+    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 1, "first_title_mode": "plugin"})
     for _ in range(4):
         t.on_session_end(session_id="s1", completed=True)
         run_recorded(recording_threads)
     assert len(recording_threads.instances) == 4  # 每轮都提交：early 无额外效果
 
 
-def test_early_turns_still_throttled_by_min_interval(recording_threads):
+def test_plugin_mode_still_throttled_by_min_interval(recording_threads):
     db = FakeDB(messages=MSGS, title=None)
-    t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 5, "early_turn_eval": True, "first_title_mode": "plugin"})
+    t, ctx = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 5, "first_title_mode": "plugin"})
     t.on_session_end(session_id="s1", completed=True)  # n=1 → 提交
     run_recorded(recording_threads)  # 评估 #1
     assert len(ctx.llm.calls) == 1
@@ -625,9 +624,9 @@ def test_early_turns_still_throttled_by_min_interval(recording_threads):
     assert len(ctx.llm.calls) == 1
 
 
-def test_early_turn_eval_off_keeps_old_cadence(recording_threads):
+def test_builtin_mode_keeps_old_cadence(recording_threads):
     db = FakeDB(messages=MSGS, title=None)
-    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "early_turn_eval": False, "first_title_mode": "builtin"})
+    t, _ = make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "first_title_mode": "builtin"})
     t.on_session_end(session_id="s1", completed=True)
     t.on_session_end(session_id="s1", completed=True)
     assert len(recording_threads.instances) == 0
@@ -1187,13 +1186,13 @@ def test_status_includes_first_title_mode():
     assert "provider=(host default)" in out
 
 
-def test_status_includes_early_turn_eval():
+def test_status_reports_first_title_mode():
     from hermes_auto_titler.commands import make_handler
 
     db = FakeDB(messages=MSGS)
-    t, _ = make_titler(db, cfg={"early_turn_eval": True})
+    t, _ = make_titler(db, cfg={"first_title_mode": "plugin"})
     out = make_handler(t)("status")
-    assert "early_turn_eval=True" in out
+    assert "first_title=plugin" in out
     assert "provider=(host default)" in out
 
 
@@ -1214,9 +1213,9 @@ def test_config_command_rejects_invalid_and_accepts_new_keys(monkeypatch):
     assert t.cfg["enabled"] is True
     assert "Invalid value" in h("config every_n_turns abc")
     assert t.cfg["every_n_turns"] == 2
-    h("config early_turn_eval true")
-    assert t.cfg["early_turn_eval"] is True
-    assert saved and saved[-1]["early_turn_eval"] is True
+    h("config first_title_mode plugin")
+    assert t.cfg["first_title_mode"] == "plugin"
+    assert saved and saved[-1]["first_title_mode"] == "plugin"
     h("config retitle_summary_chars 2000")
     assert t.cfg["retitle_summary_chars"] == 2000
     h("config opening_turns 0")
@@ -1297,7 +1296,7 @@ def test_inconsistent_flags_failed_or_interrupted_not_counted(recording_threads)
     assert len(recording_threads.instances) == 1
 
 
-# -- early_turn_eval 来源门 ---------------------------------------------------
+# -- first_title_mode=plugin 来源门 -------------------------------------------
 
 class BrokenSourceDB(FakeDB):
     def get_session_title_source(self, sid):
@@ -1305,7 +1304,7 @@ class BrokenSourceDB(FakeDB):
 
 
 def _early_titler(db, **cfg):
-    return make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "early_turn_eval": True, "first_title_mode": "plugin", **cfg})
+    return make_titler(db, text=_dec("keep"), cfg={"every_n_turns": 3, "first_title_mode": "plugin", **cfg})
 
 
 def test_early_gate_untitled_submits(recording_threads):

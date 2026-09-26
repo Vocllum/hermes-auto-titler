@@ -24,7 +24,6 @@ DEFAULTS: dict[str, Any] = {
     "enabled": True,
     "every_n_turns": 2,
     "on_close": True,
-    "early_turn_eval": False,
     # 首轮命名权：builtin（默认）=首轮归宿主毫秒级起名，插件不抢首轮；
     # plugin=插件首轮即评估。两种模式都不写宿主配置（0.3 非侵入约定）。
     "first_title_mode": "builtin",

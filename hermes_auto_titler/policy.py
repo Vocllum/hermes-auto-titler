@@ -25,6 +25,34 @@ log = logging.getLogger(__name__)
 class AutoTitler(_BaseAutoTitler):
     """Policy-specialized AutoTitler while reusing the core lifecycle/write path."""
 
+    def _record_generate_error(self, sid_key: str, exc: BaseException) -> None:
+        """Log an LLM-call failure with an actionable diagnosis.
+
+        ``UnscopedSecretError`` ships a single canned sentence telling the user to run
+        ``hermes gateway restart``. On a real credential miss that advice is wrong: no
+        restart can conjure a key that is not configured, and the old handler logged it
+        verbatim on every attempt, which sent the user chasing a gateway bug for days.
+        The exception carries ``secret_name`` and ``developer_detail``, so we can name
+        the missing key and point at the route that has to be fixed instead.
+        """
+        raw = str(exc)
+        secret_name = str(getattr(exc, "secret_name", "") or "")
+        if secret_name:
+            detail = str(getattr(exc, "developer_detail", "") or "")
+            log.error(
+                "auto-titler LLM call failed: provider credentials unavailable for %s. "
+                "No retry and no gateway restart can fix this: set the key for the "
+                "resolved provider (see auxiliary.%s in config.yaml, or Bitwarden).%s",
+                secret_name,
+                "title_generation",
+                f" Detail: {detail}" if detail else "",
+            )
+        else:
+            log.warning("auto-titler LLM call failed: %s", raw)
+        self._last_generate_error = raw
+        if hasattr(self, "_last_generate_errors"):
+            self._last_generate_errors[sid_key] = raw
+
     def evaluate(
         self,
         session_id: str,
@@ -277,10 +305,7 @@ class AutoTitler(_BaseAutoTitler):
             )
             text = getattr(res, "text", "") or ""
         except Exception as e:
-            log.warning("auto-titler LLM call failed: %s", e)
-            self._last_generate_error = str(e)
-            if hasattr(self, "_last_generate_errors"):
-                self._last_generate_errors[sid_key] = str(e)
+            self._record_generate_error(sid_key, e)
             return "error", None
 
         self._record_usage(session_id, res)

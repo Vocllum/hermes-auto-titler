@@ -135,6 +135,32 @@ def _is_capacity_error(text: str) -> bool:
     return any(marker in lowered for marker in _CAPACITY_MARKERS)
 
 
+# Missing provider credentials (UnscopedSecretError) are NOT transient: no retry,
+# no backoff growth and no "hermes gateway restart" advice can fix a route with no
+# usable key. They must count toward a much tighter cap than a capacity blip.
+_CREDENTIAL_MARKERS = (
+    "could not read this profile's",
+    "unscopedsecret",
+    "no api key",
+    "api key not",
+    "missing api key",
+    "could not resolve provider",
+    "no credentials",
+)
+
+# Generous enough for a flaky network, tight enough that a permanent misroute stops
+# after ~16 min instead of hammering forever. The old counter was unbounded: the
+# ``attempts >= 5`` expiry guard could never fire, so a broken route retried until
+# the process died (observed: "attempt 32/5").
+_CREDENTIAL_MAX_ATTEMPTS = 5
+_TRANSIENT_MAX_ATTEMPTS = 32
+
+
+def _is_credential_error(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(marker in lowered for marker in _CREDENTIAL_MARKERS)
+
+
 class AutoTitler:
     def __init__(self, ctx, cfg: dict[str, Any], db: SessionDB | None = None):
         self.ctx = ctx
@@ -1180,21 +1206,29 @@ class AutoTitler:
             self._last_eval.pop(session_id, None)
             err = self._last_generate_errors.pop(session_id, "") or getattr(self, "_last_generate_error", "") or ""
             capacity = _is_capacity_error(err)
+            credential = _is_credential_error(err)
             with self._retry_lock:
                 meta = self._failed_sessions.get(session_id, {"attempts": 0})
                 attempts = int(meta.get("attempts", 0)) + 1
+                # Cap the counter, otherwise the ``attempts >= 5`` expiry guard above can
+                # never fire and a permanent failure retries forever (seen: "attempt 32/5").
+                ceiling = _CREDENTIAL_MAX_ATTEMPTS if credential else _TRANSIENT_MAX_ATTEMPTS
+                attempts = min(attempts, ceiling)
                 delay = min(30 * (2 ** (attempts - 1)), 600)
                 self._failed_sessions[session_id] = {
                     "attempts": attempts,
                     "next_retry_at": time.monotonic() + delay,
                     "capacity": capacity or bool(meta.get("capacity")),
+                    "credential": credential or bool(meta.get("credential")),
                 }
             log.warning(
-                "auto-titler %s: recorded failure (attempt %d%s, next retry in %ds)",
+                "auto-titler %s: recorded failure (attempt %d/%d%s, next retry in %ds)%s",
                 session_id[:12],
                 attempts,
-                ", capacity" if capacity or meta.get("capacity") else "/5",
+                ceiling,
+                ", capacity" if capacity or meta.get("capacity") else "",
                 delay,
+                " [credential — retrying will not help; check the provider route]" if credential else "",
             )
             return {"action": "failed", "reason": "model call failed"}
 

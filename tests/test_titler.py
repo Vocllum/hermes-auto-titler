@@ -81,23 +81,38 @@ class FakeDB:
 
 
 class FakeLlm:
-    def __init__(self, text, usage=None, model="fake-model", provider="fake-provider"):
+    def __init__(self, text, usage=None, model="fake-model", provider="fake-provider", exc=None):
         self.text = text
         self.usage = usage
         self.model = model
         self.provider = provider
+        self.exc = exc
         self.calls = []
 
     def complete(self, **kwargs):
         self.calls.append(kwargs)
+        if self.exc is not None:
+            raise self.exc
         return SimpleNamespace(
             text=self.text, model=self.model, provider=self.provider, usage=self.usage
         )
 
 
-def make_titler(db, text=None, cfg=None, fake_time=None):
+class UnscopedSecretError(RuntimeError):
+    """Mirror of the host exception: carries secret_name + developer_detail."""
+
+    def __init__(self, secret_name="", developer_detail=""):
+        super().__init__(
+            f"Hermes could not read this profile's {secret_name} (an internal profile-scoping "
+            "bug on the multiplexed gateway, not your configuration). Run `hermes gateway restart`"
+        )
+        self.secret_name = secret_name
+        self.developer_detail = developer_detail
+
+
+def make_titler(db, text=None, cfg=None, fake_time=None, exc=None):
     cfg = {**DEFAULTS, **(cfg or {})}
-    ctx = SimpleNamespace(llm=FakeLlm(text))
+    ctx = SimpleNamespace(llm=FakeLlm(text, exc=exc))
     t = AutoTitler(ctx, cfg, db=db)
     if fake_time is not None:
         t._last_eval = {}
@@ -671,6 +686,57 @@ def test_malformed_model_output_records_failure_and_retries():
     assert r["action"] == "failed"
     assert "model call failed" in r.get("reason", "")
     assert "s1" in t._failed_sessions
+
+
+# --- Regression: missing provider credentials must not retry forever -------------
+# Production incident (2026-09-25): the provider route resolved to a model whose key
+# was absent, so every call raised UnscopedSecretError. The failure counter was
+# unbounded, so the `attempts >= 5` expiry guard could never fire and the plugin
+# retried forever ("attempt 32/5"), while logging a canned "run `hermes gateway
+# restart`" message that could never fix it.
+
+
+def test_credential_failure_counter_is_capped():
+    db = FakeDB(messages=MSGS, title="Test 空转排查", source="llm")
+    exc = UnscopedSecretError("OPENCODE_GO_API_KEY", "no scope installed")
+    t, _ = make_titler(db, exc=exc)
+    for _ in range(20):
+        t.evaluate("s1", force=True)
+    meta = t._failed_sessions["s1"]
+    assert meta["attempts"] == 5, "credential failures must stop at the ceiling"
+    assert meta["credential"] is True
+
+
+def test_transient_failure_counter_has_a_higher_ceiling_than_credential():
+    db = FakeDB(messages=MSGS, title="Test 空转排查", source="llm")
+    t, _ = make_titler(db, text="抱歉，我无法完成这个请求。")
+    for _ in range(40):
+        t.evaluate("s1", force=True)
+    assert t._failed_sessions["s1"]["attempts"] == 32
+    assert t._failed_sessions["s1"].get("credential") is False
+
+
+def test_capped_credential_failure_is_swept_after_ceiling():
+    """The expiry guard finally fires: the session leaves the retry set."""
+    db = FakeDB(messages=MSGS, title="Test 空转排查", source="llm")
+    exc = UnscopedSecretError("OPENCODE_GO_API_KEY", "no scope installed")
+    t, _ = make_titler(db, exc=exc)
+    for _ in range(20):
+        t.evaluate("s1", force=True)
+    assert "s1" in t._failed_sessions
+    t._retry_failed_sessions()
+    assert "s1" not in t._failed_sessions
+
+
+def test_credential_error_log_names_the_key_and_denies_restart(caplog):
+    db = FakeDB(messages=MSGS, title="Test 空转排查", source="llm")
+    exc = UnscopedSecretError("OPENCODE_GO_API_KEY", "no scope installed")
+    t, _ = make_titler(db, exc=exc)
+    with caplog.at_level("ERROR", logger="hermes_auto_titler.policy"):
+        t.evaluate("s1", force=True)
+    text = caplog.text
+    assert "OPENCODE_GO_API_KEY" in text
+    assert "gateway restart" in text and "No retry and no gateway restart can fix" in text
 
 
 def test_blind_untitled_keep_is_reported_as_failed():

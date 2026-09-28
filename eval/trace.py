@@ -47,6 +47,8 @@ def extract_section_lengths(content: str) -> Dict[str, int]:
         "Sampled history:",
         "Recent:",
         "Fallback historical summary:",
+        "Compaction summary (secondary evidence):",
+        "Historical summary:",
         # Legacy prompt labels remain parseable for historical traces.
         "Opening context",
         "Visible continuation",

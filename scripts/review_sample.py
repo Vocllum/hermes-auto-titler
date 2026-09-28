@@ -133,7 +133,12 @@ def main():
         print(f"decision: {action}: {title}")
         print(f"history : {sampled}")
         if earlier_summary:
-            print(f"fallback: {clip(earlier_summary)}")
+            summary_role = (
+                "fallback"
+                if timeline.get("summary_fallback")
+                else "secondary"
+            )
+            print(f"{summary_role}: {clip(earlier_summary)}")
 
     db.close()
 

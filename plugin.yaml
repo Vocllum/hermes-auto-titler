@@ -69,7 +69,7 @@ config_schema:
   summary_preview_chars:
     type: int
     default: 1200
-    description: "Fallback compaction-summary budget when raw pre-compaction user history cannot be recovered."
+    description: "Compaction-summary budget for fallback or secondary evidence when sparse sampling omits recovered turns."
   preview_chars:
     type: int
     default: 120
@@ -93,7 +93,7 @@ config_schema:
   retitle_summary_chars:
     type: int
     default: 12000
-    description: "Fallback summary budget for blind/manual/batch regeneration when raw compacted history is unavailable (0 = preview_chars)."
+    description: "Compaction-summary budget for blind/manual/batch regeneration when used as fallback or secondary sparse-sampling evidence (0 = preview_chars)."
   max_display_width:
     type: int
     default: 40

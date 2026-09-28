@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .titler import (
     AutoTitler as _BaseAutoTitler,
@@ -96,6 +96,7 @@ class AutoTitler(_BaseAutoTitler):
         proposed: Optional[str] = None,
         earlier_summary: Optional[str] = None,
         session_id: Optional[str] = None,
+        timeline: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Optional[str]]:
         cfg_len = self.cfg.get("max_title_length")
         max_title_len = int(cfg_len) if cfg_len is not None else 24
@@ -175,6 +176,9 @@ class AutoTitler(_BaseAutoTitler):
             "Infer the durable subject from the user's goals before comparing title hypotheses. "
             "Prefer the user's purpose over tool and file names unless the user is working on those exact tools or files. "
             "The title represents the durable subject and identity of the conversation as a whole. "
+            "When turn positions are shown, use them as chronology: Opening is the initial purpose, "
+            "Sampled history shows persistence or change across the chat, and Recent is the current phase; "
+            "recency alone does not prove that the session's subject changed. "
             f"{incumbent_rule}"
             "Repeated copies across input sections count once. "
             "Prefer a single umbrella subject that covers the major work. "
@@ -189,9 +193,11 @@ class AutoTitler(_BaseAutoTitler):
             "Maintain an accurate sidebar title for this chat. Return JSON only, with no explanation.\n"
             f"{contract}\n{decision}\n{style_req}\nStrategy: {strategy}. {strategy_rule}\n"
             "Decision rules:\n"
-            "1. Infer the durable subject before comparing title hypotheses. Explicit and repeated user goals are strongest; an earlier-history "
-            "summary is supporting evidence. Assistant text may clarify a user goal but cannot establish a new subject by itself. Repeated copies "
-            "across input sections count once.\n"
+            "1. Infer the durable subject before comparing title hypotheses. Explicit and repeated user goals are strongest. "
+            "When turn positions are shown, Opening is the initial purpose, Sampled history shows persistence or change across the chat, "
+            "and Recent is the current phase; recency alone does not prove that the session's subject changed. "
+            "A fallback historical summary is secondary evidence only when raw history is unavailable. "
+            "Assistant text may clarify a user goal but cannot establish a new subject by itself. Repeated copies across input sections count once.\n"
             "2. Prefer the most specific durable subject that covers the session's sustained work. Do not replace it with a vague category. "
             "Treat recent actions, symptoms, tools, files, commands, and implementation steps as context unless the user is explicitly developing, "
             "configuring, debugging, or comparing that exact thing.\n"
@@ -227,12 +233,44 @@ class AutoTitler(_BaseAutoTitler):
         lines = []
         if input_variant == "minimal":
             # Experiment-only compact input: remove section duplication and
-            # assistant prose while retaining the sampled user trajectory. The
+            # assistant prose while retaining the sampled user history. The
             # production/default path below remains unchanged.
             lines.append("Conversation evidence:")
             compact_users = all_user or [(role, text) for role, text in opening if role == "user"]
             for _, text in compact_users:
                 lines.append(f"user: {text}")
+        elif timeline is not None:
+            total = int(timeline.get("total_user_turns", 0))
+            lines.append(f"Conversation contains {total} user turns.")
+
+            opening_rows = list(timeline.get("opening") or [])
+            if opening_rows:
+                lines.extend(["", "Opening:"])
+                for row in opening_rows:
+                    turn = int(row.get("turn", 0))
+                    lines.append(f"User turn {turn} of {total}: {row.get('user', '')}")
+
+            sampled_rows = list(timeline.get("sampled_history") or [])
+            if sampled_rows:
+                lines.extend(["", "Sampled history:"])
+                for row in sampled_rows:
+                    turn = int(row.get("turn", 0))
+                    lines.append(f"User turn {turn} of {total}: {row.get('user', '')}")
+
+            recent_rows = list(timeline.get("recent") or [])
+            if recent_rows:
+                lines.extend(["", "Recent:"])
+                for row in recent_rows:
+                    turn = int(row.get("turn", 0))
+                    lines.append(f"User turn {turn} of {total}: {row.get('user', '')}")
+                    assistant = row.get("assistant")
+                    if assistant:
+                        lines.append(
+                            f"Assistant reply after user turn {turn}: {assistant}"
+                        )
+
+            if earlier_summary:
+                lines.extend(["", "Fallback historical summary:", earlier_summary])
         else:
             if earlier_summary:
                 lines.extend(["Earlier-history summary:", earlier_summary, "", "Visible continuation:"])
@@ -294,10 +332,22 @@ class AutoTitler(_BaseAutoTitler):
             )
             text = getattr(res, "text", "") or ""
         except Exception as e:
-            log.warning("auto-titler LLM call failed: %s", e)
-            self._last_generate_error = str(e)
+            exc_type = type(e).__name__
+            exc_text = str(e)
+            typed_error = f"{exc_type}: {exc_text}" if exc_text else exc_type
+            log.warning("auto-titler LLM call failed [%s]: %s", exc_type, exc_text)
+            secret_name = getattr(e, "secret_name", "")
+            developer_detail = getattr(e, "developer_detail", "")
+            if secret_name:
+                log.warning("auto-titler LLM failure secret_name=%s", secret_name)
+            if developer_detail:
+                log.warning(
+                    "auto-titler LLM failure developer_detail=%s",
+                    developer_detail,
+                )
+            self._last_generate_error = typed_error
             if hasattr(self, "_last_generate_errors"):
-                self._last_generate_errors[sid_key] = str(e)
+                self._last_generate_errors[sid_key] = typed_error
             return "error", None
 
         self._record_usage(session_id, res)

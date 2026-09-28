@@ -34,7 +34,7 @@ Hermes names a session from its opening exchange, but conversations evolve and t
 | | |
 |---|---|
 | **Provenance-safe** | Enforces `derived < llm < user`. `derived` = Hermes' deterministic fallback from the first message; `llm` = model-generated; `user` = yours, **never overwritten**. Legacy titles without recorded provenance are protected. |
-| **Long-horizon intent tracking** | Synthesizes opening turns, recent turns, a bounded user-message trajectory, and historical compaction summaries when the original opening is evicted. Long messages use head+tail extraction to preserve late instructions. |
+| **Long-horizon intent tracking** | Presents indexed Opening, Sampled history, and Recent user turns so the title model can see where evidence sits in the chat. Long messages use head+tail extraction; compaction summaries are fallback evidence only when raw compacted history cannot be recovered. |
 | **Intent-aware capture** | Filters compaction handoffs, system noise, adjacent replay duplicates, and internal cron/subagent/background turns before they reach the title model. |
 | **Evidence-first judgment** | Infers the durable subject from conversation evidence before comparing against current or proposed titles. Explicit, repeated user goals carry highest weight; assistant responses provide context but cannot introduce new topics on their own. |
 | **First-turn takeover or coexistence** | `first_title_mode: builtin` (default) lets Hermes own initial titles; the plugin maintains multi-turn evolution without modifying host configuration. Set to `plugin` to take over evaluation from turn 1. |
@@ -47,13 +47,13 @@ Hermes names a session from its opening exchange, but conversations evolve and t
 | **Profile-isolated and auditable** | SessionDB connections are per-profile; all title calls log under `task=hermes_auto_titler` in usage metrics. |
 
 > ⚠️ **Privacy / data flow — read before enabling**
-> The plugin sends selected conversation excerpts to the title model: opening and recent turns, a sampled user-message trajectory, compacted history summaries, and attachment filename placeholders. Sampling limits are governed by `opening_turns`, `recent_turns`, `preview_chars`, `include_all_user_messages`, `user_message_threshold`, `user_message_preview_chars`, `summary_preview_chars`, and `retitle_summary_chars`. Model requests count toward your provider's usage and billing.
+> The plugin sends selected conversation excerpts to the title model: indexed Opening turns, evenly spaced Sampled history turns, Recent turns, and attachment filename placeholders. When raw pre-compaction user history is unavailable, a compaction summary is included as fallback evidence. Sampling limits are governed by `opening_turns`, `recent_turns`, `preview_chars`, `include_all_user_messages`, `user_message_threshold`, `user_message_preview_chars`, `summary_preview_chars`, and `retitle_summary_chars`. Model requests count toward your provider's usage and billing.
 
 ## 🔍 How it works
 
 1. **First-title ownership** — With `first_title_mode: builtin` (default), Hermes owns initial title generation; the plugin maintains multi-turn evolution without modifying host configuration. Set to `plugin` to evaluate from turn 1.
 2. **Cadence and close handling** — Hooks into `on_session_end` and `on_session_finalize`. Only completed foreground turns count toward `every_n_turns` (default `2`); failed, interrupted, cron, subagent, and background turns are excluded. Periodic evaluations run asynchronously. Close hooks never start network work: they wait at most 100 ms for an existing worker, then atomically persist a typed finalize intent for the next normal process lifetime.
-3. **Context construction** — Extracts opening turns, recent turns (user prompt + final assistant reply), and a bounded trajectory of earliest and latest user prompts. When history compaction has evicted the opening exchange, compaction summaries serve as historical anchors. Protocol handoffs and prompt replays are stripped before sampling.
+3. **Context construction** — Builds three non-overlapping evidence regions with real positions such as `User turn 17 of 43`: Opening contains the initial user turns, Sampled history takes evenly spaced user turns from the middle, and Recent contains the latest user turns plus their final assistant replies. Raw `compacted=1` history is preferred; a compaction summary is used only as fallback when that raw history cannot be recovered.
 4. **Evidence-first evaluation** — The auxiliary model outputs structured JSON. Conversation evidence appears before the current title to reduce anchoring bias. Explicit and repeated user intent carries the highest weight; assistant responses support but cannot introduce new topics. Structural overlap between sampled sections is discounted.
 5. **Strategy** — `conservative` keeps the existing title unless a significant, durable topic shift has occurred. `aggressive` adapts faster when the user explicitly abandons an earlier objective or sustains a new direction, but recent turns alone are still insufficient to rename.
 6. **Multi-round confirmation** — Under `rename_confirmations: N`, proposed `llm` → `llm` renames are held as pending until confirmed across N subsequent evaluations. A different candidate resets the counter. Initial titling, `derived` upgrades, and manual `rename-now` bypass this gate.
@@ -63,7 +63,7 @@ Hermes names a session from its opening exchange, but conversations evolve and t
 <summary><b>Design decisions worth knowing</b></summary>
 
 - **Why continuous maintenance instead of better first-message titling?** An opening exchange cannot anticipate where a conversation leads. Long sessions need titles that evolve with the user's actual objectives.
-- **Why sample intent trajectory instead of full transcripts?** The title model needs durable intent, not tool execution noise. The plugin preserves opening and recent context alongside a bounded trajectory of key user prompts, using head+tail extraction for long messages.
+- **Why Sampled history instead of full transcripts?** The title model needs temporal coverage without every tool/action detail. Opening and Recent retain their distinct roles, while Sampled history jumps evenly through the middle of the user-turn timeline. Every selected long user message preserves both its beginning and end.
 - **Why infer the subject before inspecting current titles?** Existing titles work as comparison baselines but not as evidence. Analyzing conversation evidence first avoids anchoring on outdated labels.
 - **Why queue on session close instead of calling the model?** Hermes gives finalization a bounded shutdown window. Close hooks therefore make no network call, wait at most 100 ms for already-running work, and durably queue an epoch-tagged finalize intent. The retry worker processes it during a normal lifecycle without bypassing provenance or review gates.
 - **Why require one review endorsement by default?** A single rename trigger can reflect a temporary detour. Requiring one subsequent endorsement provides a defense against title flutter; set `rename_confirmations: 0` for immediate updates, or increase N for stricter stability.
@@ -154,13 +154,13 @@ Settings resolve per key, in this order: `ctx.get_config()` → host `plugins.en
 | `every_n_turns` | `2` | Evaluate every N completed foreground turns. |
 | `first_title_mode` | `builtin` | `builtin` = Hermes owns first-title generation; `plugin` = the plugin evaluates from turn 1. Neither mode writes host configuration. Changes take effect at plugin load (restart). |
 | `on_close` | `true` | On close/finalize, wait at most 100 ms for existing work and persist a typed finalize intent; never start a network call from the close hook. |
-| `recent_turns` / `opening_turns` | `2` / `2` | Context window in real user turns; each selected turn keeps the user message + last assistant reply. |
+| `recent_turns` / `opening_turns` | `2` / `2` | Non-overlapping real-user-turn anchors. Opening keeps user text only; Recent also keeps the last assistant reply for each selected turn. |
 | `ignore_model_messages` | `false` | Exclude assistant messages from captured context (A/B testing). |
-| `preview_chars` | `400` | Per-message preview budget for opening/recent context. Multi-sentence messages use head+tail extraction. |
-| `include_all_user_messages` | `true` | Append the sampled user-message trajectory. |
-| `user_message_threshold` | `40` | Max trajectory length; over the limit, keep the first message + most recent N−1. `0` = unlimited. |
-| `user_message_preview_chars` | `300` | Per-message trajectory budget with head+tail extraction. `0` = unlimited. |
-| `summary_preview_chars` | `1200` | Compaction-summary budget for normal evaluations. |
+| `preview_chars` | `120` | Per-message budget for Opening/Recent evidence. Long user messages preserve both head and tail. |
+| `include_all_user_messages` | `true` | Include Sampled history between Opening and Recent. The key name is retained for config compatibility. |
+| `user_message_threshold` | `40` | Maximum user-turn evidence budget across Opening + Sampled history + Recent; middle samples are evenly spaced. `0` = unlimited middle history. |
+| `user_message_preview_chars` | `300` | Per-message Sampled history budget with head+tail extraction. `0` = unlimited. |
+| `summary_preview_chars` | `1200` | Fallback compaction-summary budget when raw pre-compaction user history is unavailable. |
 | `retitle_summary_chars` | `12000` | Compaction-summary budget for blind/manual/bulk regeneration; `0` falls back to `preview_chars`. |
 | `title_style` | `concise` | `concise` = subject label · `complete` = short event/intent summary (wider display budget). |
 | `strategy` | `conservative` | `conservative` = rename only on material durable mismatch; `aggressive` = follow explicit goal abandonment or sustained new direction sooner, ignoring one-off subtasks and tool changes. |
@@ -188,7 +188,7 @@ Most options take effect immediately. `enabled` requires a restart if hooks were
 
 ## 💰 Cost
 
-**Input size per evaluation is bounded, not fixed.** Opening and recent turns use `preview_chars=400` by default; the user trajectory keeps up to 40 messages at up to 300 chars each; compaction summaries can add up to 1,200 chars. Short conversations use far fewer tokens, but long sessions with full trajectories can exceed the typical 1–3K character baseline.
+**Input size per evaluation is bounded, not fixed.** Opening and Recent use `preview_chars=120` per selected message; the default 40-user-turn evidence budget is split across Opening, evenly spaced Sampled history, and Recent. Sampled history uses up to 300 characters per selected user message. A compaction summary can add up to 1,200 characters only on the fallback path.
 
 The plugin requests `max_tokens=64`, but some OpenAI-compatible providers may not enforce output limits upstream. During benchmark runs, an unconstrained model produced **597 input / 1,639 output tokens** due to internal reasoning before emitting JSON. Budget for your provider's actual token accounting, not a hard 64-token ceiling.
 

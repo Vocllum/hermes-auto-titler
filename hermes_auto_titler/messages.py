@@ -571,15 +571,18 @@ def sample_middle_turn_indices(
     """Choose evenly spaced user-turn indices only from the middle of the chat.
 
     Opening and recent turns are semantic anchors and are never re-selected here.
-    limit <= 0 keeps the whole middle region. Returned indices are zero-based
-    and deterministic; each selected point is near the center of an equal time bucket.
+    limit < 0 keeps the whole middle region; limit == 0 selects none.
+    Returned indices are zero-based and deterministic; each selected point is
+    near the center of an equal time bucket.
     """
     if total_turns <= 0:
         return []
     start = min(max(0, opening_count), total_turns)
     end = max(start, total_turns - max(0, recent_count))
     candidates = list(range(start, end))
-    if limit <= 0 or len(candidates) <= limit:
+    if limit == 0:
+        return []
+    if limit < 0 or len(candidates) <= limit:
         return candidates
     if limit == 1:
         return [candidates[len(candidates) // 2]]
@@ -800,7 +803,7 @@ def load_context_with_summary(
 
         if include_all_user:
             if user_message_threshold <= 0:
-                middle_limit = 0
+                middle_limit = -1
             else:
                 middle_limit = max(
                     0,

@@ -145,6 +145,36 @@ def _retry_class(text: str) -> str:
     return "temporary"
 
 
+def _meta_retry_class(meta: Dict[str, Any]) -> str:
+    """Read the latest retry class, with compatibility for older state files."""
+    value = str(meta.get("retry_class") or "").strip().lower()
+    if value in {"temporary", "capacity", "blocked"}:
+        return value
+    return "capacity" if bool(meta.get("capacity")) else "temporary"
+
+
+def _next_class_attempt(meta: Dict[str, Any], retry_class: str) -> int:
+    """Count consecutive failures of the current class without hiding total attempts."""
+    previous_class = _meta_retry_class(meta)
+    previous_count = int(meta.get("class_attempts", 0))
+    if previous_count <= 0 and previous_class == retry_class:
+        previous_count = int(meta.get("attempts", 0))
+    return previous_count + 1 if previous_class == retry_class else 1
+
+
+def _retry_delay(retry_class: str, class_attempts: int) -> int:
+    """Backoff by current failure class.
+
+    Temporary finalize failures probe less often after five consecutive failures
+    instead of becoming permanently parked. Capacity failures keep the shorter
+    recovery probe cadence. Blocked failures are parked in-memory separately.
+    """
+    n = max(1, int(class_attempts))
+    if retry_class == "temporary" and n >= 5:
+        return 1800 if n == 5 else 3600
+    return min(30 * (2 ** min(n - 1, 5)), 600)
+
+
 class AutoTitler:
     def __init__(self, ctx, cfg: dict[str, Any], db: SessionDB | None = None):
         self.ctx = ctx
@@ -308,17 +338,19 @@ class AutoTitler:
                 finalize = self._finalize_intents.get(sid)
                 retry = self._failed_sessions.get(sid)
                 meta = finalize or retry or {}
-                attempts = int(meta.get("attempts", 0))
-                capacity = bool(meta.get("capacity"))
+                retry_class = _meta_retry_class(meta)
+                class_attempts = int(
+                    meta.get("class_attempts", meta.get("attempts", 0))
+                )
                 parked = bool(meta.get("parked"))
                 if parked:
                     continue
-                if finalize is None and attempts >= 5 and not capacity:
+                if (
+                    finalize is None
+                    and retry_class == "temporary"
+                    and class_attempts >= 5
+                ):
                     expired.append(sid)
-                elif finalize is not None and attempts >= 5 and not capacity:
-                    # A terminal intent must remain recorded, but repeated
-                    # temporary failures must not schedule network calls forever.
-                    finalize["parked"] = True
                 elif now >= float(meta.get("next_retry_at", 0)):
                     candidates.append(sid)
             for sid in expired:
@@ -608,20 +640,14 @@ class AutoTitler:
                                     (result or {}).get("retry_class") or "temporary"
                                 )
                                 attempts = int(meta.get("attempts", 0)) + 1
-                                delay = min(30 * (2 ** (attempts - 1)), 600)
+                                class_attempts = _next_class_attempt(meta, retry_class)
+                                delay = _retry_delay(retry_class, class_attempts)
                                 meta["attempts"] = attempts
-                                meta["capacity"] = (
-                                    retry_class == "capacity"
-                                    or bool(meta.get("capacity"))
-                                )
+                                meta["class_attempts"] = class_attempts
+                                meta["capacity"] = retry_class == "capacity"
                                 meta["retry_class"] = retry_class
-                                if retry_class == "blocked" or (
-                                    retry_class == "temporary" and attempts >= 5
-                                ):
-                                    # Keep the terminal obligation in memory,
-                                    # but stop automatic network calls until the
-                                    # process restarts or the intent is replaced.
-                                    meta["parked"] = True
+                                meta["parked"] = retry_class == "blocked"
+                                if retry_class == "blocked":
                                     log.warning(
                                         "auto-titler finalize parked for %s after %d attempt(s), class=%s",
                                         session_id[:12],
@@ -642,13 +668,14 @@ class AutoTitler:
                         meta = self._finalize_intents.get(session_id)
                         if meta and int(meta.get("close_epoch", 0)) <= worker_epoch:
                             attempts = int(meta.get("attempts", 0)) + 1
-                            delay = min(30 * (2 ** (attempts - 1)), 600)
+                            class_attempts = _next_class_attempt(meta, "temporary")
+                            delay = _retry_delay("temporary", class_attempts)
                             meta["attempts"] = attempts
+                            meta["class_attempts"] = class_attempts
+                            meta["capacity"] = False
                             meta["retry_class"] = "temporary"
-                            if attempts >= 5:
-                                meta["parked"] = True
-                            else:
-                                meta["next_retry_at"] = time.monotonic() + delay
+                            meta["parked"] = False
+                            meta["next_retry_at"] = time.monotonic() + delay
                             self._persist_state_locked()
 
                 with self._inflight_lock:
@@ -785,8 +812,10 @@ class AutoTitler:
         # typed ledger so a stale ordinary worker cannot erase it.
         self._finalize_intents[session_id] = {
             "attempts": 0,
+            "class_attempts": 0,
             "next_retry_at": time.monotonic(),
             "capacity": False,
+            "retry_class": "temporary",
             "reason": reason,
             "queued_at": now_wall,
             "base_title": pending.get("base_title", base_title),
@@ -870,10 +899,15 @@ class AutoTitler:
 
             def serialize_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
                 next_retry_at = float(meta.get("next_retry_at", now_mono))
+                retry_class = _meta_retry_class(meta)
                 return {
                     "attempts": int(meta.get("attempts", 0)),
+                    "class_attempts": int(
+                        meta.get("class_attempts", meta.get("attempts", 0))
+                    ),
                     "next_retry_at": now_wall + max(0.0, next_retry_at - now_mono),
-                    "capacity": bool(meta.get("capacity", False)),
+                    "capacity": retry_class == "capacity",
+                    "retry_class": retry_class,
                     "queued_at": float(meta.get("queued_at", now_wall)),
                     "reason": str(meta.get("reason") or "error"),
                 }
@@ -974,8 +1008,10 @@ class AutoTitler:
                 ):
                     legacy_meta = {
                         "attempts": raw.get("attempts", 0),
+                        "class_attempts": raw.get("class_attempts", raw.get("attempts", 0)),
                         "next_retry_at": raw.get("next_retry_at", now_wall),
                         "capacity": raw.get("capacity", False),
+                        "retry_class": raw.get("retry_class"),
                         "queued_at": raw.get("queued_at", now_wall),
                         "reason": raw.get("reason", "error"),
                     }
@@ -999,10 +1035,22 @@ class AutoTitler:
                         typed.get("reason") or ("finalize" if finalize else "error")
                     )
                     close_epoch = max(0, int(typed.get("close_epoch", 0)))
+                    typed_class = str(typed.get("retry_class") or "").strip().lower()
+                    if typed_class not in {"temporary", "capacity", "blocked"}:
+                        typed_class = (
+                            "capacity" if bool(typed.get("capacity", False))
+                            else "temporary"
+                        )
+                    class_attempts = max(
+                        0,
+                        int(typed.get("class_attempts", attempts)),
+                    )
                     meta = {
                         "attempts": attempts,
+                        "class_attempts": class_attempts,
                         "next_retry_at": now_mono + max(0.0, retry_wall - now_wall),
-                        "capacity": bool(typed.get("capacity", False)),
+                        "capacity": typed_class == "capacity",
+                        "retry_class": typed_class,
                         "reason": reason,
                         "queued_at": queued_at,
                         "base_title": base_title,
@@ -1253,14 +1301,13 @@ class AutoTitler:
                 with self._retry_lock:
                     meta = self._failed_sessions.get(session_id, {"attempts": 0})
                     attempts = int(meta.get("attempts", 0)) + 1
-                    delay = min(30 * (2 ** (attempts - 1)), 600)
+                    class_attempts = _next_class_attempt(meta, retry_class)
+                    delay = _retry_delay(retry_class, class_attempts)
                     self._failed_sessions[session_id] = {
                         "attempts": attempts,
+                        "class_attempts": class_attempts,
                         "next_retry_at": time.monotonic() + delay,
-                        "capacity": (
-                            retry_class == "capacity"
-                            or bool(meta.get("capacity"))
-                        ),
+                        "capacity": retry_class == "capacity",
                         "retry_class": retry_class,
                         "parked": retry_class == "blocked",
                     }
@@ -1339,6 +1386,7 @@ class AutoTitler:
                         delay = min(30 * (2 ** (attempts - 1)), 600)
                         self._failed_sessions[session_id] = {
                             "attempts": attempts,
+                            "class_attempts": _next_class_attempt(meta, "temporary"),
                             "next_retry_at": time.monotonic() + delay,
                             "capacity": False,
                             "retry_class": "temporary",

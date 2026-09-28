@@ -804,8 +804,49 @@ def test_pending_finalize_worker_keeps_intent_for_confirmation(tmp_path, monkeyp
 
     # pending is a review/lifecycle state, not a provider failure.
     assert titler._finalize_intents["s1"]["attempts"] == 0
+    assert titler._finalize_intents["s1"]["class_attempts"] == 0
     assert titler._finalize_intents["s1"]["next_retry_at"] > 0
     assert StateStore(path).load()["sessions"]["s1"]["finalize_intent"] is True
+
+
+def test_pending_finalize_breaks_temporary_failure_streak(tmp_path, monkeypatch):
+    import threading
+
+    path = tmp_path / "state.json"
+    titler = make_titler(SessionDB({"s1": ("旧标题", "llm")}), path)
+    titler._queue_session("s1", reason="finalize", close_epoch=1)
+    titler._closing_epochs["s1"] = 1
+    intent = titler._finalize_intents["s1"]
+    intent["attempts"] = 4
+    intent["class_attempts"] = 4
+    intent["retry_class"] = "temporary"
+    intent["capacity"] = False
+
+    responses = [
+        {"action": "pending", "candidate": "待审标题"},
+        {"action": "failed", "reason": "model call failed", "retry_class": "temporary"},
+    ]
+
+    def evaluate(session_id, force=False):
+        return responses.pop(0)
+
+    monkeypatch.setattr(titler, "evaluate", evaluate)
+
+    titler._eval_worker("s1", threading.Event(), worker_epoch=1)
+    intent = titler._finalize_intents["s1"]
+    assert intent["attempts"] == 4
+    assert intent["class_attempts"] == 0
+
+    titler._eval_worker("s1", threading.Event(), worker_epoch=1)
+    intent = titler._finalize_intents["s1"]
+    assert intent["attempts"] == 5
+    assert intent["class_attempts"] == 1
+    assert intent["retry_class"] == "temporary"
+    assert intent["next_retry_at"] - __import__("time").monotonic() < 60
+
+    saved = StateStore(path).load()["sessions"]["s1"]["finalize"]
+    assert saved["attempts"] == 5
+    assert saved["class_attempts"] == 1
 
 
 def test_unknown_anchor_intent_is_not_covered_by_ordinary_turn_worker(tmp_path, monkeypatch):

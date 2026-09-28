@@ -160,7 +160,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `ignore_model_messages` | `false` | 从捕获上下文中排除 assistant 消息（主要用于 A/B 测试）。 |
 | `preview_chars` | `120` | Opening/Recent 单条消息预算；长用户消息始终同时保留首部与尾部。 |
 | `include_all_user_messages` | `true` | 在 Opening 与 Recent 之间加入 Sampled history；键名为兼容旧配置继续保留。 |
-| `user_message_threshold` | `40` | Opening + Sampled history + Recent 的用户轮总证据预算；中段按时间均匀跳取。`0` = 中段不限。 |
+| `user_message_threshold` | `40` | 用户轮证据的目标预算。Opening / Recent 锚点始终保留，因此数值小于锚点数量时总量可超过该值；剩余名额给中段均匀跳取。`0` = 中段不限。 |
 | `user_message_preview_chars` | `300` | Sampled history 单条用户消息的首尾提取预算。`0` = 不限。 |
 | `summary_preview_chars` | `1200` | 无法恢复压缩前原始用户历史时，兜底摘要的日常预算。 |
 | `retitle_summary_chars` | `12000` | blind/手动/批量重生成时的压缩摘要预算；`0` 时回退到 `preview_chars`。 |

@@ -2026,7 +2026,9 @@ def test_overloaded_model_error_is_queued_as_capacity():
     assert t._failed_sessions["s1"]["capacity"] is True
 
 
-def test_unscoped_secret_error_is_logged_verbatim_and_automatic_retry_is_parked():
+def test_unscoped_secret_error_is_logged_verbatim_and_automatic_retry_is_parked(
+    recording_threads,
+):
     class UnscopedSecretError(RuntimeError):
         def __init__(self):
             super().__init__(
@@ -2037,11 +2039,20 @@ def test_unscoped_secret_error_is_logged_verbatim_and_automatic_retry_is_parked(
             self.developer_detail = "spawn-site lost the profile context"
 
     class BoomLlm:
+        def __init__(self):
+            self.calls = 0
+
         def complete(self, **kw):
+            self.calls += 1
             raise UnscopedSecretError()
 
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
-    t = AutoTitler(SimpleNamespace(llm=BoomLlm()), {**DEFAULTS}, db=db)
+    llm = BoomLlm()
+    t = AutoTitler(
+        SimpleNamespace(llm=llm),
+        {**DEFAULTS, "every_n_turns": 1},
+        db=db,
+    )
     result = t.evaluate("s1", force=True)
 
     assert result["action"] == "failed"
@@ -2055,6 +2066,17 @@ def test_unscoped_secret_error_is_logged_verbatim_and_automatic_retry_is_parked(
     t._failed_sessions["s1"]["next_retry_at"] = time.monotonic() - 1
     t._retry_failed_sessions()
     assert submitted == []
+
+    # Normal hook-driven evaluation also respects the process-local park.
+    before_calls = llm.calls
+    t.on_session_end(session_id="s1", completed=True)
+    assert recording_threads.instances == []
+    assert llm.calls == before_calls
+
+    # Explicit/manual force evaluation bypasses automatic scheduling and may retry.
+    manual = t.evaluate("s1", force=True)
+    assert manual["action"] == "failed"
+    assert llm.calls == before_calls + 1
 
 
 def test_finalize_temporary_failure_switches_to_long_backoff_and_survives_restart(

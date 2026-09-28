@@ -96,7 +96,7 @@ on_session_end
 
 三段证据互不重复。Python 只提供真实时间位置，不判断哪一段属于“主线”、哪一段属于“支线”；主题归纳继续由标题模型完成。
 
-`include_all_user_messages=true` 是历史兼容键名，生产语义已经是 **Sampled history**。默认 `user_message_threshold=40` 作为用户轮证据采样上限；Opening / Recent 作为语义锚点始终保留，中段使用剩余名额。阈值为 0 时中段不设数量上限。
+`include_all_user_messages=true` 是历史兼容键名，生产语义已经是 **Sampled history**。默认 `user_message_threshold=40` 是用户轮证据的目标预算，不是对锚点的硬上限。Opening / Recent 始终保留，因此极小阈值可能被锚点数量超过；中段只使用剩余名额。阈值为 0 时中段不设数量上限。短会话优先满足 Recent，再至少保留一个 Opening。
 
 长用户消息统一使用 `smart_preview()` 保留首部与尾部，即使单条消息没有明显句号或换行，也不会再退化成只截开头。Opening / Recent 使用 `preview_chars`，Sampled history 使用 `user_message_preview_chars`。
 

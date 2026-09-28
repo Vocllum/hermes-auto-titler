@@ -1375,6 +1375,45 @@ def test_early_gate_fail_safe_on_source_error(recording_threads):
 
 # -- 异步健壮性：Context 传播 / 线程失败 / DB 单例 ----------------------------
 
+def test_dirty_rerun_is_dropped_when_first_eval_parks_blocked(monkeypatch):
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    t, _ = make_titler(db)
+    event = threading.Event()
+    calls = []
+
+    # Reproduce the race: a second hook arrived while the first automatic
+    # evaluation was still in flight, so a dirty rerun is already queued.
+    t._inflight["s1"] = event
+    t._worker_epochs["s1"] = 0
+    t._dirty_sessions.add("s1")
+    t._dirty_override_intents.add("s1")
+
+    def blocked_evaluate(session_id, force=False, claim_epoch=None):
+        calls.append((session_id, force, claim_epoch))
+        t._failed_sessions[session_id] = {
+            "attempts": 1,
+            "class_attempts": 1,
+            "next_retry_at": time.monotonic(),
+            "capacity": False,
+            "retry_class": "blocked",
+            "parked": True,
+        }
+        return {
+            "action": "failed",
+            "reason": "model call failed",
+            "retry_class": "blocked",
+        }
+
+    monkeypatch.setattr(t, "evaluate", blocked_evaluate)
+    t._eval_worker("s1", event)
+
+    assert len(calls) == 1
+    assert "s1" not in t._dirty_sessions
+    assert "s1" not in t._dirty_override_intents
+    assert "s1" not in t._inflight
+    assert event.is_set()
+
+
 def test_worker_context_propagated_via_host_wrapper(monkeypatch, recording_threads):
     fake_tools = types.ModuleType("tools")
     fake_tc = types.ModuleType("tools.thread_context")

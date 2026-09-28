@@ -34,6 +34,26 @@ def test_extract_section_lengths():
     assert all(isinstance(v, int) and v > 0 for v in secs.values())
 
 
+def test_extract_section_lengths_indexed_sampled_history():
+    prompt = (
+        "Conversation contains 12 user turns.\n\n"
+        "Opening:\n"
+        "User turn 1 of 12: 最初目标\n\n"
+        "Sampled history:\n"
+        "User turn 6 of 12: 中段进展\n\n"
+        "Recent:\n"
+        "User turn 12 of 12: 当前阶段\n\n"
+        "Fallback historical summary:\n"
+        "旧宿主摘要\n\n"
+        "Current title: 标题"
+    )
+    secs = extract_section_lengths(prompt)
+    assert any(k.startswith("Opening:") for k in secs)
+    assert any(k.startswith("Sampled history:") for k in secs)
+    assert any(k.startswith("Recent:") for k in secs)
+    assert any(k.startswith("Fallback historical summary:") for k in secs)
+
+
 def test_trace_llm_success_and_sink(tmp_path):
     sink = []
     private_dir = tmp_path / "private"

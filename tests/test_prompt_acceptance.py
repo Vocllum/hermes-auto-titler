@@ -89,6 +89,26 @@ def test_build_prefixes_progresses_without_duplicate_boundaries():
     assert [p.number for p in build_prefixes(turns, config, "2,all,2")] == [2, 6]
 
 
+def test_build_prefixes_uses_production_timeline_with_opening_assistant():
+    turns = [
+        [
+            ("user", "这个怎么改"),
+            ("assistant", "这是 Bitwig Studio 控制脚本的参数问题"),
+        ]
+    ]
+    config = {
+        "opening_turns": 2,
+        "recent_turns": 2,
+        "preview_chars": 120,
+        "include_all_user_messages": True,
+        "user_message_preview_chars": 300,
+        "user_message_threshold": 40,
+    }
+    [prefix] = build_prefixes(turns, config, "all")
+    assert prefix.timeline["recent"] == []
+    assert prefix.timeline["opening"][0]["assistant"] == "这是 Bitwig Studio 控制脚本的参数问题"
+
+
 def test_extract_turns_discards_machine_noise_and_summaries():
     messages = [
         {"role": "user", "content": "真实目标"},

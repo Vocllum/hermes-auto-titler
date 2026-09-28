@@ -84,14 +84,14 @@ def main():
     print(
         "# production-config review "
         f"blind={'on' if args.blind else 'off'} strategy={cfg.get('strategy')} route={route} "
-        f"preview={cfg.get('preview_chars')} trajectory={cfg.get('user_message_threshold')} "
+        f"preview={cfg.get('preview_chars')} sampled_history={cfg.get('user_message_threshold')} "
         f"summary={summary_chars}; skipped user titles={skipped_user}"
     )
 
     for i, (row, tsrc) in enumerate(picked, 1):
         sid = row["id"]
         current = row.get("title") or ""
-        recent, all_user, opening, earlier_summary = load_context_with_summary(
+        recent, all_user, opening, earlier_summary, timeline = load_context_with_summary(
             db,
             sid,
             recent_turns=int(cfg.get("recent_turns", 2)),
@@ -102,6 +102,7 @@ def main():
             user_message_threshold=int(cfg.get("user_message_threshold", 40)),
             user_message_preview_chars=int(cfg.get("user_message_preview_chars", 300)),
             summary_chars=summary_chars,
+            include_timeline=True,
         )
         action, title = titler._generate(
             current,
@@ -111,21 +112,28 @@ def main():
             blind=args.blind,
             earlier_summary=earlier_summary,
             session_id=sid,
+            timeline=timeline,
         )
 
         n_msgs = row.get("message_count") or 0
-        n_user = len(all_user)
-        traj = " | ".join(clip(t, 80) for _, t in all_user[:8])
-        if len(all_user) > 8:
-            traj += f" …（采样后共 {n_user} 条）"
+        sampled_rows = list(timeline.get("sampled_history") or [])
+        sampled = " | ".join(
+            f"{row['turn']}:{clip(str(row.get('user') or ''), 80)}"
+            for row in sampled_rows[:8]
+        )
+        if len(sampled_rows) > 8:
+            sampled += f" …（采样后共 {len(sampled_rows)} 条）"
 
         guard = " [legacy NULL protected]" if tsrc is None and current else ""
-        print(f"\n===== [{i}] {sid[:16]} messages={n_msgs} sampled_users={n_user} source={tsrc}{guard}")
+        print(
+            f"\n===== [{i}] {sid[:16]} messages={n_msgs} "
+            f"user_turns={timeline.get('total_user_turns', 0)} source={tsrc}{guard}"
+        )
         print(f"current : {current or '(empty)'}")
         print(f"decision: {action}: {title}")
-        print(f"intent  : {traj}")
+        print(f"history : {sampled}")
         if earlier_summary:
-            print(f"summary : {clip(earlier_summary)}")
+            print(f"fallback: {clip(earlier_summary)}")
 
     db.close()
 

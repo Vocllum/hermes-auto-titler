@@ -197,6 +197,8 @@ class AutoTitler(_BaseAutoTitler):
             "Infer the durable subject from the user's goals before comparing titles. "
             "Prefer user purpose over tool or file names unless that exact thing is the subject. "
             "Assistant replies may clarify the specific subject named or implied by the user, but cannot create an unrelated subject. "
+            "Compaction summaries, when present, are secondary compressed evidence that may preserve transitions omitted by sparse sampling; "
+            "raw user turns define chronology. "
             f"{chronology_rule}"
             f"{incumbent_rule}"
             "Prefer one umbrella subject for the major work. Omit incidental troubleshooting and subordinate tasks. "

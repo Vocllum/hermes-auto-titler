@@ -158,7 +158,7 @@ Settings resolve per key, in this order: `ctx.get_config()` → host `plugins.en
 | `ignore_model_messages` | `false` | Exclude assistant messages from captured context (A/B testing). |
 | `preview_chars` | `120` | Per-message budget for Opening/Recent evidence. Long user messages preserve both head and tail. |
 | `include_all_user_messages` | `true` | Include Sampled history between Opening and Recent. The key name is retained for config compatibility. |
-| `user_message_threshold` | `40` | Maximum user-turn evidence budget across Opening + Sampled history + Recent; middle samples are evenly spaced. `0` = unlimited middle history. |
+| `user_message_threshold` | `40` | Target user-turn evidence budget. Opening and Recent anchors are always retained, so very small values may be exceeded; remaining slots go to evenly spaced Sampled history. `0` = unlimited middle history. |
 | `user_message_preview_chars` | `300` | Per-message Sampled history budget with head+tail extraction. `0` = unlimited. |
 | `summary_preview_chars` | `1200` | Fallback compaction-summary budget when raw pre-compaction user history is unavailable. |
 | `retitle_summary_chars` | `12000` | Compaction-summary budget for blind/manual/bulk regeneration; `0` falls back to `preview_chars`. |

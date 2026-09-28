@@ -170,13 +170,28 @@ class AutoTitler(_BaseAutoTitler):
             "The current title is the incumbent and stays unless clearly mismatched. "
             if not (blind or force_rename) else ""
         )
+        fallback_timeline = bool(
+            timeline
+            and earlier_summary
+            and timeline.get("summary_fallback")
+        )
+        if fallback_timeline:
+            chronology_rule = (
+                "Fallback historical summary is earlier history. Visible continuation "
+                "happens after compaction, and Recent is its latest phase; do not treat "
+                "the start of the visible continuation as the conversation opening. "
+            )
+        else:
+            chronology_rule = (
+                "Turn positions are chronology: Opening shows initial purpose, Sampled history spans the chat, "
+                "and Recent shows the current phase; recency alone does not prove a subject shift. "
+            )
         concise_system = (
             "Maintain a concise sidebar title for this chat. Return JSON only, with no explanation.\n"
             f"{contract}\n{decision}\n{style_req}\nStrategy: {strategy}. {strategy_rule}\n"
             "Infer the durable subject from the user's goals before comparing titles. "
             "Prefer user purpose over tool or file names unless that exact thing is the subject. "
-            "Turn positions are chronology: Opening shows initial purpose, Sampled history spans the chat, "
-            "and Recent shows the current phase; recency alone does not prove a subject shift. "
+            f"{chronology_rule}"
             f"{incumbent_rule}"
             "Prefer one umbrella subject for the major work. Omit incidental troubleshooting and subordinate tasks. "
             "Replace an earlier subject only when it was abandoned or became minor.\n"
@@ -189,8 +204,7 @@ class AutoTitler(_BaseAutoTitler):
             f"{contract}\n{decision}\n{style_req}\nStrategy: {strategy}. {strategy_rule}\n"
             "Decision rules:\n"
             "1. Infer the durable subject before comparing title hypotheses. Explicit and repeated user goals are strongest. "
-            "Turn positions are chronology: Opening shows initial purpose, Sampled history spans the chat, "
-            "and Recent shows the current phase; recency alone does not prove a subject shift. "
+            f"{chronology_rule}"
             "A fallback historical summary is secondary evidence only when raw history is unavailable. "
             "Assistant text may clarify a user goal but cannot establish a new subject by itself. Repeated copies across input sections count once.\n"
             "2. Prefer the most specific durable subject that covers the session's sustained work. Do not replace it with a vague category. "
@@ -236,35 +250,62 @@ class AutoTitler(_BaseAutoTitler):
                 lines.append(f"user: {text}")
         elif timeline is not None:
             total = int(timeline.get("total_user_turns", 0))
-            lines.append(f"Conversation contains {total} user turns.")
-
             opening_rows = list(timeline.get("opening") or [])
-            if opening_rows:
-                lines.extend(["", "Opening:"])
-                for row in opening_rows:
-                    turn = int(row.get("turn", 0))
-                    lines.append(f"User turn {turn} of {total}: {row.get('user', '')}")
-
             sampled_rows = list(timeline.get("sampled_history") or [])
-            if sampled_rows:
-                lines.extend(["", "Sampled history:"])
-                for row in sampled_rows:
-                    turn = int(row.get("turn", 0))
-                    lines.append(f"User turn {turn} of {total}: {row.get('user', '')}")
-
             recent_rows = list(timeline.get("recent") or [])
+
+            if fallback_timeline:
+                lines.append(
+                    f"Conversation contains {total} visible user turns after compaction."
+                )
+                lines.extend(["", "Fallback historical summary:", earlier_summary or ""])
+                lines.extend(["", "Visible continuation:"])
+                if opening_rows:
+                    lines.append("Visible start:")
+                    for row in opening_rows:
+                        turn = int(row.get("turn", 0))
+                        lines.append(
+                            f"Visible user turn {turn} of {total}: {row.get('user', '')}"
+                        )
+                if sampled_rows:
+                    lines.append("Sampled continuation:")
+                    for row in sampled_rows:
+                        turn = int(row.get("turn", 0))
+                        lines.append(
+                            f"Visible user turn {turn} of {total}: {row.get('user', '')}"
+                        )
+            else:
+                lines.append(f"Conversation contains {total} user turns.")
+                if opening_rows:
+                    lines.extend(["", "Opening:"])
+                    for row in opening_rows:
+                        turn = int(row.get("turn", 0))
+                        lines.append(
+                            f"User turn {turn} of {total}: {row.get('user', '')}"
+                        )
+                if sampled_rows:
+                    lines.extend(["", "Sampled history:"])
+                    for row in sampled_rows:
+                        turn = int(row.get("turn", 0))
+                        lines.append(
+                            f"User turn {turn} of {total}: {row.get('user', '')}"
+                        )
+
             if recent_rows:
                 lines.extend(["", "Recent:"])
                 for row in recent_rows:
                     turn = int(row.get("turn", 0))
-                    lines.append(f"User turn {turn} of {total}: {row.get('user', '')}")
+                    prefix = "Visible user turn" if fallback_timeline else "User turn"
+                    lines.append(
+                        f"{prefix} {turn} of {total}: {row.get('user', '')}"
+                    )
                     assistant = row.get("assistant")
                     if assistant:
                         lines.append(
                             f"Assistant reply after user turn {turn}: {assistant}"
                         )
 
-            if earlier_summary:
+            if earlier_summary and not fallback_timeline:
                 lines.extend(["", "Fallback historical summary:", earlier_summary])
         else:
             if earlier_summary:

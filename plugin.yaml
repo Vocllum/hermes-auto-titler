@@ -61,7 +61,7 @@ config_schema:
   opening_turns:
     type: int
     default: 2
-    description: "Opening user turns shown with real turn positions as initial-purpose evidence."
+    description: "Opening user turns shown with real positions plus each turn's final cleaned assistant reply."
   recent_turns:
     type: int
     default: 2

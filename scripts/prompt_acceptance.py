@@ -250,12 +250,13 @@ def build_prefixes(turns: list[list[tuple[str, str]]], raw_config: dict[str, Any
         total = len(prefix_turns)
         if total <= 1:
             timeline_opening_count = total
+            timeline_recent_count = 0
         else:
-            timeline_opening_count = min(opening_k, total - 1)
-        timeline_recent_count = min(
-            recent_k,
-            max(0, total - timeline_opening_count),
-        )
+            timeline_recent_count = min(recent_k, total - 1)
+            timeline_opening_count = min(
+                opening_k,
+                max(0, total - timeline_recent_count),
+            )
         recent_start = total - timeline_recent_count
         if raw_config.get("include_all_user_messages", True):
             middle_limit = (

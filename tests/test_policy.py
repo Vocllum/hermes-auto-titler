@@ -369,7 +369,7 @@ def test_recovered_raw_sparse_timeline_renders_summary_as_secondary_evidence():
     system = llm.calls[-1]["messages"][0]["content"]
     prompt = llm.calls[-1]["messages"][1]["content"]
 
-    assert "Compaction summaries are compressed secondary evidence" in system
+    assert "Compaction summaries, when present, are secondary compressed evidence" in system
     assert prompt.index("Opening:") < prompt.index("Compaction summary (secondary evidence):")
     assert prompt.index("Compaction summary (secondary evidence):") < prompt.index("Sampled history:")
     assert "Redis worker" in prompt

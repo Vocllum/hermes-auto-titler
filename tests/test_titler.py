@@ -1012,8 +1012,9 @@ def test_evaluate_blind_with_summary_keeps_user_continuation_but_omits_assistant
     assert result["action"] == "renamed"
     prompt = ctx.llm.calls[0]["messages"][1]["content"]
     assert "Hermes 自动标题插件开发" in prompt
-    assert "User messages after the summary:" in prompt
-    assert "user: 后续持续转向 WSP 搜索配置" in prompt
+    assert "Fallback historical summary:" in prompt
+    assert "Opening:" in prompt
+    assert "User turn 1 of 1: 后续持续转向 WSP 搜索配置" in prompt
     assert "参数已调整" not in prompt
 
 

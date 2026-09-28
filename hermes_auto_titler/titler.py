@@ -603,7 +603,7 @@ class AutoTitler:
                                 self._clear_finalize_intent_locked(session_id, close_epoch=worker_epoch)
                         elif covers_finalize:
                             meta = self._finalize_intents.get(session_id)
-                            if meta:
+                            if meta and action == "failed":
                                 retry_class = str(
                                     (result or {}).get("retry_class") or "temporary"
                                 )
@@ -630,6 +630,11 @@ class AutoTitler:
                                     )
                                 else:
                                     meta["next_retry_at"] = time.monotonic() + delay
+                            elif meta:
+                                # pending/throttled are lifecycle states, not
+                                # provider failures. Keep the terminal intent
+                                # alive without consuming the failure budget.
+                                meta["next_retry_at"] = time.monotonic() + 30
                         self._persist_state_locked()
                 except Exception as e:
                     log.warning("auto-titler background evaluate failed: %s", e)

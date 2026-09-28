@@ -786,8 +786,16 @@ def load_context_with_summary(
 
     if include_timeline:
         total_turns = len(raw_turns)
-        opening_count = min(max(0, opening_turns), total_turns)
-        recent_count = min(max(0, recent_turns), max(0, total_turns - opening_count))
+        if total_turns <= 1:
+            opening_count = total_turns
+        else:
+            # Keep both semantic anchors visible in short chats without
+            # duplicating a turn across Opening and Recent.
+            opening_count = min(max(0, opening_turns), total_turns - 1)
+        recent_count = min(
+            max(0, recent_turns),
+            max(0, total_turns - opening_count),
+        )
         recent_start = total_turns - recent_count
 
         if include_all_user:

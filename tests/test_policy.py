@@ -291,7 +291,7 @@ def test_production_prompt_grounds_subject_in_user_purpose_before_title():
 
     assert "Infer the durable subject from the user's goals before comparing titles" in system
     assert "purpose" in system
-    assert "tool and file names" in system
+    assert "tool or file names" in system
     assert user.index("Opening:") < user.index("Recent:")
     assert user.index("Recent:") < user.index("Current title:")
     assert "Sampled user-intent trajectory" not in user

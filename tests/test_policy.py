@@ -303,8 +303,8 @@ def test_indexed_timeline_prompt_keeps_opening_history_and_recent_distinct():
     timeline = {
         "total_user_turns": 12,
         "opening": [
-            {"turn": 1, "user": "最初目标"},
-            {"turn": 2, "user": "初始约束"},
+            {"turn": 1, "user": "最初目标", "assistant": "识别为 Bitwig Studio 脚本开发"},
+            {"turn": 2, "user": "初始约束", "assistant": None},
         ],
         "sampled_history": [
             {"turn": 5, "user": "中间阶段一"},
@@ -330,9 +330,80 @@ def test_indexed_timeline_prompt_keeps_opening_history_and_recent_distinct():
     assert prompt.index("Opening:") < prompt.index("Sampled history:")
     assert prompt.index("Sampled history:") < prompt.index("Recent:")
     assert "User turn 1 of 12: 最初目标" in prompt
+    assert "Assistant reply after user turn 1: 识别为 Bitwig Studio 脚本开发" in prompt
     assert "User turn 8 of 12: 中间阶段二" in prompt
     assert "Assistant reply after user turn 11: 处理结果" in prompt
     assert "Earlier-history summary:" not in prompt
+
+
+def test_recovered_raw_sparse_timeline_renders_summary_as_secondary_evidence():
+    _, llm, titler = make()
+    timeline = {
+        "total_user_turns": 100,
+        "opening": [
+            {
+                "turn": 1,
+                "user": "开始处理后台服务",
+                "assistant": "这是 Redis worker 队列服务",
+            }
+        ],
+        "sampled_history": [
+            {"turn": 17, "user": "常规排查"},
+            {"turn": 84, "user": "继续局部排查"},
+        ],
+        "recent": [
+            {"turn": 100, "user": "修一个超时", "assistant": "已定位超时"}
+        ],
+        "raw_history_recovered": True,
+        "summary_fallback": False,
+        "summary_supporting": True,
+    }
+    titler._generate(
+        "旧标题",
+        recent=[],
+        all_user=[],
+        opening=[],
+        earlier_summary="## Historical Task Snapshot\n核心主线：Redis worker 队列消费",
+        timeline=timeline,
+    )
+    system = llm.calls[-1]["messages"][0]["content"]
+    prompt = llm.calls[-1]["messages"][1]["content"]
+
+    assert "Compaction summaries are compressed secondary evidence" in system
+    assert prompt.index("Opening:") < prompt.index("Compaction summary (secondary evidence):")
+    assert prompt.index("Compaction summary (secondary evidence):") < prompt.index("Sampled history:")
+    assert "Redis worker" in prompt
+    assert "Fallback historical summary:" not in prompt
+
+
+def test_single_turn_opening_renders_assistant_reply_even_without_recent():
+    _, llm, titler = make()
+    timeline = {
+        "total_user_turns": 1,
+        "opening": [
+            {
+                "turn": 1,
+                "user": "这个怎么改",
+                "assistant": "这是 Redis worker 的重试配置问题",
+            }
+        ],
+        "sampled_history": [],
+        "recent": [],
+        "raw_history_recovered": False,
+        "summary_fallback": False,
+        "summary_supporting": False,
+    }
+    titler._generate(
+        "",
+        recent=[],
+        all_user=[],
+        opening=[],
+        force_rename=True,
+        timeline=timeline,
+    )
+    prompt = llm.calls[-1]["messages"][1]["content"]
+    assert "User turn 1 of 1: 这个怎么改" in prompt
+    assert "Assistant reply after user turn 1: 这是 Redis worker 的重试配置问题" in prompt
 
 
 def test_timeline_summary_fallback_precedes_visible_continuation_and_is_not_opening():

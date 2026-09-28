@@ -89,7 +89,7 @@ on_session_end
 
 生产路径不会把完整 transcript 原样交给标题模型，而是把清洗后的真实用户轮映射为带位置的受限视图：
 
-- **Opening**：最初的真实用户轮，只放用户文本，用来说明会话为什么开始；
+- **Opening**：最初的真实用户轮，保留用户文本与该轮最后一条清洗后的 assistant 回复，用来说明会话为什么开始以及模型对具体主题的早期识别；
 - **Sampled history**：只从 Opening 与 Recent 之间的中段按时间均匀跳取用户轮，并写成 `User turn X of N`；
 - **Recent**：最近的真实用户轮，保留用户文本以及该轮最后一条 assistant 文本回复，用来说明当前阶段；
 - 当前标题（非 blind 模式）与待审候选始终放在证据之后。
@@ -104,10 +104,11 @@ on_session_end
 
 1. 优先调用 SessionDB 的 `include_compacted=True`，恢复 `active=0, compacted=1` 的真实历史；
 2. `active=0, compacted=0` 的撤回 / rewind / 删除消息仍然排除；
-3. 如果检测到压缩载体，并且确实恢复到了压缩前真实用户轮，则摘要不进入标题 prompt；
-4. 只有旧宿主不支持 `include_compacted`，或检测到压缩载体但原始历史无法恢复时，才发送 `Fallback historical summary`。
+3. 如果压缩前真实用户轮已经恢复，且 Opening + Sampled history + Recent 覆盖了全部用户轮，则不重复发送摘要；
+4. 如果原始历史已经恢复但稀疏采样省略了部分用户轮，则摘要以 `Compaction summary (secondary evidence)` 形式保留，用来补充可能被均匀采样跳过的关键转折，但原始用户轮仍拥有时间顺序上的更高权威；
+5. 旧宿主不支持 `include_compacted`，或检测到压缩载体但原始历史无法恢复时，摘要作为 `Fallback historical summary`。
 
-因此摘要不再是默认主题锚点，只是原始证据缺失时的兼容兜底。
+因此摘要有两种低于原始消息的角色：原始历史缺失时的 fallback，以及稀疏采样时的 secondary evidence。
 
 进入标题模型前仍会过滤 Hermes context-compaction handoff、unfinished handoff、system/system-note、async delegation/task-list、相邻重复 user replay、群聊信封模板和 memory maintenance 标记。
 

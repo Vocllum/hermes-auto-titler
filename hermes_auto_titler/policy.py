@@ -175,6 +175,11 @@ class AutoTitler(_BaseAutoTitler):
             and earlier_summary
             and timeline.get("summary_fallback")
         )
+        supporting_summary = bool(
+            timeline
+            and earlier_summary
+            and timeline.get("summary_supporting")
+        )
         if fallback_timeline:
             chronology_rule = (
                 "Fallback historical summary is earlier history. Visible continuation "
@@ -191,6 +196,7 @@ class AutoTitler(_BaseAutoTitler):
             f"{contract}\n{decision}\n{style_req}\nStrategy: {strategy}. {strategy_rule}\n"
             "Infer the durable subject from the user's goals before comparing titles. "
             "Prefer user purpose over tool or file names unless that exact thing is the subject. "
+            "Assistant replies may clarify the specific subject named or implied by the user, but cannot create an unrelated subject. "
             f"{chronology_rule}"
             f"{incumbent_rule}"
             "Prefer one umbrella subject for the major work. Omit incidental troubleshooting and subordinate tasks. "
@@ -205,8 +211,9 @@ class AutoTitler(_BaseAutoTitler):
             "Decision rules:\n"
             "1. Infer the durable subject before comparing title hypotheses. Explicit and repeated user goals are strongest. "
             f"{chronology_rule}"
-            "A fallback historical summary is secondary evidence only when raw history is unavailable. "
-            "Assistant text may clarify a user goal but cannot establish a new subject by itself. Repeated copies across input sections count once.\n"
+            "Compaction summaries are compressed secondary evidence: they may preserve an important transition omitted by sparse sampling, "
+            "but raw user turns retain chronological authority. A fallback summary is used when earlier raw history is unavailable. "
+            "Assistant text may clarify a user goal but cannot establish an unrelated subject by itself. Repeated copies across input sections count once.\n"
             "2. Prefer the most specific durable subject that covers the session's sustained work. Do not replace it with a vague category. "
             "Treat recent actions, symptoms, tools, files, commands, and implementation steps as context unless the user is explicitly developing, "
             "configuring, debugging, or comparing that exact thing.\n"
@@ -267,6 +274,11 @@ class AutoTitler(_BaseAutoTitler):
                         lines.append(
                             f"Visible user turn {turn} of {total}: {row.get('user', '')}"
                         )
+                        assistant = row.get("assistant")
+                        if assistant:
+                            lines.append(
+                                f"Assistant reply after user turn {turn}: {assistant}"
+                            )
                 if sampled_rows:
                     lines.append("Sampled continuation:")
                     for row in sampled_rows:
@@ -283,6 +295,17 @@ class AutoTitler(_BaseAutoTitler):
                         lines.append(
                             f"User turn {turn} of {total}: {row.get('user', '')}"
                         )
+                        assistant = row.get("assistant")
+                        if assistant:
+                            lines.append(
+                                f"Assistant reply after user turn {turn}: {assistant}"
+                            )
+                if supporting_summary:
+                    lines.extend([
+                        "",
+                        "Compaction summary (secondary evidence):",
+                        earlier_summary or "",
+                    ])
                 if sampled_rows:
                     lines.extend(["", "Sampled history:"])
                     for row in sampled_rows:
@@ -305,8 +328,8 @@ class AutoTitler(_BaseAutoTitler):
                             f"Assistant reply after user turn {turn}: {assistant}"
                         )
 
-            if earlier_summary and not fallback_timeline:
-                lines.extend(["", "Fallback historical summary:", earlier_summary])
+            if earlier_summary and not fallback_timeline and not supporting_summary:
+                lines.extend(["", "Historical summary:", earlier_summary])
         else:
             if earlier_summary:
                 lines.extend(["Earlier-history summary:", earlier_summary, "", "Visible continuation:"])

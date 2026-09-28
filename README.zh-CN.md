@@ -34,7 +34,7 @@ Hermes 可以根据开场对话生成第一版标题，但会话会发展，标�
 | | |
 |---|---|
 | **来源优先级保护** | 遵守 `derived < llm < user`。`derived` 是 Hermes 从首条消息生成的兜底标题，`llm` 是模型自动标题，`user` 是用户手改标题，**永不覆盖**。没有来源记录的旧标题按用户标题保护。 |
-| **长会话意图追踪** | 用带真实位置的 Opening、Sampled history、Recent 三段证据呈现整段会话。长用户消息保留首部 + 尾部；只有无法恢复压缩前原始历史时才使用摘要兜底。 |
+| **长会话意图追踪** | 用带真实位置的 Opening、Sampled history、Recent 三段证据呈现整段会话。Opening / Recent 保留每轮最后一条清洗后的 assistant 回复辅助识别具体主题；摘要在原始历史缺失时兜底，在稀疏采样遗漏恢复轮次时作为次级证据。 |
 | **意图感知捕获** | 过滤压缩交接包装、系统噪声、相邻重复 replay，以及 cron/subagent/后台执行，防止干扰标题主题。 |
 | **证据优先判定** | 先根据对话证据推断持续主题，再与当前或待审标题比较。明确且重复的用户目标权重最高；assistant 内容提供辅助上下文，但不能独立引入新主题。 |
 | **首轮接管或协作** | 默认 `first_title_mode: builtin`，首轮标题归 Hermes 原生生成；插件从多轮演化阶段参与维护，不改写宿主底座配置。设为 `plugin` 可从第 1 轮开始由插件接管评估。 |
@@ -47,13 +47,13 @@ Hermes 可以根据开场对话生成第一版标题，但会话会发展，标�
 | **Profile 隔离 + 可审计** | SessionDB 连接按 Hermes profile 隔离；所有标题生成调用以 `task=hermes_auto_titler` 记入用量统计。 |
 
 > ⚠️ **隐私与数据流（启用前请看）**
-> 插件会将选中的会话片段发送给标题模型：带真实 turn 位置的 Opening、均匀跳取的 Sampled history、Recent，以及附件文件名占位。只有无法恢复压缩前原始用户消息时，才额外加入压缩摘要作为兜底证据。采样范围由 `opening_turns`、`recent_turns`、`preview_chars`、`include_all_user_messages`、`user_message_threshold`、`user_message_preview_chars`、`summary_preview_chars`、`retitle_summary_chars` 等配置决定；模型请求计入所选 provider 的用量与费用。
+> 插件会将选中的会话片段发送给标题模型：带真实 turn 位置的 Opening、均匀跳取的 Sampled history、Recent，以及附件文件名占位。Opening / Recent 可包含每轮最后一条清洗后的 assistant 回复。压缩前原始历史不可恢复时使用摘要兜底；原始历史已恢复但被稀疏采样省略部分轮次时，摘要可作为次级压缩证据。采样范围由 `opening_turns`、`recent_turns`、`preview_chars`、`include_all_user_messages`、`user_message_threshold`、`user_message_preview_chars`、`summary_preview_chars`、`retitle_summary_chars` 等配置决定；模型请求计入所选 provider 的用量与费用。
 
 ## 🔍 工作原理
 
 1. **首标题归属** — 默认 `first_title_mode: builtin`，首轮标题归 Hermes 原生生成；插件从多轮演化阶段参与维护，不改写宿主底座配置。设为 `plugin` 可从第 1 轮开始由插件接管评估。
 2. **触发、节奏与关闭处理** — Hook `on_session_end` / `on_session_finalize`。只有完整前台轮次计入 `every_n_turns`（默认 `2`）；失败、被打断、cron、subagent、后台任务均排除。周期评估异步执行；关闭 hook 不发起网络请求，只对已有 worker 等待最多 100ms，随后把 typed finalize intent 原子持久化，交由下一段正常进程生命周期续跑。
-3. **上下文构造** — 构造三个互不重叠的证据区，并写明 `User turn 17 of 43` 这类真实位置：Opening 只放最初用户消息，Sampled history 在中段均匀跳取用户消息，Recent 放最近用户消息及各自最后一条 assistant 回复。优先恢复 `compacted=1` 的原始历史；只有恢复不到时才使用压缩摘要兜底。
+3. **上下文构造** — 构造三个互不重叠的证据区，并写明 `User turn 17 of 43` 这类真实位置：Opening 放最初用户消息及各轮最后一条清洗后的 assistant 回复，Sampled history 在中段均匀跳取用户消息，Recent 放最近用户消息及各轮最后一条 assistant 回复。优先恢复 `compacted=1` 的原始历史；恢复不到时摘要作为兜底，恢复到但稀疏采样省略部分轮次时摘要作为次级证据。
 4. **证据优先评估** — 辅助模型输出结构化 JSON。对话证据排在当前标题之前以降低锚定偏差。明确且重复的用户意图权重最高；assistant 回复提供辅助上下文但不能独立引入新主题。跨采样区间的结构性重复被显式折扣。
 5. **策略评估** — `conservative` 在无显著、持续的主题偏移时保留现有标题；`aggressive` 在用户明确放弃旧目标或持续追求新方向时更快适应，但单靠最近几轮不足以触发改名。
 6. **多轮确认门** — `rename_confirmations: N` 下，llm→llm 改名先作为待审候选挂起，需在后续 N 次评估中获得确认。出现不同新候选时计数从 0 重新开始。首次命名、derived 升级和手动 `rename-now` 不经过此门。

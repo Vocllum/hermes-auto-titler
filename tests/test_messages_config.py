@@ -1842,3 +1842,23 @@ def test_indexed_timeline_10000_turns_keeps_context_selection_bounded():
     middle_turns = [row["turn"] for row in timeline["sampled_history"]]
     assert middle_turns == sorted(middle_turns)
     assert all(2 < turn < 9999 for turn in middle_turns)
+
+
+def test_indexed_timeline_zero_middle_budget_does_not_mean_unlimited():
+    conv = []
+    for i in range(1, 11):
+        conv.append({"role": "user", "content": f"user-{i}"})
+        conv.append({"role": "assistant", "content": f"assistant-{i}"})
+
+    _, _, _, _, timeline = load_context_with_summary(
+        FakeDB(conv),
+        "s1",
+        recent_turns=1,
+        include_all_user=True,
+        opening_turns=1,
+        user_message_threshold=2,
+        include_timeline=True,
+    )
+    assert [row["turn"] for row in timeline["opening"]] == [1]
+    assert timeline["sampled_history"] == []
+    assert [row["turn"] for row in timeline["recent"]] == [10]

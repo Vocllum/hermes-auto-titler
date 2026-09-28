@@ -2056,7 +2056,7 @@ def test_unscoped_secret_error_is_logged_verbatim_and_automatic_retry_is_parked(
     assert submitted == []
 
 
-def test_finalize_temporary_failure_uses_only_finalize_ledger_and_parks_after_five(
+def test_finalize_temporary_failure_switches_to_long_backoff_and_survives_restart(
     recording_threads, tmp_path
 ):
     class BoomLlm:
@@ -2069,8 +2069,9 @@ def test_finalize_temporary_failure_uses_only_finalize_ledger_and_parks_after_fi
 
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
     llm = BoomLlm()
+    state_path = tmp_path / "state.json"
     t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS}, db=db)
-    t._state_path = tmp_path / "state.json"
+    t._state_path = state_path
     t._queue_session("s1", reason="finalize", close_epoch=1)
 
     for attempt in range(1, 6):
@@ -2082,15 +2083,105 @@ def test_finalize_temporary_failure_uses_only_finalize_ledger_and_parks_after_fi
         assert "s1" not in t._failed_sessions
         assert t._finalize_intents["s1"]["attempts"] == attempt
 
+    meta = t._finalize_intents["s1"]
     assert llm.calls == 5
-    assert t._finalize_intents["s1"]["parked"] is True
-    assert t._finalize_intents["s1"]["retry_class"] == "temporary"
+    assert meta["retry_class"] == "temporary"
+    assert meta["class_attempts"] == 5
+    assert not meta.get("parked", False)
+    assert meta["next_retry_at"] - time.monotonic() > 1700
+
+    # Restart restores the long retry deadline instead of deriving a permanent
+    # park from attempts >= 5.
+    t2 = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS}, db=db)
+    t2._state_path = state_path
+    t2.restore_state()
+    restored = t2._finalize_intents["s1"]
+    assert restored["attempts"] == 5
+    assert restored["class_attempts"] == 5
+    assert restored["retry_class"] == "temporary"
+    assert not restored.get("parked", False)
 
     before = len(recording_threads.instances)
-    t._finalize_intents["s1"]["next_retry_at"] = time.monotonic() - 1
-    t._retry_failed_sessions()
+    t2._retry_failed_sessions()
     assert len(recording_threads.instances) == before
-    assert llm.calls == 5
+
+    restored["next_retry_at"] = time.monotonic() - 1
+    t2._retry_failed_sessions()
+    assert len(recording_threads.instances) == before + 1
+    run_recorded(recording_threads)
+    assert llm.calls == 6
+    assert t2._finalize_intents["s1"]["class_attempts"] == 6
+    assert t2._finalize_intents["s1"]["next_retry_at"] - time.monotonic() > 3500
+
+
+def test_capacity_then_temporary_uses_current_retry_class_not_historical_capacity():
+    class MixedLlm:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, **kw):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("503 No available targets")
+            raise RuntimeError("temporary provider failure")
+
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    llm = MixedLlm()
+    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS}, db=db)
+
+    first = t.evaluate("s1", force=True)
+    assert first["retry_class"] == "capacity"
+    assert t._failed_sessions["s1"]["capacity"] is True
+    assert t._failed_sessions["s1"]["class_attempts"] == 1
+
+    for expected in range(1, 6):
+        result = t.evaluate("s1", force=True)
+        assert result["retry_class"] == "temporary"
+        meta = t._failed_sessions["s1"]
+        assert meta["capacity"] is False
+        assert meta["retry_class"] == "temporary"
+        assert meta["class_attempts"] == expected
+
+    submitted = []
+    t._submit_eval = lambda sid, **kwargs: submitted.append(sid)
+    t._failed_sessions["s1"]["next_retry_at"] = time.monotonic() - 1
+    t._retry_failed_sessions()
+    assert submitted == []
+    assert "s1" not in t._failed_sessions
+
+
+def test_finalize_capacity_then_temporary_resets_class_attempts_and_uses_long_backoff(
+    recording_threads, tmp_path
+):
+    class MixedLlm:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, **kw):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("503 No available targets")
+            raise RuntimeError("temporary provider failure")
+
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    llm = MixedLlm()
+    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS}, db=db)
+    t._state_path = tmp_path / "state.json"
+    t._queue_session("s1", reason="finalize", close_epoch=1)
+
+    for _ in range(6):
+        t._finalize_intents["s1"]["next_retry_at"] = time.monotonic() - 1
+        t._retry_failed_sessions()
+        run_recorded(recording_threads)
+
+    meta = t._finalize_intents["s1"]
+    assert llm.calls == 6
+    assert meta["attempts"] == 6
+    assert meta["retry_class"] == "temporary"
+    assert meta["capacity"] is False
+    assert meta["class_attempts"] == 5
+    assert not meta.get("parked", False)
+    assert meta["next_retry_at"] - time.monotonic() > 1700
 
 
 def test_finalize_capacity_failure_remains_retryable_after_five(

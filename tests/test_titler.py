@@ -1000,7 +1000,7 @@ def test_generate_forwards_explicit_custom_route():
     assert "task" not in call
 
 
-def test_evaluate_blind_with_summary_keeps_user_continuation_but_omits_assistant_tail():
+def test_evaluate_blind_with_summary_keeps_visible_user_and_assistant_clarification():
     messages = [
         {"role": "user", "content": "[Session Arc Summary] 主线：Hermes 自动标题插件开发"},
         {"role": "user", "content": "后续持续转向 WSP 搜索配置"},
@@ -1016,7 +1016,7 @@ def test_evaluate_blind_with_summary_keeps_user_continuation_but_omits_assistant
     assert "Visible continuation:" in prompt
     assert "Opening:" not in prompt
     assert "Visible user turn 1 of 1: 后续持续转向 WSP 搜索配置" in prompt
-    assert "参数已调整" not in prompt
+    assert "Assistant reply after user turn 1: 参数已调整" in prompt
 
 
 class SessionStateDB(FakeDB):

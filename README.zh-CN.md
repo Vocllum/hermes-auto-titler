@@ -47,13 +47,13 @@ Hermes 可以根据开场对话生成第一版标题，但会话会发展，标�
 | **Profile 隔离 + 可审计** | SessionDB 连接按 Hermes profile 隔离；所有标题生成调用以 `task=hermes_auto_titler` 记入用量统计。 |
 
 > ⚠️ **隐私与数据流（启用前请看）**
-> 插件会将选中的会话片段发送给标题模型：开头与最近轮次、采样后的用户消息轨迹、压缩历史摘要以及附件文件名占位。采样范围由 `opening_turns`、`recent_turns`、`preview_chars`、`include_all_user_messages`、`user_message_threshold`、`user_message_preview_chars`、`summary_preview_chars`、`retitle_summary_chars` 等配置决定；模型请求计入所选 provider 的用量与费用。
+> 插件会将选中的会话片段发送给标题模型：带真实 turn 位置的 Opening、均匀跳取的 Sampled history、Recent，以及附件文件名占位。只有无法恢复压缩前原始用户消息时，才额外加入压缩摘要作为兜底证据。采样范围由 `opening_turns`、`recent_turns`、`preview_chars`、`include_all_user_messages`、`user_message_threshold`、`user_message_preview_chars`、`summary_preview_chars`、`retitle_summary_chars` 等配置决定；模型请求计入所选 provider 的用量与费用。
 
 ## 🔍 工作原理
 
 1. **首标题归属** — 默认 `first_title_mode: builtin`，首轮标题归 Hermes 原生生成；插件从多轮演化阶段参与维护，不改写宿主底座配置。设为 `plugin` 可从第 1 轮开始由插件接管评估。
 2. **触发、节奏与关闭处理** — Hook `on_session_end` / `on_session_finalize`。只有完整前台轮次计入 `every_n_turns`（默认 `2`）；失败、被打断、cron、subagent、后台任务均排除。周期评估异步执行；关闭 hook 不发起网络请求，只对已有 worker 等待最多 100ms，随后把 typed finalize intent 原子持久化，交由下一段正常进程生命周期续跑。
-3. **上下文构造** — 提取开头轮次、最近轮次（每个用户消息配对最后一条 assistant 回复），以及受限的首条与最近用户消息轨迹。若压缩已移除原始 opening，则以压缩摘要作为历史锚点。协议交接包装和重放噪声在采样前清理。
+3. **上下文构造** — 构造三个互不重叠的证据区，并写明 `User turn 17 of 43` 这类真实位置：Opening 只放最初用户消息，Sampled history 在中段均匀跳取用户消息，Recent 放最近用户消息及各自最后一条 assistant 回复。优先恢复 `compacted=1` 的原始历史；只有恢复不到时才使用压缩摘要兜底。
 4. **证据优先评估** — 辅助模型输出结构化 JSON。对话证据排在当前标题之前以降低锚定偏差。明确且重复的用户意图权重最高；assistant 回复提供辅助上下文但不能独立引入新主题。跨采样区间的结构性重复被显式折扣。
 5. **策略评估** — `conservative` 在无显著、持续的主题偏移时保留现有标题；`aggressive` 在用户明确放弃旧目标或持续追求新方向时更快适应，但单靠最近几轮不足以触发改名。
 6. **多轮确认门** — `rename_confirmations: N` 下，llm→llm 改名先作为待审候选挂起，需在后续 N 次评估中获得确认。出现不同新候选时计数从 0 重新开始。首次命名、derived 升级和手动 `rename-now` 不经过此门。
@@ -156,13 +156,13 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `every_n_turns` | `2` | 每 N 个完整前台轮次评估一次。 |
 | `first_title_mode` | `builtin` | `builtin` = 第一版标题归 Hermes；`plugin` = 插件从第 1 轮开始评估。两种模式都不写宿主配置。切换在插件加载时生效（需重启）。 |
 | `on_close` | `true` | 关闭/终局时最多等待已有工作 100ms，并持久化 typed finalize intent；关闭 hook 不发起网络请求。 |
-| `recent_turns` / `opening_turns` | `2` / `2` | 上下文窗口按真实用户轮计；每个选中轮次保留用户消息 + 最后一条 assistant 回复。 |
+| `recent_turns` / `opening_turns` | `2` / `2` | 两组互不重叠的真实用户轮锚点。Opening 只保留用户文本；Recent 额外保留每轮最后一条 assistant 回复。 |
 | `ignore_model_messages` | `false` | 从捕获上下文中排除 assistant 消息（主要用于 A/B 测试）。 |
-| `preview_chars` | `400` | 开头/最近单条消息的预览预算；多句消息使用首部 + 尾部提取。 |
-| `include_all_user_messages` | `true` | 附加采样后的用户消息轨迹。 |
-| `user_message_threshold` | `40` | 用户轨迹最多保留多少条；超限时保留首条 + 最近 N−1 条。`0` = 不限。 |
-| `user_message_preview_chars` | `300` | 用户轨迹中单条消息的首尾提取预算。`0` = 不限。 |
-| `summary_preview_chars` | `1200` | 日常评估的压缩摘要预算。 |
+| `preview_chars` | `120` | Opening/Recent 单条消息预算；长用户消息始终同时保留首部与尾部。 |
+| `include_all_user_messages` | `true` | 在 Opening 与 Recent 之间加入 Sampled history；键名为兼容旧配置继续保留。 |
+| `user_message_threshold` | `40` | Opening + Sampled history + Recent 的用户轮总证据预算；中段按时间均匀跳取。`0` = 中段不限。 |
+| `user_message_preview_chars` | `300` | Sampled history 单条用户消息的首尾提取预算。`0` = 不限。 |
+| `summary_preview_chars` | `1200` | 无法恢复压缩前原始用户历史时，兜底摘要的日常预算。 |
 | `retitle_summary_chars` | `12000` | blind/手动/批量重生成时的压缩摘要预算；`0` 时回退到 `preview_chars`。 |
 | `title_style` | `concise` | `concise` = 主体标签；`complete` = 简短事件/意图概括，多 12 列显示预算。 |
 | `strategy` | `conservative` | `conservative` = 只有明显、持续的失配才改；`aggressive` = 用户明确放弃旧目标或多个实质回合形成持续新方向后更快跟进，单次子任务/工具变化不算转题。 |
@@ -190,7 +190,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 
 ## 💰 成本
 
-**单次评估输入有边界，不是固定大小。** 默认开头/最近消息每条 `preview_chars=400`；用户轨迹保留最多 40 条、每条最多 300 字符；压缩摘要还可增加最多 1,200 字符。短会话消耗远低于上限，但携带完整轨迹的长会话可能超过 1–3K 字符基线。
+**单次评估输入有边界，不是固定大小。** Opening/Recent 默认每条 `preview_chars=120`；默认 40 个用户轮的总证据预算由 Opening、均匀跳取的 Sampled history、Recent 共同分配，Sampled history 单条最多 300 字符。只有走摘要兜底路径时才额外加入最多 1,200 字符。
 
 插件请求 `max_tokens=64`，但部分 OpenAI-compatible 路由可能不会在上游严格执行输出限制。基准测试中，未受约束的模型产生了 **597 input / 1,639 output tokens**（内部推理 token 先于 JSON 输出）。应按实际 provider 的 token 计费行为规划预算，不要假定 64 output tokens 是硬上限。
 

@@ -81,7 +81,7 @@ config_schema:
   user_message_threshold:
     type: int
     default: 40
-    description: "User-turn sampling budget; Opening/Recent anchors are retained and remaining slots go to Sampled history (0 = unlimited middle)."
+    description: "Target user-turn evidence budget; Opening/Recent anchors are always retained and may exceed very small values; remaining slots go to Sampled history (0 = unlimited middle)."
   user_message_preview_chars:
     type: int
     default: 300

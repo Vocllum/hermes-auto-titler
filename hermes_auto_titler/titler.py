@@ -701,9 +701,9 @@ class AutoTitler:
 
                 # A second hook may have marked this worker dirty before
                 # the first model call discovered a process-local blocked error.
-                # Re-check both retry ledgers before honoring that already queued
-                # rerun. Lock ordering stays state -> inflight, matching
-                # _submit_eval(), so this guard does not introduce an inversion.
+                # Snapshot retry state first, then release _state_lock before
+                # touching inflight bookkeeping: these lock domains are never
+                # held simultaneously anywhere in the scheduler.
                 with self._state_lock:
                     retry_meta = self._failed_sessions.get(session_id)
                     finalize_meta = self._finalize_intents.get(session_id)
@@ -713,30 +713,30 @@ class AutoTitler:
                         and _meta_retry_class(meta) == "blocked"
                         for meta in (retry_meta, finalize_meta)
                     )
-                    with self._inflight_lock:
-                        if session_id in self._dirty_sessions:
-                            self._dirty_sessions.remove(session_id)
-                            if blocked_parked:
-                                self._dirty_override_intents.discard(session_id)
-                                self._inflight.pop(session_id, None)
-                                self._worker_epochs.pop(session_id, None)
-                                log.debug(
-                                    "auto-titler dirty rerun suppressed for parked blocked session %s",
-                                    session_id[:12],
-                                )
-                                break
-                            force_eval = True
-                            # Dirty rerun triggers re-evaluation but never promotes epoch/finalize claim
-                            if session_id in self._dirty_override_intents:
-                                self._dirty_override_intents.discard(session_id)
-                                current_override = True
-                            else:
-                                current_override = False
-                            continue
-                        self._dirty_override_intents.discard(session_id)
-                        self._inflight.pop(session_id, None)
-                        self._worker_epochs.pop(session_id, None)
-                        break
+                with self._inflight_lock:
+                    if session_id in self._dirty_sessions:
+                        self._dirty_sessions.remove(session_id)
+                        if blocked_parked:
+                            self._dirty_override_intents.discard(session_id)
+                            self._inflight.pop(session_id, None)
+                            self._worker_epochs.pop(session_id, None)
+                            log.debug(
+                                "auto-titler dirty rerun suppressed for parked blocked session %s",
+                                session_id[:12],
+                            )
+                            break
+                        force_eval = True
+                        # Dirty rerun triggers re-evaluation but never promotes epoch/finalize claim
+                        if session_id in self._dirty_override_intents:
+                            self._dirty_override_intents.discard(session_id)
+                            current_override = True
+                        else:
+                            current_override = False
+                        continue
+                    self._dirty_override_intents.discard(session_id)
+                    self._inflight.pop(session_id, None)
+                    self._worker_epochs.pop(session_id, None)
+                    break
         finally:
             with self._inflight_lock:
                 self._dirty_sessions.discard(session_id)

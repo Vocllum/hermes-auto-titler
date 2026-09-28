@@ -802,7 +802,9 @@ def test_pending_finalize_worker_keeps_intent_for_confirmation(tmp_path, monkeyp
     )
     titler._eval_worker("s1", threading.Event(), worker_epoch=1)
 
-    assert titler._finalize_intents["s1"]["attempts"] == 1
+    # pending is a review/lifecycle state, not a provider failure.
+    assert titler._finalize_intents["s1"]["attempts"] == 0
+    assert titler._finalize_intents["s1"]["next_retry_at"] > 0
     assert StateStore(path).load()["sessions"]["s1"]["finalize_intent"] is True
 
 

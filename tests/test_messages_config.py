@@ -1735,7 +1735,7 @@ def test_indexed_timeline_long_user_message_keeps_head_and_tail():
     assert len(preview) <= 43  # preview budget plus the ellipsis separators
 
 
-def test_indexed_timeline_suppresses_summary_when_raw_compacted_history_is_recovered():
+def test_indexed_timeline_drops_redundant_summary_when_all_raw_turns_are_represented():
     db = PhysicalSqliteSessionDB()
     db.insert_session("sess_raw_first")
     db.insert_message(
@@ -1783,7 +1783,107 @@ def test_indexed_timeline_suppresses_summary_when_raw_compacted_history_is_recov
     assert summary is None
     assert timeline["raw_history_recovered"] is True
     assert timeline["summary_fallback"] is False
+    assert timeline["summary_supporting"] is False
     assert timeline["opening"][0]["user"].startswith("原始目标")
+    assert timeline["opening"][0]["assistant"] == "先检查上下文工程"
+
+
+def test_indexed_timeline_single_turn_keeps_opening_assistant_subject_identification():
+    conv = [
+        {"role": "user", "content": "这个怎么改"},
+        {
+            "role": "assistant",
+            "content": "这是 Bitwig Studio 控制脚本的设备参数映射问题。",
+        },
+    ]
+    _, _, _, summary, timeline = load_context_with_summary(
+        FakeDB(conv),
+        "s1",
+        recent_turns=2,
+        include_all_user=True,
+        opening_turns=2,
+        preview_chars=120,
+        include_timeline=True,
+    )
+
+    assert summary is None
+    assert timeline["recent"] == []
+    assert timeline["opening"] == [
+        {
+            "turn": 1,
+            "user": "这个怎么改",
+            "assistant": "这是 Bitwig Studio 控制脚本的设备参数映射问题。",
+        }
+    ]
+
+
+def test_indexed_timeline_retains_compaction_summary_when_sparse_sampling_omits_transition():
+    db = PhysicalSqliteSessionDB()
+    db.insert_session("sess_sparse_summary")
+
+    timestamp = 1
+    for turn in range(1, 101):
+        user = f"第 {turn} 轮常规工作"
+        assistant = f"第 {turn} 轮回复"
+        if turn == 50:
+            user = "把核心方向切换到 Redis worker 队列消费与重试"
+            assistant = "确认：后续主线是 Redis worker 的队列消费与重试机制"
+        db.insert_message(
+            "sess_sparse_summary",
+            "user",
+            user,
+            active=0,
+            compacted=1,
+            timestamp=timestamp,
+        )
+        timestamp += 1
+        db.insert_message(
+            "sess_sparse_summary",
+            "assistant",
+            assistant,
+            active=0,
+            compacted=1,
+            timestamp=timestamp,
+        )
+        timestamp += 1
+
+    db.insert_message(
+        "sess_sparse_summary",
+        "user",
+        _real_compaction_carrier(
+            "## Historical Task Snapshot\n核心主线：Redis worker 队列消费与重试"
+        ),
+        active=1,
+        compacted=0,
+        timestamp=timestamp,
+    )
+    db.insert_message(
+        "sess_sparse_summary",
+        "user",
+        "继续排查一个局部超时",
+        active=1,
+        compacted=0,
+        timestamp=timestamp + 1,
+    )
+
+    _, _, _, summary, timeline = load_context_with_summary(
+        db,
+        "sess_sparse_summary",
+        recent_turns=1,
+        include_all_user=True,
+        opening_turns=1,
+        user_message_threshold=8,
+        summary_chars=1200,
+        include_timeline=True,
+    )
+
+    sampled_turns = [row["turn"] for row in timeline["sampled_history"]]
+    assert 50 not in sampled_turns
+    assert timeline["raw_history_recovered"] is True
+    assert timeline["summary_fallback"] is False
+    assert timeline["summary_supporting"] is True
+    assert summary is not None
+    assert "Redis worker" in summary
 
 
 def test_indexed_timeline_keeps_summary_as_fallback_on_legacy_host():
@@ -1815,6 +1915,7 @@ def test_indexed_timeline_keeps_summary_as_fallback_on_legacy_host():
     assert summary is not None and "旧宿主只能看到摘要" in summary
     assert timeline["raw_history_recovered"] is False
     assert timeline["summary_fallback"] is True
+    assert timeline["summary_supporting"] is False
 
 
 def test_indexed_timeline_10000_turns_keeps_context_selection_bounded():

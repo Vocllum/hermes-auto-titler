@@ -2024,6 +2024,103 @@ def test_overloaded_model_error_is_queued_as_capacity():
     assert t._failed_sessions["s1"]["capacity"] is True
 
 
+def test_unscoped_secret_error_is_logged_verbatim_and_automatic_retry_is_parked():
+    class UnscopedSecretError(RuntimeError):
+        def __init__(self):
+            super().__init__(
+                "Hermes could not read this profile's OPENCODE_GO_API_KEY "
+                "(an internal profile-scoping bug)"
+            )
+            self.secret_name = "OPENCODE_GO_API_KEY"
+            self.developer_detail = "spawn-site lost the profile context"
+
+    class BoomLlm:
+        def complete(self, **kw):
+            raise UnscopedSecretError()
+
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    t = AutoTitler(SimpleNamespace(llm=BoomLlm()), {**DEFAULTS}, db=db)
+    result = t.evaluate("s1", force=True)
+
+    assert result["action"] == "failed"
+    assert result["retry_class"] == "blocked"
+    assert "UnscopedSecretError:" in t._last_generate_error
+    assert "OPENCODE_GO_API_KEY" in t._last_generate_error
+    assert t._failed_sessions["s1"]["parked"] is True
+
+    submitted = []
+    t._submit_eval = lambda sid, **kwargs: submitted.append(sid)
+    t._failed_sessions["s1"]["next_retry_at"] = time.monotonic() - 1
+    t._retry_failed_sessions()
+    assert submitted == []
+
+
+def test_finalize_temporary_failure_uses_only_finalize_ledger_and_parks_after_five(
+    recording_threads, tmp_path
+):
+    class BoomLlm:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, **kw):
+            self.calls += 1
+            raise RuntimeError("temporary provider failure")
+
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    llm = BoomLlm()
+    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS}, db=db)
+    t._state_path = tmp_path / "state.json"
+    t._queue_session("s1", reason="finalize", close_epoch=1)
+
+    for attempt in range(1, 6):
+        t._finalize_intents["s1"]["next_retry_at"] = time.monotonic() - 1
+        before = len(recording_threads.instances)
+        t._retry_failed_sessions()
+        assert len(recording_threads.instances) == before + 1
+        run_recorded(recording_threads)
+        assert "s1" not in t._failed_sessions
+        assert t._finalize_intents["s1"]["attempts"] == attempt
+
+    assert llm.calls == 5
+    assert t._finalize_intents["s1"]["parked"] is True
+    assert t._finalize_intents["s1"]["retry_class"] == "temporary"
+
+    before = len(recording_threads.instances)
+    t._finalize_intents["s1"]["next_retry_at"] = time.monotonic() - 1
+    t._retry_failed_sessions()
+    assert len(recording_threads.instances) == before
+    assert llm.calls == 5
+
+
+def test_finalize_capacity_failure_remains_retryable_after_five(
+    recording_threads, tmp_path
+):
+    class CapacityLlm:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, **kw):
+            self.calls += 1
+            raise RuntimeError("503 No available targets")
+
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    llm = CapacityLlm()
+    t = AutoTitler(SimpleNamespace(llm=llm), {**DEFAULTS}, db=db)
+    t._state_path = tmp_path / "state.json"
+    t._queue_session("s1", reason="finalize", close_epoch=1)
+
+    for _ in range(6):
+        t._finalize_intents["s1"]["next_retry_at"] = time.monotonic() - 1
+        t._retry_failed_sessions()
+        run_recorded(recording_threads)
+
+    assert llm.calls == 6
+    assert t._finalize_intents["s1"]["attempts"] == 6
+    assert t._finalize_intents["s1"]["capacity"] is True
+    assert not t._finalize_intents["s1"].get("parked", False)
+    assert "s1" not in t._failed_sessions
+
+
 def test_requeue_untitled_sessions_from_db_survives_restart():
     db = FakeDB(messages=MSGS, title=None, source=None, sessions=[
         {"id": "untitled", "title": ""},

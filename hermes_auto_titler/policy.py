@@ -191,15 +191,20 @@ class AutoTitler(_BaseAutoTitler):
                 "Turn positions are chronology: Opening shows initial purpose, Sampled history spans the chat, "
                 "and Recent shows the current phase; recency alone does not prove a subject shift. "
             )
+        summary_rule = (
+            "Compaction summaries, when present, are secondary compressed evidence; "
+            "use them for durable transitions omitted by sparse sampling, while raw user turns define chronology. "
+            if supporting_summary
+            else ""
+        )
         concise_system = (
             "Maintain a concise sidebar title for this chat. Return JSON only, with no explanation.\n"
             f"{contract}\n{decision}\n{style_req}\nStrategy: {strategy}. {strategy_rule}\n"
             "Infer the durable subject from the user's goals before comparing titles. "
             "Prefer user purpose over tool or file names unless that exact thing is the subject. "
             "Assistant replies may clarify the specific subject named or implied by the user, but cannot create an unrelated subject. "
-            "Compaction summaries, when present, are secondary compressed evidence that may preserve transitions omitted by sparse sampling; "
-            "raw user turns define chronology. "
             f"{chronology_rule}"
+            f"{summary_rule}"
             f"{incumbent_rule}"
             "Prefer one umbrella subject for the major work. Omit incidental troubleshooting and subordinate tasks. "
             "Replace an earlier subject only when it was abandoned or became minor.\n"

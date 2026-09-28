@@ -38,12 +38,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hermes_auto_titler.config import VALID_STRATEGIES, VALID_STYLES, load_config
 from hermes_auto_titler.messages import (
     _sample_turns,
-    clean_assistant_dialog,
+    build_indexed_timeline,
     clean_captured_text,
     is_summary,
     is_system_noise,
     message_text,
-    sample_middle_turn_indices,
     sample_user_messages,
     smart_preview,
 )
@@ -247,84 +246,17 @@ def build_prefixes(turns: list[list[tuple[str, str]]], raw_config: dict[str, Any
                 users = [(role, smart_preview(text, user_preview_k)) for role, text in users]
             users = sample_user_messages(users, user_limit)
 
-        total = len(prefix_turns)
-        if total <= 1:
-            timeline_opening_count = total
-            timeline_recent_count = 0
-        else:
-            timeline_recent_count = min(recent_k, total - 1)
-            timeline_opening_count = min(
-                opening_k,
-                max(0, total - timeline_recent_count),
-            )
-        recent_start = total - timeline_recent_count
-        if raw_config.get("include_all_user_messages", True):
-            middle_limit = (
-                -1
-                if user_limit <= 0
-                else max(
-                    0,
-                    user_limit - timeline_opening_count - timeline_recent_count,
-                )
-            )
-            middle_indices = sample_middle_turn_indices(
-                total,
-                timeline_opening_count,
-                timeline_recent_count,
-                middle_limit,
-            )
-        else:
-            middle_indices = []
-
-        def user_text(turn: list[tuple[str, str]]) -> str:
-            return next((text for role, text in turn if role == "user"), "")
-
-        def assistant_text(turn: list[tuple[str, str]]) -> str | None:
-            for role, text in reversed(turn):
-                if role == "assistant":
-                    cleaned = clean_assistant_dialog(text)
-                    return cleaned or None
-            return None
-
-        timeline = {
-            "total_user_turns": total,
-            "opening": [
-                {
-                    "turn": idx + 1,
-                    "user": smart_preview(user_text(prefix_turns[idx]), preview_k)
-                    if preview_k > 0
-                    else user_text(prefix_turns[idx]),
-                }
-                for idx in range(timeline_opening_count)
-            ],
-            "sampled_history": [
-                {
-                    "turn": idx + 1,
-                    "user": smart_preview(user_text(prefix_turns[idx]), user_preview_k)
-                    if user_preview_k > 0
-                    else user_text(prefix_turns[idx]),
-                }
-                for idx in middle_indices
-            ],
-            "recent": [],
-            "raw_history_recovered": False,
-            "summary_fallback": False,
-        }
-        for idx in range(recent_start, total):
-            assistant = assistant_text(prefix_turns[idx])
-            timeline["recent"].append(
-                {
-                    "turn": idx + 1,
-                    "user": smart_preview(user_text(prefix_turns[idx]), preview_k)
-                    if preview_k > 0
-                    else user_text(prefix_turns[idx]),
-                    "assistant": (
-                        smart_preview(assistant, preview_k)
-                        if assistant and preview_k > 0
-                        else assistant
-                    ),
-                }
-            )
+        timeline, _ = build_indexed_timeline(
+            prefix_turns,
+            opening_turns=opening_k,
+            recent_turns=recent_k,
+            include_all_user=bool(raw_config.get("include_all_user_messages", True)),
+            preview_chars=preview_k,
+            user_message_threshold=user_limit,
+            user_message_preview_chars=user_preview_k,
+            earlier_summary=None,
+            raw_history_recovered=False,
+        )
 
         result.append(Prefix(number, prefix_turns, recent, users, opening, timeline))
     return result

@@ -1383,10 +1383,11 @@ class AutoTitler:
                     with self._retry_lock:
                         meta = self._failed_sessions.get(session_id, {"attempts": 0})
                         attempts = int(meta.get("attempts", 0)) + 1
-                        delay = min(30 * (2 ** (attempts - 1)), 600)
+                        class_attempts = _next_class_attempt(meta, "temporary")
+                        delay = _retry_delay("temporary", class_attempts)
                         self._failed_sessions[session_id] = {
                             "attempts": attempts,
-                            "class_attempts": _next_class_attempt(meta, "temporary"),
+                            "class_attempts": class_attempts,
                             "next_retry_at": time.monotonic() + delay,
                             "capacity": False,
                             "retry_class": "temporary",

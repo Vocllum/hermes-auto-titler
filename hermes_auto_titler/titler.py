@@ -154,11 +154,17 @@ def _meta_retry_class(meta: Dict[str, Any]) -> str:
 
 
 def _next_class_attempt(meta: Dict[str, Any], retry_class: str) -> int:
-    """Count consecutive failures of the current class without hiding total attempts."""
+    """Count consecutive failures of the current class without hiding total attempts.
+
+    Explicit class_attempts=0 means a successful provider call broke the
+    failure streak. Fall back to total attempts only for old state that
+    predates the class_attempts field entirely.
+    """
     previous_class = _meta_retry_class(meta)
-    previous_count = int(meta.get("class_attempts", 0))
-    if previous_count <= 0 and previous_class == retry_class:
-        previous_count = int(meta.get("attempts", 0))
+    if "class_attempts" in meta:
+        previous_count = max(0, int(meta.get("class_attempts", 0)))
+    else:
+        previous_count = max(0, int(meta.get("attempts", 0)))
     return previous_count + 1 if previous_class == retry_class else 1
 
 
@@ -532,6 +538,18 @@ class AutoTitler:
         from an existing finalize intent may evaluate a closed session.
         """
         with self._state_lock:
+            if finalize_claim is None:
+                retry_meta = self._failed_sessions.get(session_id)
+                if (
+                    retry_meta
+                    and bool(retry_meta.get("parked"))
+                    and _meta_retry_class(retry_meta) == "blocked"
+                ):
+                    log.debug(
+                        "auto-titler automatic eval suppressed for parked blocked session %s",
+                        session_id[:12],
+                    )
+                    return
             if session_id in self._closing_fenced and finalize_claim is None:
                 # The fence expresses an unresolved terminal intent, never
                 # "this session is closed forever".  If no intent remains the
@@ -659,7 +677,10 @@ class AutoTitler:
                             elif meta:
                                 # pending/throttled are lifecycle states, not
                                 # provider failures. Keep the terminal intent
-                                # alive without consuming the failure budget.
+                                # alive without consuming the total failure
+                                # count, and break the consecutive failure streak.
+                                meta["class_attempts"] = 0
+                                meta["parked"] = False
                                 meta["next_retry_at"] = time.monotonic() + 30
                         self._persist_state_locked()
                 except Exception as e:

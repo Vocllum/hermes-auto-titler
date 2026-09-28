@@ -41,6 +41,8 @@ def test_extract_section_lengths_indexed_sampled_history():
         "User turn 1 of 12: 最初目标\n\n"
         "Sampled history:\n"
         "User turn 6 of 12: 中段进展\n\n"
+        "Compaction summary (secondary evidence):\n"
+        "中段压缩主题\n\n"
         "Recent:\n"
         "User turn 12 of 12: 当前阶段\n\n"
         "Fallback historical summary:\n"
@@ -51,6 +53,7 @@ def test_extract_section_lengths_indexed_sampled_history():
     assert any(k.startswith("Opening:") for k in secs)
     assert any(k.startswith("Sampled history:") for k in secs)
     assert any(k.startswith("Recent:") for k in secs)
+    assert any(k.startswith("Compaction summary (secondary evidence):") for k in secs)
     assert any(k.startswith("Fallback historical summary:") for k in secs)
 
 

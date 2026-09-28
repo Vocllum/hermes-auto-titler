@@ -524,8 +524,11 @@ def smart_preview(text: str, limit: int) -> str:
             tail = tail[-tail_budget:].lstrip()
 
         return f"{head} … {tail}"
-    cut = limit * 2 // 3
-    return text[:cut].rstrip() + " … " + text[-(limit - cut):].lstrip()
+    separator = " … "
+    content_budget = max(2, limit - len(separator))
+    cut = max(1, content_budget * 2 // 3)
+    tail_budget = max(1, content_budget - cut)
+    return text[:cut].rstrip() + separator + text[-tail_budget:].lstrip()
 
 
 def sample_user_messages(users: List[Tuple[str, str]], threshold: int) -> List[Tuple[str, str]]:

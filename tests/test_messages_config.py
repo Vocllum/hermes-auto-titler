@@ -159,11 +159,11 @@ def test_load_context_preview_chars():
     recent, all_user, opening = load_context(
         db, "s1", recent_turns=2, include_all_user=True, preview_chars=200
     )
-    # opening/recent 的超长消息被截断到 200 字符 + 省略号；短消息原样
+    # assistant 单行仍可按头部截断；长 user 单行必须保留首尾。
     for _, text in recent + opening:
         assert len(text) <= 201
     assert any(t == "x" * 200 + "…" for _, t in recent)
-    assert any(t == "y" * 200 + "…" for _, t in recent)
+    assert any(t == ("y" * 133 + "…" + "y" * 67) for _, t in recent)
     assert any(t == "短消息" for _, t in opening)
     # 用户消息（意图轨迹）不截断
     assert len(all_user[0][1]) == 3

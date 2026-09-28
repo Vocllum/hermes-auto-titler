@@ -335,6 +335,42 @@ def test_indexed_timeline_prompt_keeps_opening_history_and_recent_distinct():
     assert "Earlier-history summary:" not in prompt
 
 
+def test_timeline_summary_fallback_precedes_visible_continuation_and_is_not_opening():
+    _, llm, titler = make()
+    timeline = {
+        "total_user_turns": 5,
+        "opening": [{"turn": 1, "user": "压缩后的第一条可见请求"}],
+        "sampled_history": [{"turn": 3, "user": "压缩后的中段请求"}],
+        "recent": [
+            {"turn": 4, "user": "最近请求一", "assistant": "最近结果一"},
+            {"turn": 5, "user": "最近请求二", "assistant": None},
+        ],
+        "raw_history_recovered": False,
+        "summary_fallback": True,
+    }
+    titler._generate(
+        "旧标题",
+        recent=[],
+        all_user=[],
+        opening=[],
+        earlier_summary="真正更早的历史目标",
+        timeline=timeline,
+    )
+    system = llm.calls[-1]["messages"][0]["content"]
+    prompt = llm.calls[-1]["messages"][1]["content"]
+
+    assert "Fallback historical summary is earlier history" in system
+    assert "Opening shows initial purpose" not in system
+    assert prompt.startswith("Conversation contains 5 visible user turns after compaction.")
+    assert prompt.index("Fallback historical summary:") < prompt.index("Visible continuation:")
+    assert prompt.index("Visible continuation:") < prompt.index("Recent:")
+    assert "Opening:" not in prompt
+    assert "Visible start:" in prompt
+    assert "Sampled continuation:" in prompt
+    assert "Visible user turn 1 of 5: 压缩后的第一条可见请求" in prompt
+    assert "真正更早的历史目标" in prompt
+
+
 def test_compacted_prompt_presents_historical_anchor_before_visible_continuation():
     _, llm, titler = make()
     titler._generate(

@@ -633,6 +633,131 @@ def _sample_turns(
     return turns
 
 
+def build_indexed_timeline(
+    raw_turns: List[List[Tuple[str, str]]],
+    *,
+    opening_turns: int,
+    recent_turns: int,
+    include_all_user: bool,
+    preview_chars: int,
+    user_message_threshold: int,
+    user_message_preview_chars: int,
+    earlier_summary: Optional[str] = None,
+    raw_history_recovered: bool = False,
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Build the production indexed evidence view from already-cleaned user turns.
+
+    Opening and Recent are semantic anchors. Sampled history is selected only
+    from the middle. Opening and Recent keep the final cleaned assistant reply
+    for each chosen turn so early subject identification is not lost.
+
+    A recovered compaction summary is retained as secondary evidence only when
+    sampling omits raw turns; if every raw turn is represented, the duplicate
+    summary is dropped. When raw history is unavailable, the same summary remains
+    fallback evidence for the visible continuation.
+    """
+    total_turns = len(raw_turns)
+    if total_turns <= 1:
+        opening_count = total_turns
+        recent_count = 0
+    else:
+        recent_count = min(max(0, recent_turns), total_turns - 1)
+        opening_count = min(
+            max(0, opening_turns),
+            max(0, total_turns - recent_count),
+        )
+    recent_start = total_turns - recent_count
+
+    if include_all_user:
+        if user_message_threshold <= 0:
+            middle_limit = -1
+        else:
+            middle_limit = max(
+                0,
+                user_message_threshold - opening_count - recent_count,
+            )
+        sampled_indices = sample_middle_turn_indices(
+            total_turns,
+            opening_count,
+            recent_count,
+            middle_limit,
+        )
+    else:
+        sampled_indices = []
+
+    def raw_user(turn: List[Tuple[str, str]]) -> str:
+        for role, text in turn:
+            if role == "user":
+                return text
+        return ""
+
+    def raw_assistant(turn: List[Tuple[str, str]]) -> Optional[str]:
+        for role, text in reversed(turn):
+            if role == "assistant":
+                cleaned = clean_assistant_dialog(text)
+                return cleaned or None
+        return None
+
+    def user_preview(text: str, limit: int) -> str:
+        if limit <= 0:
+            return text
+        return smart_preview(text, limit)
+
+    def assistant_preview(turn: List[Tuple[str, str]]) -> Optional[str]:
+        text = raw_assistant(turn)
+        if text and preview_chars > 0:
+            return smart_preview(text, preview_chars)
+        return text
+
+    opening_timeline = [
+        {
+            "turn": idx + 1,
+            "user": user_preview(raw_user(raw_turns[idx]), preview_chars),
+            "assistant": assistant_preview(raw_turns[idx]),
+        }
+        for idx in range(opening_count)
+    ]
+    sampled_timeline = [
+        {
+            "turn": idx + 1,
+            "user": user_preview(
+                raw_user(raw_turns[idx]),
+                user_message_preview_chars,
+            ),
+        }
+        for idx in sampled_indices
+    ]
+    recent_timeline = [
+        {
+            "turn": idx + 1,
+            "user": user_preview(raw_user(raw_turns[idx]), preview_chars),
+            "assistant": assistant_preview(raw_turns[idx]),
+        }
+        for idx in range(recent_start, total_turns)
+    ]
+
+    selected_turns = opening_count + len(sampled_indices) + recent_count
+    summary_fallback = bool(earlier_summary and not raw_history_recovered)
+    summary_supporting = bool(
+        earlier_summary
+        and raw_history_recovered
+        and selected_turns < total_turns
+    )
+    if raw_history_recovered and not summary_supporting:
+        earlier_summary = None
+
+    timeline = {
+        "total_user_turns": total_turns,
+        "opening": opening_timeline,
+        "sampled_history": sampled_timeline,
+        "recent": recent_timeline,
+        "raw_history_recovered": raw_history_recovered,
+        "summary_fallback": summary_fallback,
+        "summary_supporting": summary_supporting,
+    }
+    return timeline, earlier_summary
+
+
 def load_context_with_summary(
     db,
     session_id: str,
@@ -789,104 +914,20 @@ def load_context_with_summary(
     users = sample_user_messages(users, user_message_threshold)
 
     if include_timeline:
-        total_turns = len(raw_turns)
-        if total_turns <= 1:
-            opening_count = total_turns
-            recent_count = 0
-        else:
-            # Keep one true Opening anchor, then satisfy Recent first so short
-            # conversations expose their latest direction rather than spending
-            # most of the evidence budget on the beginning.
-            recent_count = min(max(0, recent_turns), total_turns - 1)
-            opening_count = min(
-                max(0, opening_turns),
-                max(0, total_turns - recent_count),
-            )
-        recent_start = total_turns - recent_count
-
-        if include_all_user:
-            if user_message_threshold <= 0:
-                middle_limit = -1
-            else:
-                middle_limit = max(
-                    0,
-                    user_message_threshold - opening_count - recent_count,
-                )
-            sampled_indices = sample_middle_turn_indices(
-                total_turns,
-                opening_count,
-                recent_count,
-                middle_limit,
-            )
-        else:
-            sampled_indices = []
-
-        def _raw_user(turn: List[Tuple[str, str]]) -> str:
-            for role, text in turn:
-                if role == "user":
-                    return text
-            return ""
-
-        def _raw_assistant(turn: List[Tuple[str, str]]) -> Optional[str]:
-            for role, text in reversed(turn):
-                if role == "assistant":
-                    cleaned = clean_assistant_dialog(text)
-                    return cleaned or None
-            return None
-
-        def _user_preview(text: str, limit: int) -> str:
-            if limit <= 0:
-                return text
-            return smart_preview(text, limit)
-
-        opening_timeline = [
-            {
-                "turn": idx + 1,
-                "user": _user_preview(_raw_user(raw_turns[idx]), preview_chars),
-            }
-            for idx in range(opening_count)
-        ]
-        sampled_timeline = [
-            {
-                "turn": idx + 1,
-                "user": _user_preview(
-                    _raw_user(raw_turns[idx]),
-                    user_message_preview_chars,
-                ),
-            }
-            for idx in sampled_indices
-        ]
-        recent_timeline = []
-        for idx in range(recent_start, total_turns):
-            user_text = _user_preview(_raw_user(raw_turns[idx]), preview_chars)
-            assistant_text = _raw_assistant(raw_turns[idx])
-            if assistant_text and preview_chars > 0:
-                assistant_text = smart_preview(assistant_text, preview_chars)
-            recent_timeline.append(
-                {
-                    "turn": idx + 1,
-                    "user": user_text,
-                    "assistant": assistant_text,
-                }
-            )
-
-        # Once the physical pre-compaction user lineage is available, the
-        # compaction summary is redundant second-hand evidence. Keep summary
-        # parsing only as a fallback for old hosts or incomplete histories.
         raw_history_recovered = bool(
             summaries and include_compacted_supported and raw_user_before_summary
         )
-        if raw_history_recovered:
-            earlier_summary = None
-
-        timeline = {
-            "total_user_turns": total_turns,
-            "opening": opening_timeline,
-            "sampled_history": sampled_timeline,
-            "recent": recent_timeline,
-            "raw_history_recovered": raw_history_recovered,
-            "summary_fallback": bool(earlier_summary),
-        }
+        timeline, earlier_summary = build_indexed_timeline(
+            raw_turns,
+            opening_turns=opening_turns,
+            recent_turns=recent_turns,
+            include_all_user=include_all_user,
+            preview_chars=preview_chars,
+            user_message_threshold=user_message_threshold,
+            user_message_preview_chars=user_message_preview_chars,
+            earlier_summary=earlier_summary,
+            raw_history_recovered=raw_history_recovered,
+        )
         return (
             recent,
             (users if include_all_user else []),

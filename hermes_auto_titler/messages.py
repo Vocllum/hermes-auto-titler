@@ -562,6 +562,39 @@ def sample_user_messages(users: List[Tuple[str, str]], threshold: int) -> List[T
     return [users[i] for i in chosen]
 
 
+def sample_middle_turn_indices(
+    total_turns: int,
+    opening_count: int,
+    recent_count: int,
+    limit: int,
+) -> List[int]:
+    """Choose evenly spaced user-turn indices only from the middle of the chat.
+
+    Opening and recent turns are semantic anchors and are never re-selected here.
+    limit <= 0 keeps the whole middle region. Returned indices are zero-based
+    and deterministic; each selected point is near the center of an equal time bucket.
+    """
+    if total_turns <= 0:
+        return []
+    start = min(max(0, opening_count), total_turns)
+    end = max(start, total_turns - max(0, recent_count))
+    candidates = list(range(start, end))
+    if limit <= 0 or len(candidates) <= limit:
+        return candidates
+    if limit == 1:
+        return [candidates[len(candidates) // 2]]
+
+    chosen: List[int] = []
+    n = len(candidates)
+    for i in range(limit):
+        pos = int(((i + 0.5) * n) / limit)
+        pos = min(max(pos, 0), n - 1)
+        idx = candidates[pos]
+        if not chosen or idx != chosen[-1]:
+            chosen.append(idx)
+    return chosen
+
+
 def _sample_turns(
     pairs: List[Tuple[str, str]],
     preview,
@@ -607,12 +640,8 @@ def load_context_with_summary(
     user_message_threshold: int = 0,
     user_message_preview_chars: int = 0,
     summary_chars: int = 0,
-) -> Tuple[
-    List[Tuple[str, str]],
-    List[Tuple[str, str]],
-    List[Tuple[str, str]],
-    Optional[str],
-]:
+    include_timeline: bool = False,
+) -> Any:
     """返回 (recent, all_user, opening, earlier_summary)。
 
     earlier_summary 与可见用户意图轨迹分开；它永远不进入 opening、recent
@@ -626,11 +655,13 @@ def load_context_with_summary(
     # - active=0, compacted=0: 撤回/Rewind/删除的消息，严禁当作有效人类意图恢复
     # 因此传入 include_compacted=True（保持 include_inactive=False），既能取回压缩前的
     # 真实首轮轮次，又严格排除撤回消息。若对端为不支持该参数的旧版/Mock DB，则降级兼容。
+    include_compacted_supported = True
     try:
         conv = db.get_messages_as_conversation(
             session_id, include_ancestors=True, include_compacted=True
         )
     except TypeError:
+        include_compacted_supported = False
         conv = db.get_messages_as_conversation(
             session_id, include_ancestors=True
         )
@@ -638,6 +669,7 @@ def load_context_with_summary(
     pairs: List[Tuple[str, str]] = []
     summaries: List[Tuple[Optional[float], int, str]] = []
     saw_summary = False
+    raw_user_before_summary = False
     for m in conv:
         role = m.get("role")
         if role not in ("user", "assistant"):
@@ -662,6 +694,10 @@ def load_context_with_summary(
             continue
         if is_system_noise(text):
             continue
+        if role == "user" and not saw_summary:
+            # A genuine human turn physically before the first compaction carrier
+            # proves that include_compacted recovered the pre-compaction lineage.
+            raw_user_before_summary = True
         # Handoff/replay can persist the same user turn twice without an
         # assistant response between them.  Keep later turns with the same
         # wording; only collapse the adjacent replay introduced by the
@@ -675,10 +711,17 @@ def load_context_with_summary(
             text = clean_assistant_dialog(text)
         if preview_chars <= 0 or len(text) <= preview_chars:
             return text
+        # User conclusions and constraints often live at the end of a long
+        # message. Always preserve both ends instead of falling back to a
+        # head-only cut when punctuation is sparse.
+        if role == "user":
+            return smart_preview(text, preview_chars)
         parts = [p.strip() for p in _SENT_RE.split(text) if p.strip()]
         if len(parts) >= 2:
             return smart_preview(text, preview_chars)
         return text[:preview_chars] + "…"
+
+    raw_turns = _sample_turns(pairs, lambda role, text: text)
 
     # 角色配额：每个选中的真实用户轮次只保留用户消息和最后一条模型文本
     # 回复。工具过程已经被过滤；压缩后残留在首条 user 之前的 assistant
@@ -740,6 +783,103 @@ def load_context_with_summary(
     if user_message_preview_chars > 0:
         users = [(r, smart_preview(t, user_message_preview_chars)) for r, t in users]
     users = sample_user_messages(users, user_message_threshold)
+
+    if include_timeline:
+        total_turns = len(raw_turns)
+        opening_count = min(max(0, opening_turns), total_turns)
+        recent_count = min(max(0, recent_turns), max(0, total_turns - opening_count))
+        recent_start = total_turns - recent_count
+
+        if include_all_user:
+            if user_message_threshold <= 0:
+                middle_limit = 0
+            else:
+                middle_limit = max(
+                    0,
+                    user_message_threshold - opening_count - recent_count,
+                )
+            sampled_indices = sample_middle_turn_indices(
+                total_turns,
+                opening_count,
+                recent_count,
+                middle_limit,
+            )
+        else:
+            sampled_indices = []
+
+        def _raw_user(turn: List[Tuple[str, str]]) -> str:
+            for role, text in turn:
+                if role == "user":
+                    return text
+            return ""
+
+        def _raw_assistant(turn: List[Tuple[str, str]]) -> Optional[str]:
+            for role, text in reversed(turn):
+                if role == "assistant":
+                    cleaned = clean_assistant_dialog(text)
+                    return cleaned or None
+            return None
+
+        def _user_preview(text: str, limit: int) -> str:
+            if limit <= 0:
+                return text
+            return smart_preview(text, limit)
+
+        opening_timeline = [
+            {
+                "turn": idx + 1,
+                "user": _user_preview(_raw_user(raw_turns[idx]), preview_chars),
+            }
+            for idx in range(opening_count)
+        ]
+        sampled_timeline = [
+            {
+                "turn": idx + 1,
+                "user": _user_preview(
+                    _raw_user(raw_turns[idx]),
+                    user_message_preview_chars,
+                ),
+            }
+            for idx in sampled_indices
+        ]
+        recent_timeline = []
+        for idx in range(recent_start, total_turns):
+            user_text = _user_preview(_raw_user(raw_turns[idx]), preview_chars)
+            assistant_text = _raw_assistant(raw_turns[idx])
+            if assistant_text and preview_chars > 0:
+                assistant_text = smart_preview(assistant_text, preview_chars)
+            recent_timeline.append(
+                {
+                    "turn": idx + 1,
+                    "user": user_text,
+                    "assistant": assistant_text,
+                }
+            )
+
+        # Once the physical pre-compaction user lineage is available, the
+        # compaction summary is redundant second-hand evidence. Keep summary
+        # parsing only as a fallback for old hosts or incomplete histories.
+        raw_history_recovered = bool(
+            summaries and include_compacted_supported and raw_user_before_summary
+        )
+        if raw_history_recovered:
+            earlier_summary = None
+
+        timeline = {
+            "total_user_turns": total_turns,
+            "opening": opening_timeline,
+            "sampled_history": sampled_timeline,
+            "recent": recent_timeline,
+            "raw_history_recovered": raw_history_recovered,
+            "summary_fallback": bool(earlier_summary),
+        }
+        return (
+            recent,
+            (users if include_all_user else []),
+            opening,
+            earlier_summary,
+            timeline,
+        )
 
     return recent, (users if include_all_user else []), opening, earlier_summary
 

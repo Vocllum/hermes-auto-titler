@@ -1862,3 +1862,24 @@ def test_indexed_timeline_zero_middle_budget_does_not_mean_unlimited():
     assert [row["turn"] for row in timeline["opening"]] == [1]
     assert timeline["sampled_history"] == []
     assert [row["turn"] for row in timeline["recent"]] == [10]
+
+
+def test_indexed_timeline_three_turns_prioritizes_recent_anchor():
+    conv = []
+    for i in range(1, 4):
+        conv.append({"role": "user", "content": f"user-{i}"})
+        conv.append({"role": "assistant", "content": f"assistant-{i}"})
+
+    _, _, _, _, timeline = load_context_with_summary(
+        FakeDB(conv),
+        "s1",
+        recent_turns=2,
+        include_all_user=True,
+        opening_turns=2,
+        user_message_threshold=40,
+        include_timeline=True,
+    )
+
+    assert [row["turn"] for row in timeline["opening"]] == [1]
+    assert timeline["sampled_history"] == []
+    assert [row["turn"] for row in timeline["recent"]] == [2, 3]

@@ -289,7 +289,7 @@ def test_production_prompt_grounds_subject_in_user_purpose_before_title():
     system = llm.calls[-1]["messages"][0]["content"]
     user = llm.calls[-1]["messages"][1]["content"]
 
-    assert "Infer the durable subject from the user's goals before comparing title hypotheses" in system
+    assert "Infer the durable subject from the user's goals before comparing titles" in system
     assert "purpose" in system
     assert "tool and file names" in system
     assert user.index("Opening:") < user.index("Recent:")

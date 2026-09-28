@@ -1497,6 +1497,7 @@ class AutoTitler:
         proposed: Optional[str] = None,
         earlier_summary: Optional[str] = None,
         session_id: Optional[str] = None,
+        timeline: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Optional[str]]:
         raise NotImplementedError("Title decision policy must be provided by policy.AutoTitler")
 

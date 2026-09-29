@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **State outside the plugin install directory**: Scheduling state now lives in the host's plugin-data directory (`plugin_data_dir("hermes-auto-titler")/state.json`) instead of `<hermes home>/plugins/hermes-auto-titler/`, the directory the host installs the plugin from. A state rewrite inside the install tree moves the packaging-member hash the host records for dependency inputs, so a source update can abort at publication with `Dependency inputs changed while preparing publication; retry` and leave the install reported out of sync. Existing state is migrated once and only when plugin-data has no state file yet, so newer state is never overwritten, a legacy file recreated by a concurrent writer is left in place, and a cross-device move copies with `fsync` before the source is removed.
+
 ## 0.3.0 — 2026-09-24
 
 - **Intent-faithful conversation extraction**: Recognize genuine compaction carriers instead of treating discussions or quoted examples about compaction as summaries; keep compaction history separate from visible user-intent evidence; unwrap runtime interruption/model-change/network-error wrappers without losing the real request; strip group-chat headers/rules; and cut injected task-list or pruned-skill context at its line boundary.

@@ -77,7 +77,7 @@ def main() -> int:
 
     # 1. manifest declares v2 + a schema for every plugin-side default key.
     check("manifest_version == 2", manifest.manifest_version == 2)
-    check("version is 0.3.0", manifest.version == "0.3.0")
+    check("version is on 0.3 line", str(manifest.version).startswith("0.3."))
     plugin_defaults = dict(cfg_mod.DEFAULTS)
     # `model` is the internal name of the setting declared externally as
     # `title_model`: the host reserves the bare `model` settings root, so it

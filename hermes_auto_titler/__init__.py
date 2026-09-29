@@ -19,6 +19,7 @@ from .config import load_config
 from . import titler as _titler
 from . import policy as _policy
 from .policy import AutoTitler
+from .titler import migrate_legacy_state
 from .commands import make_handler
 
 # Keep direct imports (`from hermes_auto_titler.titler import AutoTitler`) on the
@@ -48,6 +49,8 @@ def _resolve_config(ctx) -> dict:
 def register(ctx) -> None:
     """Hermes 插件入口：注册 pre_llm_call/on_session_end/on_session_finalize hook + /autotitler 命令。"""
     cfg = _resolve_config(ctx)
+    if cfg.get("enabled", True):
+        migrate_legacy_state()
     titler = AutoTitler(ctx, cfg)
     if cfg.get("enabled", True):
         mode = str(cfg.get("first_title_mode", "builtin")).lower()

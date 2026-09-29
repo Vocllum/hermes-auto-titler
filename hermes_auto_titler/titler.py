@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import collections
 import contextvars
+import errno
 import json
 import logging
+import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -54,6 +57,73 @@ _db_lock = threading.Lock()
 
 # Hermes 内部平台：cron（定时任务）与 subagent（子代理）的轮次不参与标题评估
 _INTERNAL_PLATFORMS = frozenset({"cron", "subagent"})
+
+
+def plugin_data_dir(name: str) -> Path:
+    """Resolve plugin-owned persistent storage, with a legacy-host fallback."""
+    try:
+        from plugins.plugin_storage import plugin_data_dir as host_plugin_data_dir
+    except ImportError:
+        return Path(get_hermes_home()) / "plugin-data" / name
+
+    # Keep the module-level home resolver authoritative for tests and callers that
+    # monkeypatch it; the host helper resolves the active profile independently.
+    try:
+        from hermes_constants import get_hermes_home as host_get_hermes_home
+    except ImportError:
+        return Path(host_plugin_data_dir(name))
+    if Path(host_get_hermes_home()) != Path(get_hermes_home()):
+        return Path(get_hermes_home()) / "plugin-data" / name
+    return Path(host_plugin_data_dir(name))
+
+
+def state_path() -> Path:
+    return plugin_data_dir("hermes-auto-titler") / "state.json"
+
+
+def migrate_legacy_state() -> None:
+    """Move state from the install tree without replacing newer plugin-data state."""
+    legacy = Path(get_hermes_home()) / "plugins" / "hermes-auto-titler" / "state.json"
+    destination = state_path()
+    try:
+        source_stat = legacy.stat()
+    except FileNotFoundError:
+        return
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # link() is atomic and exclusive: a concurrent/new destination is never replaced.
+        os.link(legacy, destination)
+    except FileExistsError:
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            log.warning("auto-titler legacy state migration failed: %s", exc)
+            return
+        try:
+            with legacy.open("rb") as source, destination.open("xb") as target:
+                shutil.copyfileobj(source, target)
+                target.flush()
+                os.fsync(target.fileno())
+        except FileExistsError:
+            return
+        except OSError as copy_error:
+            try:
+                destination.unlink()
+            except OSError:
+                pass
+            log.warning("auto-titler legacy state migration failed: %s", copy_error)
+            return
+
+    # Do not remove a legacy file recreated by a concurrent writer.
+    try:
+        current_stat = legacy.stat()
+        if (current_stat.st_dev, current_stat.st_ino) == (source_stat.st_dev, source_stat.st_ino):
+            legacy.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning("auto-titler legacy state cleanup failed: %s", exc)
 
 
 def get_db() -> SessionDB:
@@ -226,7 +296,8 @@ class AutoTitler:
         self._worker_epochs: Dict[str, int] = {}
         self._closing_fenced: set[str] = set()
         self._unresolved_disk_records: Dict[str, Dict[str, Any]] = {}
-        self._state_path = Path(get_hermes_home()) / "plugins" / "hermes-auto-titler" / "state.json"
+        migrate_legacy_state()
+        self._state_path = state_path()
 
     @property
     def db(self) -> SessionDB:

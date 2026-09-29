@@ -2118,6 +2118,24 @@ def test_unscoped_secret_error_is_logged_verbatim_and_automatic_retry_is_parked(
     assert llm.calls == before_calls + 1
 
 
+def test_provider_failure_logs_do_not_expose_embedded_credentials(caplog):
+    class SecretError(RuntimeError):
+        secret_name = "EXAMPLE_API_KEY"
+        developer_detail = "debug token: test-secret-value-12345"
+
+    class BoomLlm:
+        def complete(self, **kwargs):
+            raise SecretError("connection failed; token=test-secret-value-12345")
+
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    t = AutoTitler(SimpleNamespace(llm=BoomLlm()), {**DEFAULTS}, db=db)
+    with caplog.at_level("WARNING"):
+        result = t.evaluate("s1", force=True)
+    assert result["action"] == "failed"
+    assert "test-secret-value-12345" not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
 def test_finalize_temporary_failure_switches_to_long_backoff_and_survives_restart(
     recording_threads, tmp_path
 ):

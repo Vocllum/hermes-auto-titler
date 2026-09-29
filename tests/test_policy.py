@@ -406,6 +406,51 @@ def test_single_turn_opening_renders_assistant_reply_even_without_recent():
     assert "Assistant reply after user turn 1: 这是 Redis worker 的重试配置问题" in prompt
 
 
+def test_generic_user_subject_can_be_clarified_by_assistant_and_followed_up():
+    _, llm, titler = make()
+    timeline = {
+        "total_user_turns": 5,
+        "opening": [
+            {"turn": 1, "user": "网页服务最近不稳定，请分析一下", "assistant": "故障核心是 Redis worker 泄漏；需要查队列任务重复订阅。"},
+            {"turn": 2, "user": "照这个根因继续修", "assistant": "完成。"},
+        ],
+        "sampled_history": [{"turn": 3, "user": "继续"}],
+        "recent": [{"turn": 4, "user": "继续测试", "assistant": "完成。"}, {"turn": 5, "user": "总结这项工作", "assistant": "完成。"}],
+        "summary_fallback": False,
+    }
+    titler._generate("", recent=[], all_user=[], opening=[], timeline=timeline, blind=True)
+    system, prompt = (message["content"] for message in llm.calls[-1]["messages"])
+
+    assert "For a broad user goal, prefer the assistant's concrete diagnosis if later users refer back to it" in system
+    assert "ignore unrelated assistant claims" in system
+    assert "Assistant reply after user turn 1: 故障核心是 Redis worker 泄漏" in prompt
+    assert "User turn 2 of 5: 照这个根因继续修" in prompt
+
+
+def test_generic_queue_diagnosis_survives_unrelated_followup_details():
+    _, llm, titler = make()
+    timeline = {
+        "total_user_turns": 5,
+        "opening": [
+            {"turn": 1, "user": "后台队列消费卡住了，帮我查查", "assistant": "从报错信息看，这是 Redis worker 连接池泄漏的问题。"},
+            {"turn": 2, "user": "先看看日志吧", "assistant": "worker 第三次重试后超时断开。"},
+        ],
+        "sampled_history": [{"turn": 3, "user": "那怎么修"}],
+        "recent": [
+            {"turn": 4, "user": "改好了，再帮我看看有没有其他隐患", "assistant": "还有并发问题需要加锁。"},
+            {"turn": 5, "user": "加锁方案确认下", "assistant": "用分布式锁 + TTL。"},
+        ],
+        "summary_fallback": False,
+    }
+    titler._generate("", recent=[], all_user=[], opening=[], timeline=timeline, blind=True)
+    system, prompt = (message["content"] for message in llm.calls[-1]["messages"])
+
+    assert "Redis worker" in prompt
+    assert "Assistant reply after user turn 1" in prompt
+    assert "User turn 5 of 5: 加锁方案确认下" in prompt
+    assert "ignore unrelated assistant claims" in system
+
+
 def test_timeline_summary_fallback_precedes_visible_continuation_and_is_not_opening():
     _, llm, titler = make()
     timeline = {

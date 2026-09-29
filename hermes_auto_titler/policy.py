@@ -202,7 +202,8 @@ class AutoTitler(_BaseAutoTitler):
             f"{contract}\n{decision}\n{style_req}\nStrategy: {strategy}. {strategy_rule}\n"
             "Infer the durable subject from the user's goals before comparing titles. "
             "Prefer user purpose over tool or file names unless that exact thing is the subject. "
-            "Assistant replies may clarify the specific subject named or implied by the user, but cannot create an unrelated subject. "
+            "For a broad user goal, prefer the assistant's concrete diagnosis if later users refer back to it; "
+            "ignore unrelated assistant claims. "
             f"{chronology_rule}"
             f"{summary_rule}"
             f"{incumbent_rule}"
@@ -401,16 +402,10 @@ class AutoTitler(_BaseAutoTitler):
             exc_type = type(e).__name__
             exc_text = str(e)
             typed_error = f"{exc_type}: {exc_text}" if exc_text else exc_type
-            log.warning("auto-titler LLM call failed [%s]: %s", exc_type, exc_text)
-            secret_name = getattr(e, "secret_name", "")
-            developer_detail = getattr(e, "developer_detail", "")
-            if secret_name:
-                log.warning("auto-titler LLM failure secret_name=%s", secret_name)
-            if developer_detail:
-                log.warning(
-                    "auto-titler LLM failure developer_detail=%s",
-                    developer_detail,
-                )
+            # Provider exceptions and their developer_detail may embed API keys
+            # or authenticated URLs. Keep the full text in memory for retry
+            # classification, but never send it to persistent host logs.
+            log.warning("auto-titler LLM call failed [%s]: [REDACTED]", exc_type)
             self._last_generate_error = typed_error
             if hasattr(self, "_last_generate_errors"):
                 self._last_generate_errors[sid_key] = typed_error

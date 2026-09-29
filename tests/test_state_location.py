@@ -1,4 +1,5 @@
 import errno
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,20 @@ def test_state_path_uses_plugin_data_outside_install_directory(monkeypatch):
     assert home / "plugins" / "hermes-auto-titler" not in path.parents
 
 
+def test_sandbox_constructor_does_not_migrate_profile_state(monkeypatch):
+    _isolate_data_dir(monkeypatch)
+    home = Path(titler.get_hermes_home())
+    legacy = home / "plugins" / "hermes-auto-titler" / "state.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"version":1,"sessions":{}}', encoding="utf-8")
+
+    instance = _titler()
+    instance._state_path = home / "sandbox" / "state.json"
+
+    assert legacy.exists()
+    assert not titler.state_path().exists()
+
+
 def test_legacy_state_migrates_once_without_overwriting_new_state(tmp_path, monkeypatch):
     _isolate_data_dir(monkeypatch)
     home = Path(titler.get_hermes_home())
@@ -43,15 +58,15 @@ def test_legacy_state_migrates_once_without_overwriting_new_state(tmp_path, monk
     legacy.parent.mkdir(parents=True)
     legacy.write_text('{"version":1,"sessions":{"legacy":{}}}\n', encoding="utf-8")
 
-    _titler()
+    titler.migrate_legacy_state()
 
     assert current.read_text(encoding="utf-8") == '{"version":1,"sessions":{"legacy":{}}}\n'
     assert not legacy.exists()
 
     legacy.write_text('{"version":1,"sessions":{"stale":{}}}\n', encoding="utf-8")
-    _titler()
+    titler.migrate_legacy_state()
 
-    assert current.read_text(encoding="utf-8") == '{"version":1,"sessions":{"legacy":{}}}\n'
+    assert set(json.loads(current.read_text())["sessions"]) == {"legacy", "stale"}
     assert legacy.read_text(encoding="utf-8") == '{"version":1,"sessions":{"stale":{}}}\n'
 
 
@@ -83,6 +98,63 @@ def test_cross_device_copy_migrates_state_and_removes_legacy(monkeypatch):
 
     assert current.read_text(encoding="utf-8") == '{"version":1,"sessions":{"legacy":{}}}\n'
     assert not legacy.exists()
+
+
+def test_cross_device_copy_is_invisible_until_complete(monkeypatch):
+    _isolate_data_dir(monkeypatch)
+    home = Path(titler.get_hermes_home())
+    legacy = home / "plugins/hermes-auto-titler/state.json"
+    current = titler.state_path()
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"version":1,"sessions":{}}', encoding="utf-8")
+    def fail_link(*_):
+        raise OSError(errno.EXDEV, "cross-device")
+
+    monkeypatch.setattr(titler.os, "link", fail_link)
+
+    def interrupted_copy(source, target):
+        target.write(b'{"version":')
+        target.flush()
+        assert not current.exists()
+        raise OSError(errno.EIO, "interrupted")
+
+    monkeypatch.setattr(titler.shutil, "copyfileobj", interrupted_copy)
+    titler.migrate_legacy_state()
+    assert not current.exists()
+    assert legacy.exists()
+
+
+def test_fallback_when_hard_links_unsupported(monkeypatch):
+    _isolate_data_dir(monkeypatch)
+    home = Path(titler.get_hermes_home())
+    legacy = home / "plugins/hermes-auto-titler/state.json"
+    current = titler.state_path()
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"version":1,"sessions":{"unsupported":{}}}', encoding="utf-8")
+
+    def fail_unsupported(*_):
+        raise OSError(getattr(errno, "EOPNOTSUPP", errno.ENOSYS), "not supported")
+
+    monkeypatch.setattr(titler.os, "link", fail_unsupported)
+    titler.migrate_legacy_state()
+    assert json.loads(current.read_text())["sessions"] == {"unsupported": {}}
+    assert not legacy.exists()
+
+
+def test_mkdir_failure_is_fail_open(monkeypatch):
+    _isolate_data_dir(monkeypatch)
+    home = Path(titler.get_hermes_home())
+    legacy = home / "plugins/hermes-auto-titler/state.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"version":1,"sessions":{}}', encoding="utf-8")
+
+    def fail_mkdir(*args, **kwargs):
+        raise OSError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(titler.Path, "mkdir", fail_mkdir)
+    # Should not raise
+    titler.migrate_legacy_state()
+    assert legacy.exists()
 
 
 def test_failed_cross_device_copy_does_not_delete_concurrent_destination(monkeypatch):

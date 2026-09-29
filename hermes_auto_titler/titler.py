@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -81,54 +82,107 @@ def state_path() -> Path:
     return plugin_data_dir("hermes-auto-titler") / "state.json"
 
 
+def _reconcile_legacy_state(legacy: Path, destination: Path) -> None:
+    """Recover legacy-only sessions; keep the old file for a still-running writer."""
+    try:
+        old = StateStore(legacy).load()["sessions"]
+        new = StateStore(destination).load()["sessions"]
+        missing = {key: value for key, value in old.items() if key not in new}
+        if missing:
+            StateStore(destination).save({**missing, **new})
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        log.warning("auto-titler legacy state reconciliation failed; both files retained", exc_info=True)
+
+
+def _link_or_copy_atomic(legacy: Path, destination: Path) -> bool:
+    """Safely install legacy state at destination without exposing partial state."""
+    try:
+        os.link(legacy, destination)
+        return True
+    except FileExistsError:
+        _reconcile_legacy_state(legacy, destination)
+        return False
+    except OSError as exc:
+        unsupported = {errno.EXDEV}
+        for name in ("EPERM", "EOPNOTSUPP", "ENOSYS"):
+            if hasattr(errno, name):
+                unsupported.add(getattr(errno, name))
+        if exc.errno not in unsupported:
+            log.warning("auto-titler legacy state migration link failed: %s", exc)
+            return False
+
+    tmp_path: Path | None = None
+    try:
+        fd, raw_path = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=destination.parent,
+        )
+        tmp_path = Path(raw_path)
+        with legacy.open("rb") as source, os.fdopen(fd, "wb") as target:
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+
+        installed = False
+        try:
+            os.link(tmp_path, destination)
+            installed = True
+        except FileExistsError:
+            _reconcile_legacy_state(legacy, destination)
+            return False
+        except OSError as link_err:
+            if link_err.errno not in unsupported:
+                log.warning("auto-titler legacy state link to destination failed: %s", link_err)
+                return False
+            # Atomic publish via replace if destination does not exist yet
+            if not destination.exists():
+                try:
+                    os.replace(tmp_path, destination)
+                    tmp_path = None
+                    installed = True
+                except OSError as replace_err:
+                    log.warning("auto-titler legacy state replace failed: %s", replace_err)
+                    return False
+            else:
+                _reconcile_legacy_state(legacy, destination)
+                return False
+        return installed
+    except OSError as copy_error:
+        log.warning("auto-titler legacy state copy failed: %s", copy_error)
+        return False
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
 def migrate_legacy_state() -> None:
     """Move state from the install tree without replacing newer plugin-data state."""
     legacy = Path(get_hermes_home()) / "plugins" / "hermes-auto-titler" / "state.json"
     destination = state_path()
     try:
         source_stat = legacy.stat()
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         return
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        # link() is atomic and exclusive: a concurrent/new destination is never replaced.
-        os.link(legacy, destination)
-    except FileExistsError:
-        return
+        destination.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        if exc.errno != errno.EXDEV:
-            log.warning("auto-titler legacy state migration failed: %s", exc)
-            return
-        copied_inode = None
-        try:
-            with legacy.open("rb") as source, destination.open("xb") as target:
-                copied_inode = os.fstat(target.fileno())
-                shutil.copyfileobj(source, target)
-                target.flush()
-                os.fsync(target.fileno())
-        except FileExistsError:
-            return
-        except OSError as copy_error:
-            try:
-                current = destination.stat()
-                if copied_inode and (current.st_dev, current.st_ino) == (copied_inode.st_dev, copied_inode.st_ino):
-                    destination.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
-            log.warning("auto-titler legacy state migration failed: %s", copy_error)
-            return
+        log.warning("auto-titler plugin-data directory creation failed: %s", exc)
+        return
+
+    if not _link_or_copy_atomic(legacy, destination):
+        return
 
     # Do not remove a legacy file recreated by a concurrent writer.
     try:
         current_stat = legacy.stat()
         if (current_stat.st_dev, current_stat.st_ino) == (source_stat.st_dev, source_stat.st_ino):
             legacy.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
+    except (FileNotFoundError, OSError) as exc:
         log.warning("auto-titler legacy state cleanup failed: %s", exc)
 
 
@@ -302,7 +356,6 @@ class AutoTitler:
         self._worker_epochs: Dict[str, int] = {}
         self._closing_fenced: set[str] = set()
         self._unresolved_disk_records: Dict[str, Dict[str, Any]] = {}
-        migrate_legacy_state()
         self._state_path = state_path()
 
     @property

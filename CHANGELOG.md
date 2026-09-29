@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.3.1 — 2026-09-29
+
+- **Safe state migration & reconciliation**: Restrict legacy migration strictly to production plugin registration so sandbox harnesses never touch host state. Atomically install cross-device migration files via fsync-backed temporary files, fall back to atomic copy when hard links are unsupported, and reconcile legacy-only records when an older instance concurrently writes.
+
 ## 0.3.0 — 2026-09-29
 
 - **Clearer plugin settings**: All 23 host-rendered options keep their existing keys and defaults, with readable labels and shorter explanations. Advanced options remain visible until Hermes Desktop supports folding them into groups.

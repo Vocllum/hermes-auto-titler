@@ -1,5 +1,5 @@
 name: hermes-auto-titler
-version: 0.3.0
+version: 0.3.1
 description: "Topic-aware session title tracking. Hermes owns the first title; the plugin tracks multi-turn evolution, drift, and session close, and never rewrites host configuration on install or uninstall."
 author: "Vocllum"
 license: Apache-2.0

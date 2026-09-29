@@ -30,13 +30,13 @@ DEFAULTS: dict[str, Any] = {
     "recent_turns": 2,
     "opening_turns": 2,
     "ignore_model_messages": False,
-    # 每条消息预览上限：120 字符（约 1~2 句话），Assistant 与 User 消息对称精炼
+    # Opening/Recent 单条证据预算；长 User 消息始终保留首尾，Recent 的 Assistant 也会压缩。
     "preview_chars": 120,
     "include_all_user_messages": True,
     "user_message_threshold": 40,
     "user_message_preview_chars": 300,
-    # 压缩摘要进入标题评估的截断长度（日常评估用；盲改走 retitle_summary_chars）。
-    # 1200 字符足以覆盖 Goal + 核心 Constraints，无需更长。
+    # 只有无法恢复压缩前原始用户历史时才使用摘要兜底。
+    # 日常兜底预算走 summary_preview_chars；blind/manual 走 retitle_summary_chars。
     "summary_preview_chars": 1200,
     "retitle_summary_chars": 12000,
     "title_style": "concise",

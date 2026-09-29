@@ -159,11 +159,11 @@ def test_load_context_preview_chars():
     recent, all_user, opening = load_context(
         db, "s1", recent_turns=2, include_all_user=True, preview_chars=200
     )
-    # opening/recent 的超长消息被截断到 200 字符 + 省略号；短消息原样
+    # assistant 单行仍可按头部截断；长 user 单行必须保留首尾。
     for _, text in recent + opening:
         assert len(text) <= 201
     assert any(t == "x" * 200 + "…" for _, t in recent)
-    assert any(t == "y" * 200 + "…" for _, t in recent)
+    assert any(t == ("y" * 133 + "…" + "y" * 67) for _, t in recent)
     assert any(t == "短消息" for _, t in opening)
     # 用户消息（意图轨迹）不截断
     assert len(all_user[0][1]) == 3
@@ -1686,3 +1686,301 @@ def test_provenance_contrast_compacted_vs_inactive_vs_default():
     assert "真实意图：搭建流式处理服务" in correct_user_msgs
     assert "已撤回的错误指令" not in correct_user_msgs
 
+
+
+def test_indexed_timeline_samples_only_the_middle_with_real_turn_positions():
+    conv = []
+    for i in range(1, 21):
+        conv.append({"role": "user", "content": f"user-{i}"})
+        conv.append({"role": "assistant", "content": f"assistant-{i}"})
+
+    _, _, _, summary, timeline = load_context_with_summary(
+        FakeDB(conv),
+        "s1",
+        recent_turns=2,
+        include_all_user=True,
+        opening_turns=2,
+        user_message_threshold=8,
+        include_timeline=True,
+    )
+
+    assert summary is None
+    assert timeline["total_user_turns"] == 20
+    assert [row["turn"] for row in timeline["opening"]] == [1, 2]
+    assert [row["turn"] for row in timeline["sampled_history"]] == [5, 9, 13, 17]
+    assert [row["turn"] for row in timeline["recent"]] == [19, 20]
+    selected = {
+        *(row["turn"] for row in timeline["opening"]),
+        *(row["turn"] for row in timeline["sampled_history"]),
+        *(row["turn"] for row in timeline["recent"]),
+    }
+    assert len(selected) == 8
+
+
+def test_indexed_timeline_long_user_message_keeps_head_and_tail():
+    text = "HEAD-" + ("x" * 200) + "-TAIL"
+    conv = [{"role": "user", "content": text}]
+    _, _, _, _, timeline = load_context_with_summary(
+        FakeDB(conv),
+        "s1",
+        recent_turns=2,
+        include_all_user=True,
+        opening_turns=2,
+        preview_chars=40,
+        include_timeline=True,
+    )
+    preview = timeline["opening"][0]["user"]
+    assert preview.startswith("HEAD-")
+    assert preview.endswith("-TAIL")
+    assert len(preview) <= 43  # preview budget plus the ellipsis separators
+
+
+def test_indexed_timeline_drops_redundant_summary_when_all_raw_turns_are_represented():
+    db = PhysicalSqliteSessionDB()
+    db.insert_session("sess_raw_first")
+    db.insert_message(
+        "sess_raw_first",
+        "user",
+        "原始目标：维护 AutoTitler 的长期标题语义",
+        active=0,
+        compacted=1,
+        timestamp=1,
+    )
+    db.insert_message(
+        "sess_raw_first",
+        "assistant",
+        "先检查上下文工程",
+        active=0,
+        compacted=1,
+        timestamp=2,
+    )
+    db.insert_message(
+        "sess_raw_first",
+        "user",
+        _real_compaction_carrier("## Historical Task Snapshot\nAutoTitler 长期标题语义"),
+        active=1,
+        compacted=0,
+        timestamp=3,
+    )
+    db.insert_message(
+        "sess_raw_first",
+        "user",
+        "继续调整采样",
+        active=1,
+        compacted=0,
+        timestamp=4,
+    )
+
+    _, _, _, summary, timeline = load_context_with_summary(
+        db,
+        "sess_raw_first",
+        recent_turns=1,
+        include_all_user=True,
+        opening_turns=1,
+        include_timeline=True,
+    )
+
+    assert summary is None
+    assert timeline["raw_history_recovered"] is True
+    assert timeline["summary_fallback"] is False
+    assert timeline["summary_supporting"] is False
+    assert timeline["opening"][0]["user"].startswith("原始目标")
+    assert timeline["opening"][0]["assistant"] == "先检查上下文工程"
+
+
+def test_indexed_timeline_single_turn_keeps_opening_assistant_subject_identification():
+    conv = [
+        {"role": "user", "content": "这个怎么改"},
+        {
+            "role": "assistant",
+            "content": "这是 Bitwig Studio 控制脚本的设备参数映射问题。",
+        },
+    ]
+    _, _, _, summary, timeline = load_context_with_summary(
+        FakeDB(conv),
+        "s1",
+        recent_turns=2,
+        include_all_user=True,
+        opening_turns=2,
+        preview_chars=120,
+        include_timeline=True,
+    )
+
+    assert summary is None
+    assert timeline["recent"] == []
+    assert timeline["opening"] == [
+        {
+            "turn": 1,
+            "user": "这个怎么改",
+            "assistant": "这是 Bitwig Studio 控制脚本的设备参数映射问题。",
+        }
+    ]
+
+
+def test_indexed_timeline_retains_compaction_summary_when_sparse_sampling_omits_transition():
+    db = PhysicalSqliteSessionDB()
+    db.insert_session("sess_sparse_summary")
+
+    timestamp = 1
+    for turn in range(1, 101):
+        user = f"第 {turn} 轮常规工作"
+        assistant = f"第 {turn} 轮回复"
+        if turn == 50:
+            user = "把核心方向切换到 Redis worker 队列消费与重试"
+            assistant = "确认：后续主线是 Redis worker 的队列消费与重试机制"
+        db.insert_message(
+            "sess_sparse_summary",
+            "user",
+            user,
+            active=0,
+            compacted=1,
+            timestamp=timestamp,
+        )
+        timestamp += 1
+        db.insert_message(
+            "sess_sparse_summary",
+            "assistant",
+            assistant,
+            active=0,
+            compacted=1,
+            timestamp=timestamp,
+        )
+        timestamp += 1
+
+    db.insert_message(
+        "sess_sparse_summary",
+        "user",
+        _real_compaction_carrier(
+            "## Historical Task Snapshot\n核心主线：Redis worker 队列消费与重试"
+        ),
+        active=1,
+        compacted=0,
+        timestamp=timestamp,
+    )
+    db.insert_message(
+        "sess_sparse_summary",
+        "user",
+        "继续排查一个局部超时",
+        active=1,
+        compacted=0,
+        timestamp=timestamp + 1,
+    )
+
+    _, _, _, summary, timeline = load_context_with_summary(
+        db,
+        "sess_sparse_summary",
+        recent_turns=1,
+        include_all_user=True,
+        opening_turns=1,
+        user_message_threshold=8,
+        summary_chars=1200,
+        include_timeline=True,
+    )
+
+    sampled_turns = [row["turn"] for row in timeline["sampled_history"]]
+    assert 50 not in sampled_turns
+    assert timeline["raw_history_recovered"] is True
+    assert timeline["summary_fallback"] is False
+    assert timeline["summary_supporting"] is True
+    assert summary is not None
+    assert "Redis worker" in summary
+
+
+def test_indexed_timeline_keeps_summary_as_fallback_on_legacy_host():
+    class LegacyDuckDB:
+        def __init__(self, conv):
+            self.conv = conv
+
+        def get_messages_as_conversation(self, session_id, include_ancestors=True):
+            return self.conv
+
+    legacy = LegacyDuckDB([
+        {
+            "role": "user",
+            "content": _real_compaction_carrier(
+                "## Historical Task Snapshot\n旧宿主只能看到摘要"
+            ),
+        },
+        {"role": "user", "content": "压缩后的继续消息"},
+    ])
+    _, _, _, summary, timeline = load_context_with_summary(
+        legacy,
+        "s1",
+        recent_turns=1,
+        include_all_user=True,
+        opening_turns=1,
+        include_timeline=True,
+    )
+
+    assert summary is not None and "旧宿主只能看到摘要" in summary
+    assert timeline["raw_history_recovered"] is False
+    assert timeline["summary_fallback"] is True
+    assert timeline["summary_supporting"] is False
+
+
+def test_indexed_timeline_10000_turns_keeps_context_selection_bounded():
+    conv = []
+    for i in range(1, 10001):
+        conv.append({"role": "user", "content": f"message-{i}"})
+        conv.append({"role": "assistant", "content": f"reply-{i}"})
+
+    _, _, _, _, timeline = load_context_with_summary(
+        FakeDB(conv),
+        "s1",
+        recent_turns=2,
+        include_all_user=True,
+        opening_turns=2,
+        user_message_threshold=40,
+        include_timeline=True,
+    )
+
+    assert timeline["total_user_turns"] == 10000
+    assert len(timeline["opening"]) == 2
+    assert len(timeline["sampled_history"]) == 36
+    assert len(timeline["recent"]) == 2
+    assert timeline["opening"][0]["turn"] == 1
+    assert timeline["recent"][-1]["turn"] == 10000
+    middle_turns = [row["turn"] for row in timeline["sampled_history"]]
+    assert middle_turns == sorted(middle_turns)
+    assert all(2 < turn < 9999 for turn in middle_turns)
+
+
+def test_indexed_timeline_zero_middle_budget_does_not_mean_unlimited():
+    conv = []
+    for i in range(1, 11):
+        conv.append({"role": "user", "content": f"user-{i}"})
+        conv.append({"role": "assistant", "content": f"assistant-{i}"})
+
+    _, _, _, _, timeline = load_context_with_summary(
+        FakeDB(conv),
+        "s1",
+        recent_turns=1,
+        include_all_user=True,
+        opening_turns=1,
+        user_message_threshold=2,
+        include_timeline=True,
+    )
+    assert [row["turn"] for row in timeline["opening"]] == [1]
+    assert timeline["sampled_history"] == []
+    assert [row["turn"] for row in timeline["recent"]] == [10]
+
+
+def test_indexed_timeline_three_turns_prioritizes_recent_anchor():
+    conv = []
+    for i in range(1, 4):
+        conv.append({"role": "user", "content": f"user-{i}"})
+        conv.append({"role": "assistant", "content": f"assistant-{i}"})
+
+    _, _, _, _, timeline = load_context_with_summary(
+        FakeDB(conv),
+        "s1",
+        recent_turns=2,
+        include_all_user=True,
+        opening_turns=2,
+        user_message_threshold=40,
+        include_timeline=True,
+    )
+
+    assert [row["turn"] for row in timeline["opening"]] == [1]
+    assert timeline["sampled_history"] == []
+    assert [row["turn"] for row in timeline["recent"]] == [2, 3]

@@ -14,8 +14,8 @@ preview_chars: 120
 include_all_user_messages: true
 user_message_threshold: 40
 user_message_preview_chars: 300
-summary_preview_chars: 1200      # 日常评估的压缩摘要预算
-retitle_summary_chars: 12000     # blind/手动/批量重生成的压缩摘要预算；0=沿用 preview_chars
+summary_preview_chars: 1200      # 日常摘要预算：原始历史缺失时兜底，稀疏采样有缺口时作为次级压缩证据
+retitle_summary_chars: 12000     # blind/手动/批量重生成的摘要预算；同样支持兜底与次级证据；0=沿用 preview_chars
 title_style: concise  # concise=主体标签；complete=简短事件/意图概括，并增加显示列宽预算
 strategy: conservative  # conservative=仅明显持久失配才改；aggressive=明确放弃旧目标或持续新主线形成后更快跟进
 # provider/model 都留空时复用 Hermes 内建 title_generation 辅助任务；

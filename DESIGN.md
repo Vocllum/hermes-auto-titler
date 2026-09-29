@@ -87,30 +87,30 @@ on_session_end
 
 ## 5. 输入构造与清洗
 
-模型上下文不是完整原始 transcript，而是用于判断持续意图的受限视图：
+生产路径不会把完整 transcript 原样交给标题模型，而是把清洗后的真实用户轮映射为带位置的受限视图：
 
-- opening turns；
-- recent turns；
-- 采样后的用户消息轨迹；
-- 原始 opening 被压缩掉时的 earlier summary；
-- 当前标题（非 blind 模式；在对话证据之后展示）；
-- 待审候选标题（复审模式；同样只作为待比较 hypothesis）。
+- **Opening**：最初的真实用户轮，保留用户文本与该轮最后一条清洗后的 assistant 回复，用来说明会话为什么开始以及模型对具体主题的早期识别；
+- **Sampled history**：只从 Opening 与 Recent 之间的中段按时间均匀跳取用户轮，并写成 `User turn X of N`；
+- **Recent**：最近的真实用户轮，保留用户文本以及该轮最后一条 assistant 文本回复，用来说明当前阶段；
+- 当前标题（非 blind 模式）与待审候选始终放在证据之后。
 
-Opening / Recent 按真实 user 消息切轮，每个选中轮次最多保留 user 消息和该轮最后一条 assistant 文本回复。`include_all_user_messages=true` 是历史兼容命名，实际仍受 `user_message_threshold` 与 `user_message_preview_chars` 控制，因此更准确的概念是 **long-horizon sampled user trajectory**。
+三段证据互不重复。Python 只提供真实时间位置，不判断哪一段属于“主线”、哪一段属于“支线”；主题归纳继续由标题模型完成。
 
-默认预算：
+`include_all_user_messages=true` 是历史兼容键名，生产语义已经是 **Sampled history**。默认 `user_message_threshold=40` 是用户轮证据的目标预算，不是对锚点的硬上限。Opening / Recent 始终保留，因此极小阈值可能被锚点数量超过；中段只使用剩余名额。阈值为 0 时中段不设数量上限。短会话优先满足 Recent，再至少保留一个 Opening。
 
-- `preview_chars=400`：opening / recent 单条预算；
-- `user_message_threshold=40`：用户轨迹最多 40 条，超限后保留首条 + 最近 N−1 条；
-- `user_message_preview_chars=300`：轨迹单条预算；
-- `summary_preview_chars=1200`：日常压缩摘要预算；
-- `retitle_summary_chars=12000`：blind/manual/bulk 重生成摘要预算。
+长用户消息统一使用 `smart_preview()` 保留首部与尾部，即使单条消息没有明显句号或换行，也不会再退化成只截开头。Opening / Recent 使用 `preview_chars`，Sampled history 使用 `user_message_preview_chars`。
 
-长消息使用 `smart_preview()` 保留首部和尾部连续指令窗口；只有没有自然句子边界的长单行文本才使用前 2/3 + 后 1/3 的硬切回退。
+压缩历史采用 **raw-first / summary-fallback**：
 
-进入标题模型前会过滤 Hermes context-compaction handoff、unfinished handoff、system/system-note、async delegation/task-list、相邻重复 user replay 和 memory maintenance 标记。
+1. 优先调用 SessionDB 的 `include_compacted=True`，恢复 `active=0, compacted=1` 的真实历史；
+2. `active=0, compacted=0` 的撤回 / rewind / 删除消息仍然排除；
+3. 如果压缩前真实用户轮已经恢复，且 Opening + Sampled history + Recent 覆盖了全部用户轮，则不重复发送摘要；
+4. 如果原始历史已经恢复但稀疏采样省略了部分用户轮，则摘要以 `Compaction summary (secondary evidence)` 形式保留，用来补充可能被均匀采样跳过的关键转折，但原始用户轮仍拥有时间顺序上的更高权威；
+5. 旧宿主不支持 `include_compacted`，或检测到压缩载体但原始历史无法恢复时，摘要作为 `Fallback historical summary`。
 
-同一真实用户消息可能同时出现在 opening、recent 和 trajectory。0.2 的 prompt 明确规定：**这种结构性重复不是“用户重复表达意图”的证据**，避免小模型把采样结构误读成意图强度。
+因此摘要有两种低于原始消息的角色：原始历史缺失时的 fallback，以及稀疏采样时的 secondary evidence。
+
+进入标题模型前仍会过滤 Hermes context-compaction handoff、unfinished handoff、system/system-note、async delegation/task-list、相邻重复 user replay、群聊信封模板和 memory maintenance 标记。
 
 ## 6. 模型协议与 0.2 Prompt
 

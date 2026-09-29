@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hermes_auto_titler.config import VALID_STRATEGIES, VALID_STYLES, load_config
 from hermes_auto_titler.messages import (
     _sample_turns,
+    build_indexed_timeline,
     clean_captured_text,
     is_summary,
     is_system_noise,
@@ -68,6 +69,7 @@ class Prefix:
     recent: list[tuple[str, str]]
     users: list[tuple[str, str]]
     opening: list[tuple[str, str]]
+    timeline: dict[str, Any]
 
 
 class HttpLlm:
@@ -243,7 +245,20 @@ def build_prefixes(turns: list[list[tuple[str, str]]], raw_config: dict[str, Any
             if user_preview_k > 0:
                 users = [(role, smart_preview(text, user_preview_k)) for role, text in users]
             users = sample_user_messages(users, user_limit)
-        result.append(Prefix(number, prefix_turns, recent, users, opening))
+
+        timeline, _ = build_indexed_timeline(
+            prefix_turns,
+            opening_turns=opening_k,
+            recent_turns=recent_k,
+            include_all_user=bool(raw_config.get("include_all_user_messages", True)),
+            preview_chars=preview_k,
+            user_message_threshold=user_limit,
+            user_message_preview_chars=user_preview_k,
+            earlier_summary=None,
+            raw_history_recovered=False,
+        )
+
+        result.append(Prefix(number, prefix_turns, recent, users, opening, timeline))
     return result
 
 
@@ -351,6 +366,7 @@ def generate_title(titler: AutoTitler, prefix: Prefix) -> tuple[str, str | None]
         prefix.opening,
         blind=True,
         session_id=None,
+        timeline=prefix.timeline,
     )
     return action, title
 

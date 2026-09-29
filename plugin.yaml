@@ -61,15 +61,15 @@ config_schema:
   opening_turns:
     type: int
     default: 2
-    description: "Opening turns sampled as the conversation subject anchor."
+    description: "Opening user turns shown with real positions plus each turn's final cleaned assistant reply."
   recent_turns:
     type: int
     default: 2
-    description: "Recent turns sampled to detect current state and sustained changes."
+    description: "Recent user turns shown with real positions plus the final assistant reply for current-phase evidence."
   summary_preview_chars:
     type: int
     default: 1200
-    description: "Character budget for historical compaction summaries in routine evaluations."
+    description: "Compaction-summary budget for fallback or secondary evidence when sparse sampling omits recovered turns."
   preview_chars:
     type: int
     default: 120
@@ -77,15 +77,15 @@ config_schema:
   include_all_user_messages:
     type: bool
     default: true
-    description: "Include the sampled user-intent trajectory alongside opening and recent windows."
+    description: "Include evenly spaced Sampled history between Opening and Recent (legacy key name retained)."
   user_message_threshold:
     type: int
     default: 40
-    description: "Maximum sampled user messages in the trajectory (0 = unlimited)."
+    description: "Target user-turn evidence budget; Opening/Recent anchors are always retained and may exceed very small values; remaining slots go to Sampled history (0 = unlimited middle)."
   user_message_preview_chars:
     type: int
     default: 300
-    description: "Per-user-message preview cap in the intent trajectory."
+    description: "Per-user-message preview cap in Sampled history; long messages preserve head and tail."
   ignore_model_messages:
     type: bool
     default: false
@@ -93,7 +93,7 @@ config_schema:
   retitle_summary_chars:
     type: int
     default: 12000
-    description: "Historical summary budget for blind/manual/batch regeneration (0 = preview_chars)."
+    description: "Compaction-summary budget for blind/manual/batch regeneration when used as fallback or secondary sparse-sampling evidence (0 = preview_chars)."
   max_display_width:
     type: int
     default: 40

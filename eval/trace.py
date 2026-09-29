@@ -42,8 +42,18 @@ def extract_section_lengths(content: str) -> Dict[str, int]:
     current_chars = 0
 
     known_prefixes = (
+        "Conversation contains",
+        "Opening:",
+        "Sampled history:",
+        "Recent:",
+        "Fallback historical summary:",
+        "Compaction summary (secondary evidence):",
+        "Historical summary:",
+        # Legacy prompt labels remain parseable for historical traces.
         "Opening context",
         "Visible continuation",
+        "Visible start:",
+        "Sampled continuation:",
         "Earlier-history summary",
         "Recent context",
         "Sampled user-intent trajectory",

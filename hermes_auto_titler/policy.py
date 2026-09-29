@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .titler import (
     AutoTitler as _BaseAutoTitler,
@@ -96,6 +96,7 @@ class AutoTitler(_BaseAutoTitler):
         proposed: Optional[str] = None,
         earlier_summary: Optional[str] = None,
         session_id: Optional[str] = None,
+        timeline: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Optional[str]]:
         cfg_len = self.cfg.get("max_title_length")
         max_title_len = int(cfg_len) if cfg_len is not None else 24
@@ -169,18 +170,45 @@ class AutoTitler(_BaseAutoTitler):
             "The current title is the incumbent and stays unless clearly mismatched. "
             if not (blind or force_rename) else ""
         )
+        fallback_timeline = bool(
+            timeline
+            and earlier_summary
+            and timeline.get("summary_fallback")
+        )
+        supporting_summary = bool(
+            timeline
+            and earlier_summary
+            and timeline.get("summary_supporting")
+        )
+        if fallback_timeline:
+            chronology_rule = (
+                "Fallback historical summary is earlier history. Visible continuation "
+                "happens after compaction, and Recent is its latest phase; do not treat "
+                "the start of the visible continuation as the conversation opening. "
+            )
+        else:
+            chronology_rule = (
+                "Turn positions are chronology: Opening shows initial purpose, Sampled history spans the chat, "
+                "and Recent shows the current phase; recency alone does not prove a subject shift. "
+            )
+        summary_rule = (
+            "Compaction summaries, when present, are secondary compressed evidence; "
+            "use them for durable transitions omitted by sparse sampling, while raw user turns define chronology. "
+            if supporting_summary
+            else ""
+        )
         concise_system = (
             "Maintain a concise sidebar title for this chat. Return JSON only, with no explanation.\n"
             f"{contract}\n{decision}\n{style_req}\nStrategy: {strategy}. {strategy_rule}\n"
-            "Infer the durable subject from the user's goals before comparing title hypotheses. "
-            "Prefer the user's purpose over tool and file names unless the user is working on those exact tools or files. "
-            "The title represents the durable subject and identity of the conversation as a whole. "
+            "Infer the durable subject from the user's goals before comparing titles. "
+            "Prefer user purpose over tool or file names unless that exact thing is the subject. "
+            "For a broad user goal, prefer the assistant's concrete diagnosis if later users refer back to it; "
+            "ignore unrelated assistant claims. "
+            f"{chronology_rule}"
+            f"{summary_rule}"
             f"{incumbent_rule}"
-            "Repeated copies across input sections count once. "
-            "Prefer a single umbrella subject that covers the major work. "
-            "Use a compound title only when two major phases jointly define the conversation and omitting either misrepresents it. "
-            "Do not turn titles into lists or inventories. Omit subordinate subtasks and incidental troubleshooting. "
-            "Replace an earlier subject only when it was abandoned or became minor to the session.\n"
+            "Prefer one umbrella subject for the major work. Omit incidental troubleshooting and subordinate tasks. "
+            "Replace an earlier subject only when it was abandoned or became minor.\n"
             f"{language_rule} Preserve important product names, repository names, filenames, commands, and identifiers exactly. "
             f"Keep the title natural, specific, and {len_hint}; use no surrounding quotes or trailing punctuation."
         )
@@ -189,9 +217,11 @@ class AutoTitler(_BaseAutoTitler):
             "Maintain an accurate sidebar title for this chat. Return JSON only, with no explanation.\n"
             f"{contract}\n{decision}\n{style_req}\nStrategy: {strategy}. {strategy_rule}\n"
             "Decision rules:\n"
-            "1. Infer the durable subject before comparing title hypotheses. Explicit and repeated user goals are strongest; an earlier-history "
-            "summary is supporting evidence. Assistant text may clarify a user goal but cannot establish a new subject by itself. Repeated copies "
-            "across input sections count once.\n"
+            "1. Infer the durable subject before comparing title hypotheses. Explicit and repeated user goals are strongest. "
+            f"{chronology_rule}"
+            "Compaction summaries are compressed secondary evidence: they may preserve an important transition omitted by sparse sampling, "
+            "but raw user turns retain chronological authority. A fallback summary is used when earlier raw history is unavailable. "
+            "Assistant text may clarify a user goal but cannot establish an unrelated subject by itself. Repeated copies across input sections count once.\n"
             "2. Prefer the most specific durable subject that covers the session's sustained work. Do not replace it with a vague category. "
             "Treat recent actions, symptoms, tools, files, commands, and implementation steps as context unless the user is explicitly developing, "
             "configuring, debugging, or comparing that exact thing.\n"
@@ -227,12 +257,87 @@ class AutoTitler(_BaseAutoTitler):
         lines = []
         if input_variant == "minimal":
             # Experiment-only compact input: remove section duplication and
-            # assistant prose while retaining the sampled user trajectory. The
+            # assistant prose while retaining the sampled user history. The
             # production/default path below remains unchanged.
             lines.append("Conversation evidence:")
             compact_users = all_user or [(role, text) for role, text in opening if role == "user"]
             for _, text in compact_users:
                 lines.append(f"user: {text}")
+        elif timeline is not None:
+            total = int(timeline.get("total_user_turns", 0))
+            opening_rows = list(timeline.get("opening") or [])
+            sampled_rows = list(timeline.get("sampled_history") or [])
+            recent_rows = list(timeline.get("recent") or [])
+
+            if fallback_timeline:
+                lines.append(
+                    f"Conversation contains {total} visible user turns after compaction."
+                )
+                lines.extend(["", "Fallback historical summary:", earlier_summary or ""])
+                lines.extend(["", "Visible continuation:"])
+                if opening_rows:
+                    lines.append("Visible start:")
+                    for row in opening_rows:
+                        turn = int(row.get("turn", 0))
+                        lines.append(
+                            f"Visible user turn {turn} of {total}: {row.get('user', '')}"
+                        )
+                        assistant = row.get("assistant")
+                        if assistant:
+                            lines.append(
+                                f"Assistant reply after user turn {turn}: {assistant}"
+                            )
+                if sampled_rows:
+                    lines.append("Sampled continuation:")
+                    for row in sampled_rows:
+                        turn = int(row.get("turn", 0))
+                        lines.append(
+                            f"Visible user turn {turn} of {total}: {row.get('user', '')}"
+                        )
+            else:
+                lines.append(f"Conversation contains {total} user turns.")
+                if opening_rows:
+                    lines.extend(["", "Opening:"])
+                    for row in opening_rows:
+                        turn = int(row.get("turn", 0))
+                        lines.append(
+                            f"User turn {turn} of {total}: {row.get('user', '')}"
+                        )
+                        assistant = row.get("assistant")
+                        if assistant:
+                            lines.append(
+                                f"Assistant reply after user turn {turn}: {assistant}"
+                            )
+                if supporting_summary:
+                    lines.extend([
+                        "",
+                        "Compaction summary (secondary evidence):",
+                        earlier_summary or "",
+                    ])
+                if sampled_rows:
+                    lines.extend(["", "Sampled history:"])
+                    for row in sampled_rows:
+                        turn = int(row.get("turn", 0))
+                        lines.append(
+                            f"User turn {turn} of {total}: {row.get('user', '')}"
+                        )
+
+            if recent_rows:
+                lines.extend(["", "Recent:"])
+                for row in recent_rows:
+                    turn = int(row.get("turn", 0))
+                    prefix = "Visible user turn" if fallback_timeline else "User turn"
+                    lines.append(
+                        f"{prefix} {turn} of {total}: {row.get('user', '')}"
+                    )
+                    assistant = row.get("assistant")
+                    if assistant:
+                        lines.append(
+                            f"Assistant reply after user turn {turn}: {assistant}"
+                        )
+
+            if earlier_summary and not fallback_timeline and not supporting_summary:
+                lines.extend(["", "Historical summary:", earlier_summary])
         else:
             if earlier_summary:
                 lines.extend(["Earlier-history summary:", earlier_summary, "", "Visible continuation:"])
@@ -294,10 +399,16 @@ class AutoTitler(_BaseAutoTitler):
             )
             text = getattr(res, "text", "") or ""
         except Exception as e:
-            log.warning("auto-titler LLM call failed: %s", e)
-            self._last_generate_error = str(e)
+            exc_type = type(e).__name__
+            exc_text = str(e)
+            typed_error = f"{exc_type}: {exc_text}" if exc_text else exc_type
+            # Provider exceptions and their developer_detail may embed API keys
+            # or authenticated URLs. Keep the full text in memory for retry
+            # classification, but never send it to persistent host logs.
+            log.warning("auto-titler LLM call failed [%s]: [REDACTED]", exc_type)
+            self._last_generate_error = typed_error
             if hasattr(self, "_last_generate_errors"):
-                self._last_generate_errors[sid_key] = str(e)
+                self._last_generate_errors[sid_key] = typed_error
             return "error", None
 
         self._record_usage(session_id, res)

@@ -135,6 +135,52 @@ def _is_capacity_error(text: str) -> bool:
     return any(marker in lowered for marker in _CAPACITY_MARKERS)
 
 
+def _retry_class(text: str) -> str:
+    """Classify scheduler behavior without rewriting the provider's diagnosis."""
+    lowered = str(text or "").lower()
+    if "unscopedsecreterror" in lowered:
+        return "blocked"
+    if _is_capacity_error(lowered):
+        return "capacity"
+    return "temporary"
+
+
+def _meta_retry_class(meta: Dict[str, Any]) -> str:
+    """Read the latest retry class, with compatibility for older state files."""
+    value = str(meta.get("retry_class") or "").strip().lower()
+    if value in {"temporary", "capacity", "blocked"}:
+        return value
+    return "capacity" if bool(meta.get("capacity")) else "temporary"
+
+
+def _next_class_attempt(meta: Dict[str, Any], retry_class: str) -> int:
+    """Count consecutive failures of the current class without hiding total attempts.
+
+    Explicit class_attempts=0 means a successful provider call broke the
+    failure streak. Fall back to total attempts only for old state that
+    predates the class_attempts field entirely.
+    """
+    previous_class = _meta_retry_class(meta)
+    if "class_attempts" in meta:
+        previous_count = max(0, int(meta.get("class_attempts", 0)))
+    else:
+        previous_count = max(0, int(meta.get("attempts", 0)))
+    return previous_count + 1 if previous_class == retry_class else 1
+
+
+def _retry_delay(retry_class: str, class_attempts: int) -> int:
+    """Backoff by current failure class.
+
+    Temporary finalize failures probe less often after five consecutive failures
+    instead of becoming permanently parked. Capacity failures keep the shorter
+    recovery probe cadence. Blocked failures are parked in-memory separately.
+    """
+    n = max(1, int(class_attempts))
+    if retry_class == "temporary" and n >= 5:
+        return 1800 if n == 5 else 3600
+    return min(30 * (2 ** min(n - 1, 5)), 600)
+
+
 class AutoTitler:
     def __init__(self, ctx, cfg: dict[str, Any], db: SessionDB | None = None):
         self.ctx = ctx
@@ -298,9 +344,18 @@ class AutoTitler:
                 finalize = self._finalize_intents.get(sid)
                 retry = self._failed_sessions.get(sid)
                 meta = finalize or retry or {}
-                attempts = int(meta.get("attempts", 0))
-                capacity = bool(meta.get("capacity"))
-                if finalize is None and attempts >= 5 and not capacity:
+                retry_class = _meta_retry_class(meta)
+                class_attempts = int(
+                    meta.get("class_attempts", meta.get("attempts", 0))
+                )
+                parked = bool(meta.get("parked"))
+                if parked:
+                    continue
+                if (
+                    finalize is None
+                    and retry_class == "temporary"
+                    and class_attempts >= 5
+                ):
                     expired.append(sid)
                 elif now >= float(meta.get("next_retry_at", 0)):
                     candidates.append(sid)
@@ -483,6 +538,18 @@ class AutoTitler:
         from an existing finalize intent may evaluate a closed session.
         """
         with self._state_lock:
+            if finalize_claim is None:
+                retry_meta = self._failed_sessions.get(session_id)
+                if (
+                    retry_meta
+                    and bool(retry_meta.get("parked"))
+                    and _meta_retry_class(retry_meta) == "blocked"
+                ):
+                    log.debug(
+                        "auto-titler automatic eval suppressed for parked blocked session %s",
+                        session_id[:12],
+                    )
+                    return
             if session_id in self._closing_fenced and finalize_claim is None:
                 # The fence expresses an unresolved terminal intent, never
                 # "this session is closed forever".  If no intent remains the
@@ -586,11 +653,35 @@ class AutoTitler:
                                 self._clear_finalize_intent_locked(session_id, close_epoch=worker_epoch)
                         elif covers_finalize:
                             meta = self._finalize_intents.get(session_id)
-                            if meta:
+                            if meta and action == "failed":
+                                retry_class = str(
+                                    (result or {}).get("retry_class") or "temporary"
+                                )
                                 attempts = int(meta.get("attempts", 0)) + 1
-                                delay = min(30 * (2 ** (attempts - 1)), 600)
+                                class_attempts = _next_class_attempt(meta, retry_class)
+                                delay = _retry_delay(retry_class, class_attempts)
                                 meta["attempts"] = attempts
-                                meta["next_retry_at"] = time.monotonic() + delay
+                                meta["class_attempts"] = class_attempts
+                                meta["capacity"] = retry_class == "capacity"
+                                meta["retry_class"] = retry_class
+                                meta["parked"] = retry_class == "blocked"
+                                if retry_class == "blocked":
+                                    log.warning(
+                                        "auto-titler finalize parked for %s after %d attempt(s), class=%s",
+                                        session_id[:12],
+                                        attempts,
+                                        retry_class,
+                                    )
+                                else:
+                                    meta["next_retry_at"] = time.monotonic() + delay
+                            elif meta:
+                                # pending/throttled are lifecycle states, not
+                                # provider failures. Keep the terminal intent
+                                # alive without consuming the total failure
+                                # count, and break the consecutive failure streak.
+                                meta["class_attempts"] = 0
+                                meta["parked"] = False
+                                meta["next_retry_at"] = time.monotonic() + 30
                         self._persist_state_locked()
                 except Exception as e:
                     log.warning("auto-titler background evaluate failed: %s", e)
@@ -598,14 +689,42 @@ class AutoTitler:
                         meta = self._finalize_intents.get(session_id)
                         if meta and int(meta.get("close_epoch", 0)) <= worker_epoch:
                             attempts = int(meta.get("attempts", 0)) + 1
-                            delay = min(30 * (2 ** (attempts - 1)), 600)
+                            class_attempts = _next_class_attempt(meta, "temporary")
+                            delay = _retry_delay("temporary", class_attempts)
                             meta["attempts"] = attempts
+                            meta["class_attempts"] = class_attempts
+                            meta["capacity"] = False
+                            meta["retry_class"] = "temporary"
+                            meta["parked"] = False
                             meta["next_retry_at"] = time.monotonic() + delay
                             self._persist_state_locked()
 
+                # A second hook may have marked this worker dirty before
+                # the first model call discovered a process-local blocked error.
+                # Snapshot retry state first, then release _state_lock before
+                # touching inflight bookkeeping: these lock domains are never
+                # held simultaneously anywhere in the scheduler.
+                with self._state_lock:
+                    retry_meta = self._failed_sessions.get(session_id)
+                    finalize_meta = self._finalize_intents.get(session_id)
+                    blocked_parked = any(
+                        meta
+                        and bool(meta.get("parked"))
+                        and _meta_retry_class(meta) == "blocked"
+                        for meta in (retry_meta, finalize_meta)
+                    )
                 with self._inflight_lock:
                     if session_id in self._dirty_sessions:
                         self._dirty_sessions.remove(session_id)
+                        if blocked_parked:
+                            self._dirty_override_intents.discard(session_id)
+                            self._inflight.pop(session_id, None)
+                            self._worker_epochs.pop(session_id, None)
+                            log.debug(
+                                "auto-titler dirty rerun suppressed for parked blocked session %s",
+                                session_id[:12],
+                            )
+                            break
                         force_eval = True
                         # Dirty rerun triggers re-evaluation but never promotes epoch/finalize claim
                         if session_id in self._dirty_override_intents:
@@ -737,8 +856,10 @@ class AutoTitler:
         # typed ledger so a stale ordinary worker cannot erase it.
         self._finalize_intents[session_id] = {
             "attempts": 0,
+            "class_attempts": 0,
             "next_retry_at": time.monotonic(),
             "capacity": False,
+            "retry_class": "temporary",
             "reason": reason,
             "queued_at": now_wall,
             "base_title": pending.get("base_title", base_title),
@@ -822,10 +943,15 @@ class AutoTitler:
 
             def serialize_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
                 next_retry_at = float(meta.get("next_retry_at", now_mono))
+                retry_class = _meta_retry_class(meta)
                 return {
                     "attempts": int(meta.get("attempts", 0)),
+                    "class_attempts": int(
+                        meta.get("class_attempts", meta.get("attempts", 0))
+                    ),
                     "next_retry_at": now_wall + max(0.0, next_retry_at - now_mono),
-                    "capacity": bool(meta.get("capacity", False)),
+                    "capacity": retry_class == "capacity",
+                    "retry_class": retry_class,
                     "queued_at": float(meta.get("queued_at", now_wall)),
                     "reason": str(meta.get("reason") or "error"),
                 }
@@ -926,8 +1052,10 @@ class AutoTitler:
                 ):
                     legacy_meta = {
                         "attempts": raw.get("attempts", 0),
+                        "class_attempts": raw.get("class_attempts", raw.get("attempts", 0)),
                         "next_retry_at": raw.get("next_retry_at", now_wall),
                         "capacity": raw.get("capacity", False),
+                        "retry_class": raw.get("retry_class"),
                         "queued_at": raw.get("queued_at", now_wall),
                         "reason": raw.get("reason", "error"),
                     }
@@ -951,10 +1079,22 @@ class AutoTitler:
                         typed.get("reason") or ("finalize" if finalize else "error")
                     )
                     close_epoch = max(0, int(typed.get("close_epoch", 0)))
+                    typed_class = str(typed.get("retry_class") or "").strip().lower()
+                    if typed_class not in {"temporary", "capacity", "blocked"}:
+                        typed_class = (
+                            "capacity" if bool(typed.get("capacity", False))
+                            else "temporary"
+                        )
+                    class_attempts = max(
+                        0,
+                        int(typed.get("class_attempts", attempts)),
+                    )
                     meta = {
                         "attempts": attempts,
+                        "class_attempts": class_attempts,
                         "next_retry_at": now_mono + max(0.0, retry_wall - now_wall),
-                        "capacity": bool(typed.get("capacity", False)),
+                        "capacity": typed_class == "capacity",
+                        "retry_class": typed_class,
                         "reason": reason,
                         "queued_at": queued_at,
                         "base_title": base_title,
@@ -1104,7 +1244,7 @@ class AutoTitler:
                     self._clear_finalize_intent_locked(session_id, close_epoch=active_claim)
                 return limit_result
 
-        recent, all_user, opening, earlier_summary = load_context_with_summary(
+        recent, all_user, opening, earlier_summary, timeline = load_context_with_summary(
             db,
             session_id,
             int(self.cfg.get("recent_turns", 2)),
@@ -1118,6 +1258,7 @@ class AutoTitler:
                 int(self.cfg.get("retitle_summary_chars", 1600)) if blind
                 else int(self.cfg.get("summary_preview_chars", 1200))
             ),
+            include_timeline=True,
         )
 
         if not recent:
@@ -1129,6 +1270,14 @@ class AutoTitler:
                     recent = [("user", user_txt)]
                     opening = [("user", user_txt)]
                     all_user = [("user", user_txt)]
+                    timeline = {
+                        "total_user_turns": 1,
+                        "opening": [{"turn": 1, "user": user_txt}],
+                        "sampled_history": [],
+                        "recent": [],
+                        "raw_history_recovered": False,
+                        "summary_fallback": False,
+                    }
             if not recent:
                 # 无消息会话不可评估，移出重试账本防止无限重试
                 with self._retry_lock:
@@ -1141,7 +1290,7 @@ class AutoTitler:
         # opening。blind 重生成保留其中的真实用户意图，供模型识别持续的新
         # 阶段；assistant/recent 与伪 opening 仍清空，避免收尾回复或执行细节
         # 抢走主线。日常评估保持原行为。
-        if blind and earlier_summary:
+        if blind and earlier_summary and timeline is None:
             recent = []
             opening = []
         # derived 是 Hermes 从首条用户消息截出的临时兜底，说明原生标题 LLM
@@ -1163,6 +1312,7 @@ class AutoTitler:
             current, recent, all_user, opening,
             force_rename=force_rename, blind=blind, proposed=proposed,
             earlier_summary=earlier_summary, session_id=session_id,
+            timeline=timeline,
         )
         log.info(
             "auto-titler %s: captured current=%r input=%s",
@@ -1174,29 +1324,57 @@ class AutoTitler:
         candidate = self._prepare_candidate(title) if title else None
 
         if action == "error":
-            # 模型调用失败（网络中断/503/超时）：登记入失败重试字典，实施指数退避，
-            # 并避免记录正常 _last_eval 锁死重试窗口。
+            # The generator keeps the provider's original error text for logs.
+            # Scheduler policy only classifies whether another automatic call
+            # makes sense; it does not replace the diagnosis.
             self._pending.pop(session_id, None)
             self._last_eval.pop(session_id, None)
             err = self._last_generate_errors.pop(session_id, "") or getattr(self, "_last_generate_error", "") or ""
-            capacity = _is_capacity_error(err)
-            with self._retry_lock:
-                meta = self._failed_sessions.get(session_id, {"attempts": 0})
-                attempts = int(meta.get("attempts", 0)) + 1
-                delay = min(30 * (2 ** (attempts - 1)), 600)
-                self._failed_sessions[session_id] = {
-                    "attempts": attempts,
-                    "next_retry_at": time.monotonic() + delay,
-                    "capacity": capacity or bool(meta.get("capacity")),
-                }
-            log.warning(
-                "auto-titler %s: recorded failure (attempt %d%s, next retry in %ds)",
-                session_id[:12],
-                attempts,
-                ", capacity" if capacity or meta.get("capacity") else "/5",
-                delay,
-            )
-            return {"action": "failed", "reason": "model call failed"}
+            retry_class = _retry_class(err)
+            with self._state_lock:
+                finalize_meta = self._finalize_intents.get(session_id)
+                finalize_owned = bool(
+                    active_claim
+                    and finalize_meta
+                    and int(finalize_meta.get("close_epoch", 0)) <= active_claim
+                )
+
+            attempts = 0
+            delay = 0
+            if not finalize_owned:
+                with self._retry_lock:
+                    meta = self._failed_sessions.get(session_id, {"attempts": 0})
+                    attempts = int(meta.get("attempts", 0)) + 1
+                    class_attempts = _next_class_attempt(meta, retry_class)
+                    delay = _retry_delay(retry_class, class_attempts)
+                    self._failed_sessions[session_id] = {
+                        "attempts": attempts,
+                        "class_attempts": class_attempts,
+                        "next_retry_at": time.monotonic() + delay,
+                        "capacity": retry_class == "capacity",
+                        "retry_class": retry_class,
+                        "parked": retry_class == "blocked",
+                    }
+                log.warning(
+                    "auto-titler %s: recorded failure (attempt %d, class=%s%s)",
+                    session_id[:12],
+                    attempts,
+                    retry_class,
+                    f", next retry in {delay}s"
+                    if retry_class != "blocked"
+                    else ", automatic retry parked",
+                )
+            else:
+                log.warning(
+                    "auto-titler %s: finalize-owned failure class=%s; ordinary retry ledger unchanged",
+                    session_id[:12],
+                    retry_class,
+                )
+            return {
+                "action": "failed",
+                "reason": "model call failed",
+                "retry_class": retry_class,
+            }
 
         # 评估成功推进：仅在有效生成新标题或已有标题维持 keep 时清除重试记录
         if (action == "rename" and candidate) or current:
@@ -1238,16 +1416,32 @@ class AutoTitler:
             if not current:
                 reason = "untitled session did not produce a new title"
                 log.warning("auto-titler %s: %s", session_id[:12], reason)
-                with self._retry_lock:
-                    meta = self._failed_sessions.get(session_id, {"attempts": 0})
-                    attempts = int(meta.get("attempts", 0)) + 1
-                    delay = min(30 * (2 ** (attempts - 1)), 600)
-                    self._failed_sessions[session_id] = {
-                        "attempts": attempts,
-                        "next_retry_at": time.monotonic() + delay,
-                        "capacity": False,
-                    }
-                return {"action": "failed", "reason": reason}
+                with self._state_lock:
+                    finalize_meta = self._finalize_intents.get(session_id)
+                    finalize_owned = bool(
+                        active_claim
+                        and finalize_meta
+                        and int(finalize_meta.get("close_epoch", 0)) <= active_claim
+                    )
+                if not finalize_owned:
+                    with self._retry_lock:
+                        meta = self._failed_sessions.get(session_id, {"attempts": 0})
+                        attempts = int(meta.get("attempts", 0)) + 1
+                        class_attempts = _next_class_attempt(meta, "temporary")
+                        delay = _retry_delay("temporary", class_attempts)
+                        self._failed_sessions[session_id] = {
+                            "attempts": attempts,
+                            "class_attempts": class_attempts,
+                            "next_retry_at": time.monotonic() + delay,
+                            "capacity": False,
+                            "retry_class": "temporary",
+                            "parked": False,
+                        }
+                return {
+                    "action": "failed",
+                    "reason": reason,
+                    "retry_class": "temporary",
+                }
             log.info("auto-titler %s: keep (current=%r)", session_id[:12], current)
             return {"action": "keep"}
 
@@ -1401,6 +1595,7 @@ class AutoTitler:
         proposed: Optional[str] = None,
         earlier_summary: Optional[str] = None,
         session_id: Optional[str] = None,
+        timeline: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Optional[str]]:
         raise NotImplementedError("Title decision policy must be provided by policy.AutoTitler")
 

@@ -100,8 +100,10 @@ def migrate_legacy_state() -> None:
         if exc.errno != errno.EXDEV:
             log.warning("auto-titler legacy state migration failed: %s", exc)
             return
+        copied_inode = None
         try:
             with legacy.open("rb") as source, destination.open("xb") as target:
+                copied_inode = os.fstat(target.fileno())
                 shutil.copyfileobj(source, target)
                 target.flush()
                 os.fsync(target.fileno())
@@ -109,7 +111,11 @@ def migrate_legacy_state() -> None:
             return
         except OSError as copy_error:
             try:
-                destination.unlink()
+                current = destination.stat()
+                if copied_inode and (current.st_dev, current.st_ino) == (copied_inode.st_dev, copied_inode.st_ino):
+                    destination.unlink()
+            except FileNotFoundError:
+                pass
             except OSError:
                 pass
             log.warning("auto-titler legacy state migration failed: %s", copy_error)

@@ -1,3 +1,5 @@
+import errno
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,3 +65,46 @@ def test_persist_writes_only_to_plugin_data(monkeypatch):
     assert instance._state_path == titler.state_path()
     assert instance._state_path.is_file()
     assert not legacy.exists()
+
+
+def test_cross_device_copy_migrates_state_and_removes_legacy(monkeypatch):
+    _isolate_data_dir(monkeypatch)
+    home = Path(titler.get_hermes_home())
+    legacy = home / "plugins" / "hermes-auto-titler" / "state.json"
+    current = home / "plugin-data" / "hermes-auto-titler" / "state.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"version":1,"sessions":{"legacy":{}}}\n', encoding="utf-8")
+
+    def cross_device(_source, _destination):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(titler.os, "link", cross_device)
+    titler.migrate_legacy_state()
+
+    assert current.read_text(encoding="utf-8") == '{"version":1,"sessions":{"legacy":{}}}\n'
+    assert not legacy.exists()
+
+
+def test_failed_cross_device_copy_does_not_delete_concurrent_destination(monkeypatch):
+    _isolate_data_dir(monkeypatch)
+    home = Path(titler.get_hermes_home())
+    legacy = home / "plugins" / "hermes-auto-titler" / "state.json"
+    current = home / "plugin-data" / "hermes-auto-titler" / "state.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('legacy', encoding="utf-8")
+
+    def cross_device(_source, _destination):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    def concurrent_replacement(_source, _destination):
+        replacement = current.with_suffix(".new")
+        replacement.write_text('newer state', encoding="utf-8")
+        os.replace(replacement, current)
+        raise OSError(errno.EIO, "source read failed")
+
+    monkeypatch.setattr(titler.os, "link", cross_device)
+    monkeypatch.setattr(titler.shutil, "copyfileobj", concurrent_replacement)
+    titler.migrate_legacy_state()
+
+    assert current.read_text(encoding="utf-8") == 'newer state'
+    assert legacy.read_text(encoding="utf-8") == 'legacy'

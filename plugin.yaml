@@ -13,96 +13,119 @@ provides_hooks:
 config_schema:
   enabled:
     type: bool
+    label: "Enable AutoTitler"
     default: true
-    description: "Register the title hooks and the /autotitler command. Requires a Hermes restart when switched."
+    description: "Track session titles. Restart Hermes after changing this switch."
   first_title_mode:
     type: str
+    label: "First title"
     default: builtin
     choices: [builtin, plugin]
-    description: "builtin leaves the first title to Hermes; plugin evaluates from turn 1. Neither mode changes the host title-generation switch."
+    description: "builtin lets Hermes name the first turn; plugin starts evaluating from turn 1. Restart to switch. Neither changes the Hermes title switch."
   strategy:
     type: str
+    label: "Tracking strategy"
     default: conservative
     choices: [conservative, aggressive]
-    description: "conservative preserves the whole-session subject until a durable mismatch; aggressive follows a sustained new main line sooner."
+    description: "conservative keeps the session's main subject; aggressive follows a sustained new main line sooner."
   title_style:
     type: str
+    label: "Title style"
     default: concise
     choices: [concise, complete]
-    description: "concise = compact subject label; complete = short summary of the main intent."
+    description: "concise names the subject; complete briefly summarizes the main intent."
   every_n_turns:
     type: int
+    label: "Check every N turns"
     default: 2
-    description: "Evaluate after this many completed foreground turns; a separate minimum interval can defer evaluations."
+    description: "Completed turns between checks; the minimum interval can defer them."
   on_close:
     type: bool
+    label: "Check on close"
     default: true
-    description: "Queue a final evaluation on session close or finalize; the write may finish after the session ends."
+    description: "Queue a final check when a session closes; it can finish afterward."
   rename_confirmations:
     type: int
+    label: "Rename confirmations"
     default: 1
-    description: "Number of follow-up endorsements before replacing an existing automatic title; 0 accepts the first verdict."
+    description: "Further checks needed before changing an automatic title; 0 changes it immediately."
   title_model:
     type: str
+    label: "Title model"
     default: ""
-    description: "Optional title model override. Empty uses Hermes title_generation auxiliary routing."
+    description: "Optional override; empty uses the Hermes title-generation route."
   provider:
     type: str
+    label: "Provider"
     default: ""
-    description: "Optional provider override. Empty uses Hermes title_generation auxiliary routing."
+    description: "Optional override; empty uses the Hermes title-generation route."
   custom_instructions:
     type: str
+    label: "Custom instructions"
     default: ""
-    description: "Optional instructions appended to the title model system prompt."
+    description: "Additional instructions for title generation."
   min_interval_minutes:
     type: float
+    label: "Minimum interval (minutes)"
     default: 5
-    description: "Minimum minutes between routine evaluations of the same session."
+    description: "Minimum time between routine checks of the same session."
   opening_turns:
     type: int
+    label: "Opening turns"
     default: 2
-    description: "Opening user turns shown with real positions plus each turn's final cleaned assistant reply."
+    description: "Opening user turns and their final assistant replies used as context."
   recent_turns:
     type: int
+    label: "Recent turns"
     default: 2
-    description: "Recent user turns shown with real positions plus the final assistant reply for current-phase evidence."
+    description: "Recent user turns and their final assistant replies used as context."
   summary_preview_chars:
     type: int
+    label: "Summary context length"
     default: 1200
-    description: "Compaction-summary budget for fallback or secondary evidence when sparse sampling omits recovered turns."
+    description: "Characters of earlier conversation summary used as supporting evidence."
   preview_chars:
     type: int
+    label: "Turn preview length"
     default: 120
-    description: "Preview cap per opening/recent message, including assistant conclusions."
+    description: "Character limit per opening or recent message."
   include_all_user_messages:
     type: bool
+    label: "Sample conversation history"
     default: true
-    description: "Include evenly spaced Sampled history between Opening and Recent (legacy key name retained)."
+    description: "Include evenly spaced user turns between the opening and recent context."
   user_message_threshold:
     type: int
+    label: "Sampled turn limit"
     default: 40
-    description: "Target user-turn evidence budget; Opening/Recent anchors are always retained and may exceed very small values; remaining slots go to Sampled history (0 = unlimited middle)."
+    description: "Target history sample size; 0 includes all middle turns. Opening and recent turns are always retained."
   user_message_preview_chars:
     type: int
+    label: "History preview length"
     default: 300
-    description: "Per-user-message preview cap in Sampled history; long messages preserve head and tail."
+    description: "Character limit per sampled user turn, keeping its beginning and end."
   ignore_model_messages:
     type: bool
+    label: "Exclude assistant replies"
     default: false
-    description: "Remove assistant conclusions from opening and recent evidence. May lose task outcomes."
+    description: "Use only user messages in opening and recent context; task outcomes may be lost."
   retitle_summary_chars:
     type: int
+    label: "Regeneration summary length"
     default: 12000
-    description: "Compaction-summary budget for blind/manual/batch regeneration when used as fallback or secondary sparse-sampling evidence (0 = preview_chars)."
+    description: "Summary character budget for manual or batch regeneration; 0 uses turn preview length."
   max_display_width:
     type: int
+    label: "Title display width"
     default: 40
-    description: "Display-width budget when fitting a generated title."
+    description: "Maximum display columns for generated titles."
   max_title_length:
     type: int
+    label: "Hard title length"
     default: 0
-    description: "Optional hard character cap; 0 disables it, positive values enforce at least 10 characters."
+    description: "Optional character cap; 0 disables it. Positive values have a minimum of 10."
   max_renames_per_session:
     type: int
+    label: "Renames per session"
     default: 0
-    description: "Per-process automatic rename cap for a session (0 = unlimited). First naming and manual renames are exempt."
+    description: "Optional automatic rename limit; 0 disables it. First and manual naming do not count."

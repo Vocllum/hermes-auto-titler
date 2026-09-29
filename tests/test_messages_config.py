@@ -82,6 +82,19 @@ def test_manifest_settings_order_and_defaults_match_runtime():
         assert field["default"] == expected, key
 
 
+def test_manifest_settings_have_readable_labels():
+    root = Path(__file__).resolve().parent.parent
+    schema = yaml.safe_load((root / "plugin.yaml").read_text())["config_schema"]
+    assert all(
+        isinstance(field.get("label"), str)
+        and field["label"].strip()
+        and "_" not in field["label"]
+        for field in schema.values()
+    )
+    labels = [field["label"] for field in schema.values()]
+    assert len(labels) == len(set(labels))
+
+
 def test_load_context_recent_turns_and_all_user():
     conv = [
         {"role": "user", "content": "m1"},

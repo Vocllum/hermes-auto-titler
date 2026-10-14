@@ -46,6 +46,54 @@ def _resolve_config(ctx) -> dict:
         return load_config()
 
 
+def _bind_background_secret_scope():
+    """Bind the owning profile's secret scope for plugin-owned background work.
+
+    Under ``gateway.multiplex_profiles`` the host fails ``get_secret()`` closed
+    (``UnscopedSecretError``) for any task that carries no profile scope, and
+    plugin *registration* is not one of the host's scoped seams (per-turn and
+    per-adapter work is). The titler's retry/sweep thread is created from here,
+    so without a bound scope every sweep LLM call dies and its sessions are
+    parked as ``blocked`` instead of being retitled.
+
+    The scope is a contextvar and the thread start snapshots it through
+    ``copy_context()`` (``propagate_context_to_thread`` snapshots at call time),
+    so resetting it right after :meth:`AutoTitler.start_retry_loop` is safe.
+    Returns the reset token, or ``None`` when multiplexing is off, a scope is
+    already bound, or the host API is absent (older hosts behave as before).
+    """
+    try:
+        from agent.secret_scope import (
+            build_profile_secret_scope,
+            current_secret_scope,
+            is_multiplex_active,
+            set_secret_scope,
+        )
+        from hermes_constants import get_hermes_home
+    except Exception:  # older host without the scope API
+        return None
+    try:
+        if not is_multiplex_active() or current_secret_scope() is not None:
+            return None
+        home = get_hermes_home()
+        return set_secret_scope(build_profile_secret_scope(home), profile_home=str(home))
+    except Exception:
+        log.debug("hermes-auto-titler: could not bind the profile secret scope", exc_info=True)
+        return None
+
+
+def _reset_background_secret_scope(token) -> None:
+    """Unbind a scope installed by :func:`_bind_background_secret_scope` (never raises)."""
+    if token is None:
+        return
+    try:
+        from agent.secret_scope import reset_secret_scope
+
+        reset_secret_scope(token)
+    except Exception:
+        log.debug("hermes-auto-titler: could not reset the profile secret scope", exc_info=True)
+
+
 def register(ctx) -> None:
     """Hermes 插件入口：注册 pre_llm_call/on_session_end/on_session_finalize hook + /autotitler 命令。"""
     cfg = _resolve_config(ctx)
@@ -64,7 +112,13 @@ def register(ctx) -> None:
         # Close/finalize only queues durable work; it never starts an LLM call.
         ctx.register_hook("on_session_finalize", titler.on_session_finalize)
         titler.restore_state()
-        titler.start_retry_loop()
+        # The retry/sweep thread is created here and is not covered by the host's
+        # per-turn scope: bind the profile secret scope for its context snapshot.
+        _scope_token = _bind_background_secret_scope()
+        try:
+            titler.start_retry_loop()
+        finally:
+            _reset_background_secret_scope(_scope_token)
     ctx.register_command(
         "autotitler",
         make_handler(titler),

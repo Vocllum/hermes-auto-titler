@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Background work keeps the profile's secret scope**: A multiplexed gateway (`gateway.multiplex_profiles`) resolves secrets *scoped* and raises `UnscopedSecretError` instead of falling back to the environment when no profile scope is installed. Plugin registration is not one of the host's scoped seams, so the retry/sweep thread created in `register()` snapshotted an unscoped context: every sweep evaluation died on its first model call and its session was parked as `blocked`, while hook-driven evaluations in the same process kept succeeding. The observable symptom is intermittent — a plugin that looks dead on some sessions and healthy on others. The thread start is now wrapped in the owning profile's scope (`set_secret_scope(build_profile_secret_scope(get_hermes_home()))`, guarded by `is_multiplex_active()` and an already-bound check, released immediately after because the thread start snapshots the context through `copy_context()`). Hosts without the scope API keep the previous behaviour. Regression tests assert the scope is bound *during* `start_retry_loop()` and released afterwards, and that nothing is bound when multiplexing is off or a scope is already installed.
+
 ## 0.3.0 — 2026-09-29
 
 - **Clearer plugin settings**: All 23 host-rendered options keep their existing keys and defaults, with readable labels and shorter explanations. Advanced options remain visible until Hermes Desktop supports folding them into groups.

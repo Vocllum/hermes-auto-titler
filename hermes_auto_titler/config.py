@@ -74,6 +74,12 @@ _FALSE_STRINGS = {"false", "0", "no", "off"}
 # 一致时不产生歧义；只有本地文件写过的键才走 load_config 的兜底合并。
 _LOCAL_FILE_KEYS: frozenset[str] = frozenset(DEFAULTS)
 
+# ctx 通道（宿主 plugins.entries.<id>.settings）不读的内部键。宿主把 `model`
+# 留作 settings 根，ctx.get_config("model") 会先记一条 "Rejected config path"
+# 警告再抛错，每次加载都会多出一条启动噪音；对外别名 title_model 承载同一个
+# 值，并在 load_config 末尾归一化回 model，因此这里跳过内部键即可。
+_CTX_SKIP_KEYS: frozenset[str] = frozenset({"model"})
+
 
 def _coerce_bool(raw: Any) -> bool:
     """严格布尔归一化：真布尔 / 0|1 / true|1|yes|on / false|0|no|off。
@@ -249,6 +255,11 @@ def load_config(path: Path | None = None, *, ctx: Any = None) -> dict[str, Any]:
 
     if ctx is not None:
         for key in DEFAULTS:
+            # 宿主把 `model` 留作 settings 根：ctx.get_config("model") 会先记一条
+            # "Rejected config path" 警告再抛错，所以 ctx 通道只读对外别名
+            # title_model，由下方归一化写回内部 model 键。
+            if key in _CTX_SKIP_KEYS:
+                continue
             try:
                 value = ctx.get_config(key, None)
             except Exception:

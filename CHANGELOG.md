@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.3.1 — 2026-10-30
+
+- **Fix reserved `model` settings warning**: Stop requesting the host-reserved `model` root through the plugin context. The public `title_model` setting continues to map to the internal `model` key, without changing YAML configuration, effective precedence, or title-generation behavior. Thanks to @priestkos in #11.
+
 - **No startup warning for the reserved `model` key**: `load_config` no longer asks the host for `model` through `ctx.get_config()`. The host reserves `model` as a settings root, so that call logged `Rejected config path 'model' from plugin hermes-auto-titler` and raised on every load — a warning on every startup for a key the host can never accept. The context channel now reads only the public `title_model` alias, which still normalizes back into the internal `model` key, so overrides set from the Desktop/CLI panels keep working. The `config.yaml` and host-settings channels are unchanged.
 
 ## 0.3.0 — 2026-09-29

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **No startup warning for the reserved `model` key**: `load_config` no longer asks the host for `model` through `ctx.get_config()`. The host reserves `model` as a settings root, so that call logged `Rejected config path 'model' from plugin hermes-auto-titler` and raised on every load — a warning on every startup for a key the host can never accept. The context channel now reads only the public `title_model` alias, which still normalizes back into the internal `model` key, so overrides set from the Desktop/CLI panels keep working. The `config.yaml` and host-settings channels are unchanged.
+
 ## 0.3.0 — 2026-09-29
 
 - **Clearer plugin settings**: All 23 host-rendered options keep their existing keys and defaults, with readable labels and shorter explanations. Advanced options remain visible until Hermes Desktop supports folding them into groups.

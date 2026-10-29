@@ -834,6 +834,32 @@ def test_internal_model_wins_over_title_model(tmp_path):
     assert cfg["model"] == "internal/pick"
 
 
+def test_ctx_channel_skips_host_reserved_model_key(tmp_path, monkeypatch):
+    """ctx 通道不能向宿主索取 `model`：宿主把该键留作 settings 根，
+    ctx.get_config("model") 会先记一条 "Rejected config path" 警告再抛错，
+    等于每次加载都刷一条启动噪音。对外别名 title_model 承载同一个值，
+    ctx 只读它、再由归一化写回内部 model 键即可。
+    """
+    import hermes_auto_titler.config as config_module
+
+    monkeypatch.setattr(config_module, "_host_settings", lambda: {})
+    seen = []
+
+    class Ctx:
+        def get_config(self, key, default=None):
+            seen.append(key)
+            if key == "model":
+                raise ValueError("Expected a plugin-relative config key")
+            if key == "title_model":
+                return "vendor/model-x"
+            return default
+
+    cfg = load_config(path=tmp_path / "missing.yaml", ctx=Ctx())
+    assert "model" not in seen, "ctx 不应请求宿主保留的 model 键"
+    assert "title_model" in seen, "ctx 仍应读取对外别名"
+    assert cfg["model"] == "vendor/model-x"
+
+
 def test_save_config_mirrors_title_model_into_model(tmp_path):
     """落盘只保留一份 model，不把别名写进文件造成双份真相。"""
     p = tmp_path / "config.yaml"

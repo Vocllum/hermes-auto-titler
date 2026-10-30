@@ -2,12 +2,13 @@
 
 ## Unreleased
 
+## 0.3.1 — 2026-10-30
+
 - **Recognition-oriented titles**: Keep accurate titles unchanged, name the sustained subject and desired outcome, and avoid letting incidental troubleshooting replace the session's purpose. The minimal, concise and detailed prompt presets keep their distinct emphasis while retaining the goal of recognizing a session later.
 - **Natural brevity instead of length quotas**: Retire the title-length and display-width settings. Titles use compact natural wording without prescribed word or CJK counts; custom formats and essential identifiers remain intact.
 - **Complete title storage**: Preserve the full cleaned title instead of cutting it to sidebar width. Candidates or uniqueness suffixes that cannot fit the host's storage safety limit are rejected without cutting names or changing the existing title.
 - **Consistent settings precedence**: Runtime settings take priority over host-panel and local-file settings, including the title-model alias and explicitly clearing an override.
-
-- **No startup warning for the reserved `model` key**: `load_config` no longer asks the host for `model` through `ctx.get_config()`. The host reserves `model` as a settings root, so that call logged `Rejected config path 'model' from plugin hermes-auto-titler` and raised on every load — a warning on every startup for a key the host can never accept. The context channel now reads only the public `title_model` alias, which still normalizes back into the internal `model` key, so overrides set from the Desktop/CLI panels keep working. The `config.yaml` and host-settings channels are unchanged.
+- **Fix reserved `model` settings warning**: Stop requesting the host-reserved `model` root through the plugin context while preserving the public `title_model` setting. Thanks to @priestkos in #11.
 
 ## 0.3.0 — 2026-09-29
 

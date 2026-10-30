@@ -4,7 +4,11 @@
 
 ## 0.3.1 — 2026-10-30
 
-- **Fix reserved `model` settings warning**: Stop requesting the host-reserved `model` root through the plugin context. The public `title_model` setting continues to map to the internal `model` key, without changing YAML configuration, effective precedence, or title-generation behavior. Thanks to @priestkos in #11.
+- **Recognition-oriented titles**: Keep accurate titles unchanged, name the sustained subject and desired outcome, and avoid letting incidental troubleshooting replace the session's purpose. The minimal, concise and detailed prompt presets keep their distinct emphasis while retaining the goal of recognizing a session later.
+- **Natural brevity instead of length quotas**: Retire the title-length and display-width settings. Titles use compact natural wording without prescribed word or CJK counts; custom formats and essential identifiers remain intact.
+- **Complete title storage**: Preserve the full cleaned title instead of cutting it to sidebar width. Candidates or uniqueness suffixes that cannot fit the host's storage safety limit are rejected without cutting names or changing the existing title.
+- **Consistent settings precedence**: Runtime settings take priority over host-panel and local-file settings, including the title-model alias and explicitly clearing an override.
+- **Fix reserved `model` settings warning**: Stop requesting the host-reserved `model` root through the plugin context while preserving the public `title_model` setting. Thanks to @priestkos in #11.
 
 ## 0.3.0 — 2026-09-29
 

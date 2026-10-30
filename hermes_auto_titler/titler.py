@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import threading
 import time
@@ -46,7 +47,7 @@ except ImportError:  # pragma: no cover
         from pathlib import Path
         return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 
-from .messages import display_width, load_context_with_summary, truncate_to_width
+from .messages import load_context_with_summary
 from .state import StateStore
 
 log = logging.getLogger(__name__)
@@ -58,6 +59,17 @@ _db_lock = threading.Lock()
 
 # Hermes 内部平台：cron（定时任务）与 subagent（子代理）的轮次不参与标题评估
 _INTERNAL_PLATFORMS = frozenset({"cron", "subagent"})
+
+
+def _is_title_conflict(exc: Exception, title: str) -> bool:
+    """Only a uniqueness conflict permits retrying with a title suffix."""
+    if isinstance(exc, sqlite3.IntegrityError):
+        return str(exc) == "UNIQUE constraint failed: sessions.title"
+    if isinstance(exc, ValueError):
+        prefix = f"Title '{title}' is already in use by session "
+        message = str(exc)
+        return message.startswith(prefix) and bool(message[len(prefix):].strip())
+    return False
 
 
 def plugin_data_dir(name: str) -> Path:
@@ -1450,7 +1462,7 @@ class AutoTitler:
             current,
             _audit_input_shape(current, recent, all_user, opening, earlier_summary),
         )
-        # 规范化 + 截断后的候选才与当前标题比较；相等 = keep（不是 failed/加后缀）
+        # 清理并通过存储安全校验的候选才与当前标题比较；相等 = keep
         candidate = self._prepare_candidate(title) if title else None
 
         if action == "error":
@@ -1761,15 +1773,6 @@ class AutoTitler:
 
     # -- 写回 ---------------------------------------------------------------
 
-    def _bounds(self) -> Tuple[int, int]:
-        cfg_len = self.cfg.get("max_title_length")
-        max_len = min(int(cfg_len), SessionDB.MAX_TITLE_LENGTH) if cfg_len is not None else SessionDB.MAX_TITLE_LENGTH
-        # 显示列宽硬限（中文=2 列）：complete 风格放宽 12 列
-        max_cols = int(self.cfg.get("max_display_width", 40))
-        if self.cfg.get("title_style", "concise") == "complete":
-            max_cols += 12
-        return max_len, max_cols
-
     def _clean_title(self, title: str) -> str:
         """规范化模型输出：折叠空白、去包裹引号、去 'Title:'/'标题：' 前缀、去尾部句读。"""
         t = re.sub(r"\s+", " ", (title or "").strip())
@@ -1783,17 +1786,12 @@ class AutoTitler:
         return t
 
     def _prepare_candidate(self, title: str) -> Optional[str]:
-        """规范化 + 双重硬截断（字符上限 + 列宽上限）后的候选标题；空则 None。"""
+        """Clean the title without cropping it; reject empty or over-cap content."""
         t = self._clean_title(title)
-        if not t:
-            return None
-        max_len, max_cols = self._bounds()
-        t = truncate_to_width(t, max_cols)
         t = re.sub(r"[\s\"'“”‘’「」『』.。!！?？,，;；:：…]+$", "", t)
-        if len(t) > max_len:
-            t = t[:max_len]
-            t = re.sub(r"[\s\"'“”‘’「」『』.。!！?？,，;；:：…]+$", "", t)
-        return t or None
+        if not t or len(t) > SessionDB.MAX_TITLE_LENGTH:
+            return None
+        return t
 
     def _protected_reason(self, db: SessionDB, session_id: str) -> Optional[str]:
         """写回前的权威性复核（LLM 调用期间用户可能 /title 或出现 legacy 标题）。
@@ -1816,7 +1814,6 @@ class AutoTitler:
         return None
 
     def _write(self, db: SessionDB, session_id: str, title: str, expected_title: Optional[str] = None) -> Optional[str]:
-        max_len, max_cols = self._bounds()
         title = self._prepare_candidate(title)
         if not title:
             return None
@@ -1866,6 +1863,8 @@ class AutoTitler:
                 try:
                     return bool(exec_write(_atomic_llm_cas))
                 except Exception as e:
+                    if _is_title_conflict(e, t):
+                        raise
                     log.warning("auto-titler %s: atomic llm CAS execution failed: %s", session_id[:12], e)
                     return False
 
@@ -1890,32 +1889,20 @@ class AutoTitler:
                 return True
             return False
 
-        try:
-            if apply(title):
-                return title
-        except ValueError:
-            pass  # 唯一性冲突 → 加后缀重试
-
-        for i in range(2, 20):
-            suffix = f" ({i})"
-            base = title
-            # 后缀必须同时落在字符与列宽双上限内：收窄 base 腾出空间
-            while base and (
-                len(base) + len(suffix) > max_len
-                or display_width(base + suffix) > max_cols
-            ):
-                base = base[:-1].rstrip()
-            if not base:
-                break
-            cand = base + suffix
+        for i in range(1, 20):
+            cand = title if i == 1 else f"{title} ({i})"
+            # Never cut an identifier or prefix to make room for a suffix.
+            if len(cand) > SessionDB.MAX_TITLE_LENGTH:
+                return None
             try:
                 if apply(cand):
                     return cand
-                # 非唯一性冲突的失败（保护/同级 no-op 等不可恢复原因）：
-                # 后缀重试无意义，直接放弃。
-                break
-            except ValueError:
-                continue
+                return None
+            except Exception as e:
+                if _is_title_conflict(e, cand):
+                    continue
+                log.warning("auto-titler %s: title write failed: %s", session_id[:12], e)
+                return None
         return None
 
     # -- 批量重生成 ---------------------------------------------------------

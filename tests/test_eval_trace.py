@@ -170,3 +170,149 @@ def test_trace_llm_exception_classification_and_reraise():
     rec = sink[0]
     assert rec["status"] == "error"
     assert rec["error_type"] == "timeout"
+
+
+def test_trace_normalizes_openai_dict_usage_instead_of_fabricating_zero():
+    from types import SimpleNamespace
+
+    sink = []
+    inner = MagicMock(model="requested")
+    inner.complete.return_value = SimpleNamespace(
+        text='{"action":"keep"}', model="returned", usage={
+            "prompt_tokens": 123, "completion_tokens": 45,
+            "completion_tokens_details": {"reasoning_tokens": 12},
+            "prompt_tokens_details": {"cached_tokens": 80},
+        },
+    )
+    TraceLLM(inner, sink).complete([])
+    assert sink[0]["usage"]["input_tokens"] == 123
+    assert sink[0]["usage"]["output_tokens"] == 45
+    assert sink[0]["usage"]["reasoning_tokens"] == 12
+    assert sink[0]["usage"]["cache_read_tokens"] == 80
+    assert sink[0]["usage"]["cache_write_tokens"] is None
+    assert sink[0]["response_model"] == "returned"
+
+
+def test_empty_usage_is_unavailable_and_partial_usage_stays_partial():
+    from types import SimpleNamespace
+
+    for usage, source in (({}, "unavailable"), ({"prompt_tokens": 20}, "partial")):
+        sink = []
+        inner = MagicMock()
+        inner.complete.return_value = SimpleNamespace(text="{}", usage=usage)
+        TraceLLM(inner, sink).complete([])
+        assert sink[0]["token_source"] == source
+        if usage:
+            assert sink[0]["usage"]["input_tokens"] == 20
+            assert sink[0]["usage"]["output_tokens"] is None
+        else:
+            assert sink[0]["usage"] is None
+
+
+def test_native_gemini_usage_and_nonfinite_values_are_normalized():
+    from eval.trace import normalize_usage
+
+    usage = normalize_usage({"promptTokenCount": 10, "candidatesTokenCount": 5,
+                             "thoughtsTokenCount": 3, "totalTokenCount": 18})
+    assert usage["input_tokens"] == 10
+    assert usage["output_tokens"] == 5
+    assert usage["reasoning_tokens"] == 3
+    assert usage["total_tokens"] == 18
+    assert normalize_usage({"input_tokens": float("nan"), "output_tokens": -1,
+                            "cost_usd": float("inf")}) is None
+
+
+def test_missing_mock_metadata_is_nullable_and_json_serializable():
+    sink = []
+    inner = MagicMock()
+    inner.complete.return_value.text = '{"action":"keep"}'
+    inner.complete.return_value.usage = {}
+    TraceLLM(inner, sink).complete([])
+    json.dumps(sink[0])
+    assert sink[0]["response_model"] is None
+    assert sink[0]["response_provider"] is None
+    assert sink[0]["request_id"] is None
+    assert sink[0]["model_route"]["model"] is None
+
+
+def test_openai_prompt_details_cache_write_is_captured_without_backfilling_missing():
+    from eval.trace import normalize_usage
+
+    usage = normalize_usage({
+        "prompt_tokens": 12, "completion_tokens": 3,
+        "prompt_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 8},
+    })
+    assert usage["cache_read_tokens"] == 4
+    assert usage["cache_write_tokens"] == 8
+    assert normalize_usage({"prompt_tokens": 12, "completion_tokens": 3})["cache_write_tokens"] is None
+
+
+def test_broken_usage_accessor_preserves_response_and_partial_success_ledger():
+    from types import SimpleNamespace
+
+    class BrokenUsage:
+        output_tokens = 3
+
+        @property
+        def input_tokens(self):
+            raise RuntimeError("usage property unavailable")
+
+    response = SimpleNamespace(text='{"action":"keep"}', usage=BrokenUsage())
+    inner = MagicMock()
+    inner.complete.return_value = response
+    sink = []
+    assert TraceLLM(inner, sink).complete([]) is response
+    assert len(sink) == 1 and sink[0]["status"] == "success"
+    assert sink[0]["token_source"] == "partial"
+    assert sink[0]["usage"]["input_tokens"] is None
+    assert sink[0]["usage"]["output_tokens"] == 3
+
+
+def test_giant_usage_integers_do_not_overflow_or_mask_successful_response():
+    from types import SimpleNamespace
+
+    response = SimpleNamespace(text='{"action":"keep"}', usage={
+        "input_tokens": 10 ** 1000, "output_tokens": 3, "cost_usd": 10 ** 1000,
+    })
+    inner = MagicMock()
+    inner.complete.return_value = response
+    sink = []
+    assert TraceLLM(inner, sink).complete([]) is response
+    assert sink[0]["status"] == "success" and sink[0]["token_source"] == "partial"
+    assert sink[0]["usage"]["input_tokens"] is None
+    assert sink[0]["usage"]["output_tokens"] == 3
+    assert sink[0]["usage"]["cost_usd"] is None
+    json.dumps(sink[0])
+
+
+def test_broken_response_usage_and_metadata_properties_are_fail_soft():
+    class BrokenResponse:
+        text = '{"action":"keep"}'
+
+        def __getattr__(self, name):
+            raise RuntimeError("optional response metadata unavailable")
+
+    response = BrokenResponse()
+    inner = MagicMock()
+    inner.complete.return_value = response
+    sink = []
+    assert TraceLLM(inner, sink).complete([]) is response
+    assert sink[0]["status"] == "success" and sink[0]["usage"] is None
+    assert sink[0]["token_source"] == "unavailable"
+    assert sink[0]["response_model"] is sink[0]["response_provider"] is sink[0]["request_id"] is None
+
+
+def test_unexpected_normalization_failure_still_emits_success_ledger(monkeypatch):
+    from types import SimpleNamespace
+
+    def broken_normalizer(usage):
+        raise RuntimeError("unexpected normalization defect")
+
+    monkeypatch.setattr("eval.trace.normalize_usage", broken_normalizer)
+    response = SimpleNamespace(text='{"action":"keep"}', usage={"input_tokens": 12})
+    inner = MagicMock()
+    inner.complete.return_value = response
+    sink = []
+    assert TraceLLM(inner, sink).complete([]) is response
+    assert sink[0]["status"] == "success" and sink[0]["token_source"] == "unavailable"
+    assert sink[0]["usage"] is None

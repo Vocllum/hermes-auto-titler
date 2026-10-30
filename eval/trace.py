@@ -2,11 +2,64 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import stat
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
+
+
+def _safe_field(obj: Any, name: str) -> Any:
+    """Optional provider metadata must not turn a completed call into a failure."""
+    try:
+        return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+    except Exception:
+        return None
+
+
+def normalize_usage(usage: Any) -> Optional[Dict[str, Any]]:
+    """Keep absent billing fields unknown across host, OpenAI and Gemini shapes."""
+    if usage is None:
+        return None
+
+    def number(*names: str, source: Any = usage) -> Optional[int]:
+        for name in names:
+            value = _safe_field(source, name)
+            # Bound telemetry counters without converting arbitrary integers to float.
+            if type(value) is int and 0 <= value <= (1 << 63) - 1:
+                return value
+            if type(value) is float:
+                if math.isfinite(value) and 0 <= value <= (1 << 63) - 1 and value.is_integer():
+                    return int(value)
+        return None
+
+    details = _safe_field(usage, "completion_tokens_details")
+    prompt_details = _safe_field(usage, "prompt_tokens_details")
+    result = {
+        "input_tokens": number("input_tokens", "prompt_tokens", "promptTokenCount"),
+        "output_tokens": number("output_tokens", "completion_tokens", "candidatesTokenCount"),
+        "reasoning_tokens": number("reasoning_tokens", "thoughtsTokenCount"),
+        "cache_read_tokens": number("cache_read_tokens", "prompt_cache_hit_tokens", "cachedContentTokenCount"),
+        "cache_write_tokens": number("cache_write_tokens"),
+        "total_tokens": number("total_tokens", "totalTokenCount"),
+        "cost_usd": None,
+    }
+    if result["reasoning_tokens"] is None:
+        result["reasoning_tokens"] = number("reasoning_tokens", source=details)
+    if result["cache_read_tokens"] is None:
+        result["cache_read_tokens"] = number("cached_tokens", source=prompt_details)
+    if result["cache_write_tokens"] is None:
+        result["cache_write_tokens"] = number("cache_write_tokens", source=prompt_details)
+    cost = _safe_field(usage, "cost_usd")
+    if type(cost) in (int, float):
+        try:
+            cost = float(cost)
+            if math.isfinite(cost) and cost >= 0:
+                result["cost_usd"] = cost
+        except (ValueError, OverflowError):
+            pass
+    return result if any(value is not None for value in result.values()) else None
 
 
 def classify_error(exc: Exception) -> str:
@@ -146,9 +199,13 @@ class TraceLLM:
         sec_lengths = extract_section_lengths(user_content)
 
         model_route = {
-            "model": kwargs.get("model") or getattr(self.inner, "model", None),
-            "provider": kwargs.get("provider") or getattr(self.inner, "provider", None),
+            "model": kwargs.get("model") or _safe_field(self.inner, "model"),
+            "provider": kwargs.get("provider") or _safe_field(self.inner, "provider"),
             "task": kwargs.get("task"),
+        }
+        model_route = {
+            key: value if isinstance(value, str) else None
+            for key, value in model_route.items()
         }
 
         t0 = time.perf_counter()
@@ -169,21 +226,25 @@ class TraceLLM:
             usage_dict = None
             token_source = "unavailable"
             if res is not None:
-                usage_obj = getattr(res, "usage", None)
-                if usage_obj is not None:
-                    try:
-                        usage_dict = {
-                            "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
-                            "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
-                            "cache_read_tokens": int(getattr(usage_obj, "cache_read_tokens", 0) or 0),
-                            "cache_write_tokens": int(getattr(usage_obj, "cache_write_tokens", 0) or 0),
-                            "cost_usd": getattr(usage_obj, "cost_usd", None),
-                        }
-                        token_source = "measured"
-                    except Exception:
-                        usage_dict = None
-                        token_source = "unavailable"
+                try:
+                    usage_dict = normalize_usage(_safe_field(res, "usage"))
+                    if usage_dict is not None:
+                        token_source = (
+                            "measured" if usage_dict["input_tokens"] is not None
+                            and usage_dict["output_tokens"] is not None else "partial"
+                        )
+                except Exception:
+                    usage_dict = None
+                    token_source = "unavailable"
 
+            response_model = _safe_field(res, "model")
+            response_provider = _safe_field(res, "provider")
+            request_id = None
+            if res is not None:
+                for value in (_safe_field(res, "id"), _safe_field(res, "request_id")):
+                    if isinstance(value, str) and value:
+                        request_id = value
+                        break
             record = {
                 "session_id": session_id,
                 "prefix": prefix,
@@ -191,11 +252,13 @@ class TraceLLM:
                 "status": status,
                 "token_source": token_source,
                 "usage": usage_dict,
-                "request_id": getattr(res, "id", None) or getattr(res, "request_id", None) if res else None,
+                "request_id": request_id,
                 "system_prompt_hash": system_hash,
                 "user_prompt_hash": user_hash,
                 "section_lengths": sec_lengths,
                 "model_route": model_route,
+                "response_model": response_model if isinstance(response_model, str) else None,
+                "response_provider": response_provider if isinstance(response_provider, str) else None,
                 "elapsed": elapsed,
                 "timestamp": time.time(),
             }

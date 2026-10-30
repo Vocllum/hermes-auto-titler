@@ -1987,7 +1987,7 @@ def test_policy_prompt_soft_length_honors_explicit_max_title_length():
     t = AutoTitler(SimpleNamespace(llm=fake_llm), {**DEFAULTS, "max_title_length": 18})
     t._generate("当前", [("user", "hi")], [], [("user", "hi")])
     system = calls[0]["messages"][0]["content"]
-    assert "up to about 18 characters" in system
+    assert "at most 18 characters" in system
 
 
 def test_retry_candidate_selection_skips_inflight_preventing_starvation():

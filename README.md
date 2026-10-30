@@ -143,7 +143,7 @@ model: "your-model"         # any model your Hermes setup can reach
 
 ## ⚙️ Configuration
 
-Settings resolve per key, in this order: `ctx.get_config()` → host `plugins.entries.hermes-auto-titler.settings` (Hermes Desktop/CLI Plugins panel, declared by `config_schema` in `plugin.yaml`) → `~/.hermes/plugins/hermes-auto-titler/config.yaml` → built-in defaults. The local file is optional and only needs the keys you want to override; a legacy 0.2 `config.yaml` keeps every key it explicitly set. Invalid values fall back to defaults in the YAML entry and are reported as errors by `/autotitler config`.
+Settings resolve per key, in this order: `ctx.get_config()` → host `plugins.entries.hermes-auto-titler.settings` (Hermes Desktop/CLI Plugins panel, declared by `config_schema` in `plugin.yaml`) → `~/.hermes/plugins/hermes-auto-titler/config.yaml` → built-in defaults. The local file is optional and only needs the keys you want to override; recognized keys in a legacy 0.2 `config.yaml` keep their explicit values. Invalid values fall back to defaults in the YAML entry and are reported as errors by `/autotitler config`.
 
 <details>
 <summary><b>All keys</b></summary>
@@ -162,16 +162,19 @@ Settings resolve per key, in this order: `ctx.get_config()` → host `plugins.en
 | `user_message_preview_chars` | `300` | Per-message Sampled history budget with head+tail extraction. `0` = unlimited. |
 | `summary_preview_chars` | `1200` | Fallback compaction-summary budget when raw pre-compaction user history is unavailable. |
 | `retitle_summary_chars` | `12000` | Compaction-summary budget for blind/manual/bulk regeneration; `0` falls back to `preview_chars`. |
-| `title_style` | `concise` | `concise` = subject label · `complete` = short event/intent summary (wider display budget). |
+| `title_style` | `concise` | `concise` = a subject label with only the intent needed to identify it · `complete` = a compact summary of the core subject and primary intent. Neither style prescribes a word count. |
 | `strategy` | `conservative` | `conservative` = rename only on material durable mismatch; `aggressive` = follow explicit goal abandonment or sustained new direction sooner, ignoring one-off subtasks and tool changes. |
 | `provider` / `title_model` | `""` / `""` | Both empty = Hermes `title_generation` auxiliary task; set either for a plugin custom route. `title_model` is the settings-panel name of the model override (`model` in `config.yaml`). |
 | `min_interval_minutes` | `5` | Minimum gap between evaluations of one session. |
-| `max_title_length` / `max_display_width` | `null` / `40` | `null` avoids hard character slicing; the prompt keeps titles brief and `max_display_width` caps display columns. `complete` style adds 12 columns. |
 | `rename_confirmations` | `1` | Require one later endorsement before llm→llm writeback. `0` = immediate; `N > 1` = N endorsements. Replacing the pending candidate restarts the count. |
 | `max_renames_per_session` | `0` | Off by default. `N > 0` caps automatic replacements per session. Initial naming and `rename-now` are exempt; upgrading `derived` counts as a replacement. Counter is process-local. |
 | `custom_instructions` | `""` | Text appended to the title-generation system prompt. E.g. `"Always use English for titles"` or `"Prefix every title with [Project]"`. Empty = no effect. |
 
 </details>
+
+Titles stay naturally compact by choosing the most specific sustained subject and core purpose, rather than listing every subtask. The prompt retains the goal of recognizing a session weeks later, preserves essential names and identifiers, and respects custom formats such as `Writing - ...`.
+
+`max_title_length` and `max_display_width` are retired; old values are ignored. Sidebar rendering is a host UI concern, not a reason to cut the saved title. The plugin preserves the complete cleaned title and rejects a candidate that exceeds the host's storage safety limit (currently 100 characters). A uniqueness suffix never removes part of the original name to make room; if it cannot fit, the existing title remains unchanged. Accurate existing titles are not shortened or restyled.
 
 ## 🕹️ Commands
 

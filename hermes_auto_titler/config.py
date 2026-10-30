@@ -49,9 +49,6 @@ DEFAULTS: dict[str, Any] = {
     # 读入后归一化回内部的 model 键。
     "title_model": "",
     "min_interval_minutes": 5,
-    # None 表示不强加代码层字符数硬截断（由提示词与显示列宽约束）。
-    "max_title_length": None,
-    "max_display_width": 40,
     # 0 = 单次判定直接写；N>0 = 首次提出候选后，再要求 N 次后续背书。
     # 默认 1：降低单次误判导致的标题跳动；需要更快响应可显式改回 0。
     "rename_confirmations": 1,
@@ -77,7 +74,7 @@ _LOCAL_FILE_KEYS: frozenset[str] = frozenset(DEFAULTS)
 # ctx 通道（宿主 plugins.entries.<id>.settings）不读的内部键。宿主把 `model`
 # 留作 settings 根，ctx.get_config("model") 会先记一条 "Rejected config path"
 # 警告再抛错，每次加载都会多出一条启动噪音；对外别名 title_model 承载同一个
-# 值，并在 load_config 末尾归一化回 model，因此这里跳过内部键即可。
+# 值，并在 load_config 中按同一逻辑键归一化，因此这里跳过内部键即可。
 _CTX_SKIP_KEYS: frozenset[str] = frozenset({"model"})
 
 
@@ -175,13 +172,6 @@ def coerce_value(key: str, raw: Any) -> Any:
         "summary_preview_chars",
     ):
         v = max(0, int(v))
-    elif key == "max_title_length":
-        if v is None or str(v).strip().lower() in ("", "none", "null", "0"):
-            v = None
-        else:
-            v = max(10, min(int(v), 100))
-    elif key == "max_display_width":
-        v = max(10, min(int(v), 100))
     elif key == "rename_confirmations":
         v = max(0, int(v))
     elif key == "max_renames_per_session":
@@ -243,15 +233,28 @@ def load_config(path: Path | None = None, *, ctx: Any = None) -> dict[str, Any]:
     explicit: set[str] = set()
 
     def _apply(key: str, raw: Any, source: str) -> None:
+        logical_key = "model" if key == "title_model" else key
+        if logical_key in explicit:
+            return
         try:
-            cfg[key] = coerce_value(key, raw)
+            value = coerce_value(key, raw)
         except ValueError:
             log.warning(
                 "auto-titler config: %s setting %s=%r invalid, trying next source",
                 source, key, raw,
             )
             return
-        explicit.add(key)
+        cfg[key] = value
+        if logical_key == "model":
+            cfg["model"] = cfg["title_model"] = value
+        explicit.add(logical_key)
+
+    def _apply_source(values: dict[str, Any], source: str) -> None:
+        # Stable order preserves the local canonical model key when both aliases
+        # exist; an invalid value does not lock out the other alias or source.
+        for key in DEFAULTS:
+            if key in values and values[key] is not None:
+                _apply(key, values[key], source)
 
     if ctx is not None:
         for key in DEFAULTS:
@@ -267,8 +270,7 @@ def load_config(path: Path | None = None, *, ctx: Any = None) -> dict[str, Any]:
             if value is None:
                 continue
             _apply(key, value, "host ctx")
-    for key, value in _host_settings().items():
-        _apply(key, value, "host settings")
+    _apply_source(_host_settings(), "host settings")
     p = path or _default_config_path()
     data: Any = {}
     if p.is_file():
@@ -278,20 +280,10 @@ def load_config(path: Path | None = None, *, ctx: Any = None) -> dict[str, Any]:
             log.warning("auto-titler config unreadable at %s, using defaults", p)
             data = {}
     if isinstance(data, dict):
-        for k, v in data.items():
-            if v is None:
-                continue
+        for k in data:
             if k not in DEFAULTS:
                 log.warning("auto-titler config: unknown key %r ignored", k)
-                continue
-            if k in explicit:
-                continue
-            _apply(k, v, "config.yaml")
-    # 对外键 title_model 归一化回内部 model 键。ctx 通道读不到 model
-    # （宿主保留该 settings 根），所以这里只接受 title_model 与 config.yaml
-    # 的 model 两种写法；显式的内部 model 优先，避免 title_model 覆盖它。
-    if cfg.get("title_model") and not cfg.get("model"):
-        cfg["model"] = cfg["title_model"]
+        _apply_source(data, "config.yaml")
     return cfg
 
 

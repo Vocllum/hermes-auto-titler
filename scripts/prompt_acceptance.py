@@ -1,10 +1,20 @@
-"""Real-session title prompt experiment.
+"""Generation-only title prompt experiment on real-session prefixes.
 
 This is an evaluation harness, not a synthetic acceptance test. It samples existing
-sessions without writing them, replays the real conversation one user turn at a
-time, and compares isolated prompt profiles on the same prefixes. An LLM judge
+sessions without applying title changes and compares isolated prompt profiles on
+the same chronological prefixes. Every prefix calls ``_generate(current=None,
+blind=True)`` independently: it does not carry an incumbent, pending review or
+production state forward. Title differences across prefixes are generation
+differences, not applied renames or production evolution. An LLM judge
 scores the resulting titles against the visible prefix. The original session title
 is never shown to the generator or used as a lexical oracle.
+
+This script cannot measure incumbent preservation, false/missed renames or host
+authority and scheduling gates. Use ``eval.paired.run_frozen`` for matched
+counterfactual decisions and ``run_evolution`` for isolated synchronous state
+replay; see ``docs/paired-evaluation.md`` for their distinct limits. SessionDB
+construction uses the host API, so the claim of no title writes is not a claim
+that all host initialization is read-only.
 
 Examples:
   PYTHONPATH=/path/to/hermes-agent .venv/bin/python scripts/prompt_acceptance.py
@@ -12,7 +22,7 @@ Examples:
   PYTHONPATH=/path/to/hermes-agent .venv/bin/python scripts/prompt_acceptance.py --variants minimal,concise,detailed --styles both
   PYTHONPATH=/path/to/hermes-agent .venv/bin/python scripts/prompt_acceptance.py --output /tmp/title-experiment.jsonl
 
-The transport is intentionally explicit and read-only: it talks to the configured
+The title experiment transport is explicit: it talks to the configured
 OpenAI-compatible endpoint, while prompt construction and context sampling come
 from the real hermes-auto-titler code path.
 """

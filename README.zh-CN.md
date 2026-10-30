@@ -145,7 +145,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 
 `~/.hermes/plugins/hermes-auto-titler/config.yaml` — 所有键可选；非法值回退默认值。
 
-配置逐键解析，优先级：`ctx.get_config()` → 宿主 `plugins.entries.hermes-auto-titler.settings`（由 `plugin.yaml` 的 `config_schema` 声明，在 Hermes Desktop/CLI 插件面板中渲染）→ 上述本地 `config.yaml` → 插件内置默认值。本地文件不是必须的，只写想覆盖的键即可；0.2 遗留下来的 `config.yaml` 里显式写过的键会继续生效。
+配置逐键解析，优先级：`ctx.get_config()` → 宿主 `plugins.entries.hermes-auto-titler.settings`（由 `plugin.yaml` 的 `config_schema` 声明，在 Hermes Desktop/CLI 插件面板中渲染）→ 上述本地 `config.yaml` → 插件内置默认值。本地文件不是必须的，只写想覆盖的键即可；0.2 遗留下来的 `config.yaml` 中仍受支持的键会保留显式设置。
 
 <details>
 <summary><b>全部配置键</b></summary>
@@ -164,16 +164,19 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 | `user_message_preview_chars` | `300` | Sampled history 单条用户消息的首尾提取预算。`0` = 不限。 |
 | `summary_preview_chars` | `1200` | 无法恢复压缩前原始用户历史时，兜底摘要的日常预算。 |
 | `retitle_summary_chars` | `12000` | blind/手动/批量重生成时的压缩摘要预算；`0` 时回退到 `preview_chars`。 |
-| `title_style` | `concise` | `concise` = 主体标签；`complete` = 简短事件/意图概括，多 12 列显示预算。 |
+| `title_style` | `concise` | `concise` = 主体标签，加上辨识所需的最少意图；`complete` = 核心主体与主要意图的紧凑摘要。两种风格都不规划字数。 |
 | `strategy` | `conservative` | `conservative` = 只有明显、持续的失配才改；`aggressive` = 用户明确放弃旧目标或多个实质回合形成持续新方向后更快跟进，单次子任务/工具变化不算转题。 |
 | `provider` / `title_model` | `""` / `""` | 都为空 = Hermes `title_generation` 辅助任务；填写任一项 = 插件自定义通道。`title_model` 是设置面板里的模型覆盖键名（`config.yaml` 中写作 `model`）。 |
 | `min_interval_minutes` | `5` | 同一会话两次评估的最短间隔。 |
-| `max_title_length` / `max_display_width` | `null` / `40` | `null` 不强加代码层字符硬切，由提示词保持标题简洁，`max_display_width` 限制显示列宽；`complete` 风格额外增加 12 列。 |
 | `rename_confirmations` | `1` | 默认再要求 1 次后续背书；`0` = 一次判定后直接写；`N > 1` = 需要 N 次后续背书。候选被替换则重新计数。 |
 | `max_renames_per_session` | `0` | 默认关闭。`N > 0` = 每个会话最多自动替换标题 N 次。首次命名和 `rename-now` 不消耗次数；`derived` 升级算一次替换。计数持久化保存于 `state.json`。 |
 | `custom_instructions` | `""` | 追加到 system prompt 末尾的自定义指令。如 `"标题使用英文"` 或 `"始终包含项目名前缀"`。留空无影响。 |
 
 </details>
+
+标题通过选择最具体、能覆盖持续工作的主体与核心目的来保持自然简短，不罗列每个子任务。提示词保留“数周后仍能辨识会话”的目标，保留必要名称和标识符，并尊重 `文字工作 - …` 等自定义格式。
+
+`max_title_length` 与 `max_display_width` 已移除，旧配置中的值不再生效。侧栏如何显示属于宿主界面的职责，不应因此裁剪保存的标题。插件完整保留清理后的标题；超过宿主存储安全上限（当前为 100 个字符）的候选会被拒绝，不截短名称。为解决重名添加的后缀也不会裁掉原名来腾位置；若无法容纳，已有标题保持不变。已准确的旧题不会被缩短或重新润色。
 
 ## 🕹️ 命令
 

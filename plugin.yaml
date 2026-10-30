@@ -114,16 +114,6 @@ config_schema:
     label: "Regeneration summary length"
     default: 12000
     description: "Summary character budget for manual or batch regeneration; 0 uses turn preview length."
-  max_display_width:
-    type: int
-    label: "Title display width"
-    default: 40
-    description: "Maximum display columns for generated titles."
-  max_title_length:
-    type: int
-    label: "Hard title length"
-    default: 0
-    description: "Optional character cap; 0 disables it. Positive values have a minimum of 10."
   max_renames_per_session:
     type: int
     label: "Renames per session"

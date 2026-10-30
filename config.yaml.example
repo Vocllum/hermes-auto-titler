@@ -1,6 +1,6 @@
 # Hermes auto-titler 配置
-# 优先级：宿主 plugins.entries.hermes-auto-titler.settings（Desktop/CLI 面板）
-# > 本文件（0.2 存量配置，显式写过的键继续生效）> 插件默认值。
+# 优先级：运行期 ctx.get_config() > 宿主 plugins.entries.hermes-auto-titler.settings（Desktop/CLI 面板）
+# > 本文件（仍受支持的键保留显式值）> 插件默认值。
 # 本文件不是必须的：宿主 config_schema 已声明全部键与默认值。
 enabled: true
 every_n_turns: 2
@@ -16,16 +16,14 @@ user_message_threshold: 40
 user_message_preview_chars: 300
 summary_preview_chars: 1200      # 日常摘要预算：原始历史缺失时兜底，稀疏采样有缺口时作为次级压缩证据
 retitle_summary_chars: 12000     # blind/手动/批量重生成的摘要预算；同样支持兜底与次级证据；0=沿用 preview_chars
-title_style: concise  # concise=主体标签；complete=简短事件/意图概括，并增加显示列宽预算
+title_style: concise  # concise=主体与辨识所需的意图；complete=核心主体与主要意图的紧凑概括，不规划字数
 strategy: conservative  # conservative=仅明显持久失配才改；aggressive=明确放弃旧目标或持续新主线形成后更快跟进
 # provider/model 都留空时复用 Hermes 内建 title_generation 辅助任务；
 # 任一值存在时，走插件显式配置的独立通道。
 provider: ""
 model: ""
 min_interval_minutes: 5
-# max_title_length: null 表示不强加字符数硬切（由提示词与显示列宽约束）。
-max_title_length: null
-max_display_width: 40
+# 标题自然简短，保存时不按显示宽度裁字；仅拒绝超过宿主存储安全上限的候选。
 rename_confirmations: 1  # 默认再确认1次；0=一次判定直接写；N>0=候选需再获得N次后续背书；换候选后重新计数
 max_renames_per_session: 0  # 0=关闭自动改名上限；N>0=每会话最多自动替换N次；首次命名和手动 rename-now 不计入
 # custom_instructions: ""  # 可选，追加到 system prompt 末尾的自定义指令（如 "标题使用英文" 或 "始终包含项目名前缀"）

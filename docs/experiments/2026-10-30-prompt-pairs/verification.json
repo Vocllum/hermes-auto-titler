@@ -1,0 +1,11 @@
+{
+  "final_revised_system_prompts_matched": 192,
+  "system_prompt_mismatches": 0,
+  "successful_http_responses": 562,
+  "private_blocked_attempts": 384,
+  "public_ledger_rows": 946,
+  "content_and_path_scan": "passed",
+  "baseline_commit": "4906737f827b554417e3673071990d1811832185",
+  "release_files_changed": false,
+  "installed_changed_files_modified_by_experiment": false
+}

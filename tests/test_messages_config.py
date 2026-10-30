@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List
 
 import yaml
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -76,9 +77,6 @@ def test_manifest_settings_order_and_defaults_match_runtime():
     assert keys[-1] == "max_renames_per_session"
     for key, field in schema.items():
         expected = DEFAULTS[key]
-        # Hermes' numeric field serializes an optional None default as zero.
-        if key == "max_title_length":
-            expected = 0
         assert field["default"] == expected, key
 
 
@@ -774,26 +772,23 @@ def test_config_load_defaults_and_override(tmp_path):
     assert cfg["enabled"] is True
     assert cfg["every_n_turns"] == 2
     assert cfg["strategy"] == "conservative"
-    # 另留少量中文意图空间；12 字符仍只是软目标。
-    if cfg["max_title_length"] is not None:
-        p = tmp_path / "config.yaml"
-        p.write_text("strategy: aggressive\nmax_title_length: 24\n", encoding="utf-8")
-        cfg = load_config(p)
-        assert cfg["max_title_length"] == 24
-    else:
-        assert cfg["max_title_length"] is None
+    assert "max_title_length" not in cfg
+    assert "max_display_width" not in cfg
 
     p = tmp_path / "config.yaml"
-    p.write_text("strategy: aggressive\nmax_title_length: 30\n", encoding="utf-8")
+    p.write_text("strategy: aggressive\nmax_title_length: 30\nmax_display_width: 10\n", encoding="utf-8")
     cfg2 = load_config(path=p)
     assert cfg2["strategy"] == "aggressive"
-    assert cfg2["max_title_length"] == 30
+    assert "max_title_length" not in cfg2
+    assert "max_display_width" not in cfg2
     assert cfg2["every_n_turns"] == 2  # 未覆盖的键保持默认
 
     save_config(cfg2, path=p)
     cfg3 = load_config(path=p)
     assert cfg3["strategy"] == "aggressive"
-    assert cfg3["max_title_length"] == 30
+    assert "max_title_length" not in cfg3
+    assert "max_display_width" not in cfg3
+    assert "max_title_length" not in yaml.safe_load(p.read_text(encoding="utf-8"))
     assert cfg3["enabled"] is True
 
 
@@ -802,7 +797,7 @@ def test_config_sanitizes_bad_values(tmp_path):
     p.write_text("strategy: nonsense\nmax_title_length: 99999\nevery_n_turns: 0\n", encoding="utf-8")
     cfg = load_config(path=p)
     assert cfg["strategy"] == "conservative"
-    assert cfg["max_title_length"] == 100  # 上限 100
+    assert "max_title_length" not in cfg
     assert cfg["every_n_turns"] == 1  # 下限 1
 
 
@@ -832,6 +827,159 @@ def test_internal_model_wins_over_title_model(tmp_path):
     p.write_text("model: internal/pick\ntitle_model: alias/pick\n", encoding="utf-8")
     cfg = load_config(path=p)
     assert cfg["model"] == "internal/pick"
+    assert cfg["title_model"] == "internal/pick"
+
+
+def test_title_length_controls_are_not_user_settings(tmp_path, monkeypatch):
+    import hermes_auto_titler.config as config_module
+
+    monkeypatch.setattr(config_module, "_host_settings", lambda: {
+        "max_title_length": 18, "max_display_width": 10,
+    })
+    seen = []
+
+    class Ctx:
+        def get_config(self, key, default=None):
+            seen.append(key)
+            return default
+
+    cfg = load_config(path=tmp_path / "missing.yaml", ctx=Ctx())
+    schema = yaml.safe_load((Path(__file__).resolve().parent.parent / "plugin.yaml").read_text())["config_schema"]
+    for key in ("max_title_length", "max_display_width"):
+        assert key not in DEFAULTS
+        assert key not in cfg
+        assert key not in schema
+        assert key not in seen
+        with pytest.raises(ValueError, match="unknown config key"):
+            config_module.coerce_value(key, 18)
+
+
+def test_ctx_setting_wins_over_host_settings_and_yaml(tmp_path, monkeypatch):
+    import hermes_auto_titler.config as config_module
+
+    monkeypatch.setattr(config_module, "_host_settings", lambda: {"every_n_turns": 7})
+    p = tmp_path / "config.yaml"
+    p.write_text("every_n_turns: 9\n", encoding="utf-8")
+
+    class Ctx:
+        def get_config(self, key, default=None):
+            return 3 if key == "every_n_turns" else default
+
+    assert load_config(path=p, ctx=Ctx())["every_n_turns"] == 3
+
+
+@pytest.mark.parametrize("host_value, expected", [(7, 7), ("invalid", 9)])
+def test_invalid_ctx_setting_falls_back_without_locking_lower_source(host_value, expected, tmp_path, monkeypatch):
+    import hermes_auto_titler.config as config_module
+
+    monkeypatch.setattr(config_module, "_host_settings", lambda: {"every_n_turns": host_value})
+    p = tmp_path / "config.yaml"
+    p.write_text("every_n_turns: 9\n", encoding="utf-8")
+
+    class Ctx:
+        def get_config(self, key, default=None):
+            return "invalid" if key == "every_n_turns" else default
+
+    assert load_config(path=p, ctx=Ctx())["every_n_turns"] == expected
+
+
+@pytest.mark.parametrize("ctx_model", ["context/model", ""])
+def test_ctx_model_alias_wins_over_lower_model_sources(ctx_model, tmp_path, monkeypatch):
+    import hermes_auto_titler.config as config_module
+
+    monkeypatch.setattr(config_module, "_host_settings", lambda: {"title_model": "settings/model"})
+    p = tmp_path / "config.yaml"
+    p.write_text("model: legacy/model\n", encoding="utf-8")
+    seen = []
+
+    class Ctx:
+        def get_config(self, key, default=None):
+            seen.append(key)
+            return ctx_model if key == "title_model" else default
+
+    cfg = load_config(path=p, ctx=Ctx())
+    assert cfg["model"] == cfg["title_model"] == ctx_model
+    assert "model" not in seen
+
+
+@pytest.mark.parametrize("key", ["model", "title_model"])
+@pytest.mark.parametrize("host_model", ["settings/model", ""])
+def test_host_model_aliases_win_over_yaml(key, host_model, tmp_path, monkeypatch):
+    import hermes_auto_titler.config as config_module
+
+    monkeypatch.setattr(config_module, "_host_settings", lambda: {key: host_model})
+    p = tmp_path / "config.yaml"
+    p.write_text("title_model: legacy/model\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["model"] == cfg["title_model"] == host_model
+
+
+@pytest.mark.parametrize("host_model, expected", [("settings/model", "settings/model"), (None, "legacy/model"), (42, "legacy/model")])
+def test_invalid_ctx_model_alias_falls_back_by_source(host_model, expected, tmp_path, monkeypatch):
+    import hermes_auto_titler.config as config_module
+
+    settings = {} if host_model is None else {"title_model": host_model}
+    monkeypatch.setattr(config_module, "_host_settings", lambda: settings)
+    p = tmp_path / "config.yaml"
+    p.write_text("model: legacy/model\n", encoding="utf-8")
+
+    class Ctx:
+        def get_config(self, key, default=None):
+            return 42 if key == "title_model" else default
+
+    cfg = load_config(path=p, ctx=Ctx())
+    assert cfg["model"] == cfg["title_model"] == expected
+
+
+@pytest.mark.parametrize("yaml_text", [
+    "model: internal/model\ntitle_model: alias/model\n",
+    "title_model: alias/model\nmodel: internal/model\n",
+])
+def test_same_source_model_alias_resolution_is_order_independent(yaml_text, tmp_path, monkeypatch):
+    import hermes_auto_titler.config as config_module
+
+    monkeypatch.setattr(config_module, "_host_settings", lambda: {})
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml_text, encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["model"] == cfg["title_model"] == "internal/model"
+
+
+@pytest.mark.parametrize("settings", [
+    {"model": "", "title_model": "alias/model"},
+    {"title_model": "alias/model", "model": ""},
+])
+def test_same_source_host_model_clear_is_order_independent(settings, tmp_path, monkeypatch):
+    import hermes_auto_titler.config as config_module
+
+    monkeypatch.setattr(config_module, "_host_settings", lambda: settings)
+    p = tmp_path / "config.yaml"
+    p.write_text("model: legacy/model\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["model"] == cfg["title_model"] == ""
+
+
+def test_invalid_internal_model_can_fall_back_to_same_source_alias(tmp_path, monkeypatch):
+    import hermes_auto_titler.config as config_module
+
+    monkeypatch.setattr(config_module, "_host_settings", lambda: {})
+    p = tmp_path / "config.yaml"
+    p.write_text("model: 42\ntitle_model: alias/model\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    assert cfg["model"] == cfg["title_model"] == "alias/model"
+
+
+def test_saved_effective_empty_model_does_not_restore_yaml_route(tmp_path, monkeypatch):
+    import hermes_auto_titler.config as config_module
+
+    monkeypatch.setattr(config_module, "_host_settings", lambda: {"title_model": ""})
+    p = tmp_path / "config.yaml"
+    p.write_text("model: legacy/model\n", encoding="utf-8")
+    cfg = load_config(path=p)
+    save_config(cfg, path=p)
+    saved = yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert saved["model"] == ""
+    assert "title_model" not in saved
 
 
 def test_ctx_channel_skips_host_reserved_model_key(tmp_path, monkeypatch):

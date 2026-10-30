@@ -1,8 +1,12 @@
 # Paired prompt experiment, 2026-10-30
 
 Baseline: main `4906737f827b554417e3673071990d1811832185`, version 0.3.0.
-This branch is independent of release PR #12. No version, manifest, changelog,
-default setting, confirmation gate, cooldown, provenance or write algorithm changes.
+Frozen revised source: `e5c66151c28e2f733d4b38dcaa37285ef5cba90a`.
+This is a historical experiment report. Its prompt hashes and results describe
+that frozen revision, not the later production change to qualitative brevity and
+complete title storage. The experiment was prepared independently of release
+PR #12; at that point it changed no version, manifest, changelog, default setting,
+confirmation gate, cooldown, provenance or write algorithm.
 
 ## Finding
 

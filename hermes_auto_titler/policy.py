@@ -98,14 +98,9 @@ class AutoTitler(_BaseAutoTitler):
         session_id: Optional[str] = None,
         timeline: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Optional[str]]:
-        cfg_len = self.cfg.get("max_title_length")
-        max_chars, max_cols = self._bounds()
-        cjk_target = min(max_chars, max_cols // 2)
-        words = "3-8" if self.cfg.get("title_style") == "complete" else "3-6"
-        char_limit = f"; at most {max_chars} characters" if cfg_len is not None else ""
         length_rule = (
-            f"New titles: aim for {words} words or {cjk_target} CJK characters{char_limit}; "
-            f"fit {max_cols} display columns (CJK=2). Do not truncate names."
+            "New titles: use a compact, natural sidebar label that preserves the subject "
+            "and essential identifiers. Do not truncate names."
         )
         style = self.cfg.get("title_style", "concise")
         strategy = self.cfg.get("strategy", "conservative")

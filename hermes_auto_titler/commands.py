@@ -97,7 +97,7 @@ def make_handler(titler) -> Callable[[str], str]:
                 f" | strategy={c['strategy']}"
                 f" | provider={c['provider'] or '(host default)'}"
                 f" | model={c['model'] or '(host default)'}"
-                f" | interval={c['min_interval_minutes']}m | max_len={c['max_title_length']}"
+                f" | interval={c['min_interval_minutes']}m"
                 f" | max_renames={c.get('max_renames_per_session', 0)}"
                 f" | retry_queue={len(titler._failed_sessions)}"
                 f" | finalize_queue={len(titler._finalize_intents)}"

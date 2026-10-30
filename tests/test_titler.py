@@ -643,16 +643,16 @@ def test_conflict_adds_suffix():
     assert db.title == "Test 空转排查 (2)"
 
 
-def test_collision_suffix_trims_base_to_fit_char_cap():
-    db = FakeDB(messages=MSGS, title=None, conflict_titles={"Test 空"})
+def test_collision_suffix_ignores_removed_character_cap():
+    db = FakeDB(messages=MSGS, title=None, conflict_titles={"Test 空转排查"})
     t, _ = make_titler(db, text=_dec("rename", "Test 空转排查"), cfg={"max_title_length": 6})
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
-    assert r["title"] == "Te (2)"
-    assert len(r["title"]) <= 6
+    assert r["title"] == "Test 空转排查 (2)"
+    assert db.title == r["title"]
 
 
-def test_collision_suffix_fits_display_width():
+def test_collision_suffix_does_not_crop_base_for_display_width():
     db = FakeDB(messages=MSGS, title=None, conflict_titles={"一二三四五"})
     t, _ = make_titler(
         db, text=_dec("rename", "一二三四五"),
@@ -660,8 +660,8 @@ def test_collision_suffix_fits_display_width():
     )
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
-    assert r["title"] == "一二三 (2)"
-    assert display_width(r["title"]) <= 10
+    assert r["title"] == "一二三四五 (2)"
+    assert display_width(r["title"]) > 10
 
 
 def test_malformed_model_output_records_failure_and_retries():
@@ -778,14 +778,15 @@ def test_title_prefix_and_trailing_punctuation_cleaned():
     assert r["title"] == "Test 空转排查"
 
 
-def test_truncated_candidate_equal_to_current_is_keep():
+def test_extended_candidate_is_not_mistaken_for_keep_by_cropping():
     current = "一二三四五六七八九十123456"  # 恰好 16 字符
     db = FakeDB(messages=MSGS, title=current, source="llm")
     t, ctx = make_titler(
         db, text=_dec("rename", current + "7890"), cfg={"max_title_length": 16}
     )
     r = t.evaluate("s1", force=True)
-    assert r["action"] == "keep"  # 截断后与当前相同 → keep
+    assert r["action"] == "renamed"
+    assert r["title"] == current + "7890"
 
 
 def test_parse_decision_tolerates_markdown_fence():
@@ -817,33 +818,32 @@ def test_llm_failure_records_failed_retry():
     assert t._failed_sessions["s1"]["next_retry_at"] > 0
 
 
-def test_title_truncated_to_max_length():
+def test_title_preserved_despite_removed_max_length_setting():
     db = FakeDB(messages=MSGS, title=None)
     long = "这是一个非常非常非常非常非常非常非常非常非常非常非常非常非常长的标题测试"
     t, _ = make_titler(db, text=_dec("rename", long), cfg={"max_title_length": 20})
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
-    assert len(r["title"]) <= 20
+    assert r["title"] == long
 
 
-def test_write_truncates_by_display_width():
+def test_write_preserves_title_wider_than_old_display_reference():
     db = FakeDB(messages=MSGS, title=None)
-    # 显式 max_title_length=16：21 个「一」→ 先按字符截到 16 字。
     t, _ = make_titler(
         db, text=_dec("rename", "一" * 21), cfg={"max_title_length": 16}
     )
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
-    assert len(r["title"]) == 16
-    assert display_width(r["title"]) <= 40  # 列宽上限也不超
+    assert r["title"] == "一" * 21
+    assert display_width(r["title"]) == 42
 
 
-def test_write_complete_style_wider_budget():
+def test_write_complete_style_also_preserves_full_title():
     db = FakeDB(messages=MSGS, title=None)
-    # complete 风格列宽 +12：40+12 = 52 列 → 26 个中文字
     t, _ = make_titler(db, text=_dec("rename", "一" * 30), cfg={"title_style": "complete"})
     r = t.evaluate("s1", force=True)
-    assert display_width(r["title"]) <= 52
+    assert r["title"] == "一" * 30
+    assert display_width(r["title"]) == 60
 
 
 def test_derived_long_title_forces_rename_even_when_model_keeps():
@@ -1613,26 +1613,44 @@ def test_clean_title_nested_wrapped_quotes():
     assert r["title"] == "Foo"
 
 
-def test_truncation_boundary_punctuation_stripped():
+def test_internal_punctuation_is_not_lost_at_a_removed_length_boundary():
     db = FakeDB(messages=MSGS, title=None)
-    # 18 字符 > 上限 16：截到 "abcdefghijklmno:" 后剥掉边界冒号
     t, _ = make_titler(db, text=_dec("rename", "abcdefghijklmno:xyz"), cfg={"max_title_length": 16})
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
-    assert r["title"] == "abcdefghijklmno"
-    assert len(r["title"]) <= 16
+    assert r["title"] == "abcdefghijklmno:xyz"
 
 
-def test_truncation_boundary_quote_stripped():
+def test_internal_quote_is_not_lost_at_a_removed_length_boundary():
     db = FakeDB(messages=MSGS, title=None)
     t, _ = make_titler(db, text=_dec("rename", "abcdefghijklmno'xyz"), cfg={"max_title_length": 16})
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
-    assert r["title"] == "abcdefghijklmno"
-    assert not r["title"].endswith("'")
+    assert r["title"] == "abcdefghijklmno'xyz"
 
 
 # -- 命令准确性 -----------------------------------------------------------------
+
+def test_status_does_not_require_removed_length_settings(monkeypatch):
+    from hermes_auto_titler.commands import make_handler
+
+    monkeypatch.setattr("hermes_auto_titler.commands._host_title_generation_enabled", lambda: True)
+    t, _ = make_titler(FakeDB())
+    for key in ("max_title_length", "max_display_width"):
+        t.cfg.pop(key, None)
+    status = make_handler(t)("status")
+    assert "autotitler: enabled" in status
+    assert "max_len" not in status
+
+
+@pytest.mark.parametrize("key", ["max_title_length", "max_display_width"])
+def test_config_command_rejects_removed_length_settings(key):
+    from hermes_auto_titler.commands import make_handler
+
+    t, _ = make_titler(FakeDB())
+    t.cfg.pop(key, None)
+    assert make_handler(t)(f"config {key} 20") == f"Unknown config key: {key}"
+
 
 def test_config_command_enabled_message_notes_restart(monkeypatch):
     from hermes_auto_titler.commands import make_handler
@@ -1890,12 +1908,11 @@ def test_prepare_candidate_preserves_mixed_script_when_length_limit_is_none():
     assert cand == "hermes-auto-titler 会话主题归纳"
 
 
-def test_prepare_candidate_still_honors_explicit_max_title_length():
+def test_prepare_candidate_ignores_removed_max_title_length():
     from hermes_auto_titler.titler import AutoTitler
     titler = AutoTitler(None, {"max_title_length": 20, "max_display_width": 40})
     cand = titler._prepare_candidate("hermes-auto-titler 会话主题归纳")
-    assert cand is not None
-    assert len(cand) <= 20
+    assert cand == "hermes-auto-titler 会话主题归纳"
 
 
 def test_base_autotitler_generate_raises_not_implemented():
@@ -1978,7 +1995,7 @@ def test_retry_failed_sessions_drops_user_title():
     assert "s1" not in t._failed_sessions
 
 
-def test_policy_prompt_soft_length_honors_explicit_max_title_length():
+def test_policy_prompt_does_not_plan_length_from_removed_setting():
     from types import SimpleNamespace
     from hermes_auto_titler.policy import AutoTitler
 
@@ -1987,7 +2004,8 @@ def test_policy_prompt_soft_length_honors_explicit_max_title_length():
     t = AutoTitler(SimpleNamespace(llm=fake_llm), {**DEFAULTS, "max_title_length": 18})
     t._generate("当前", [("user", "hi")], [], [("user", "hi")])
     system = calls[0]["messages"][0]["content"]
-    assert "at most 18 characters" in system
+    assert "at most 18 characters" not in system
+    assert "use a compact, natural sidebar label" in system
 
 
 def test_retry_candidate_selection_skips_inflight_preventing_starvation():

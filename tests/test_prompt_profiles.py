@@ -33,7 +33,7 @@ def test_all_profiles_preserve_accurate_incumbent_and_avoid_completion_claims(va
 
 
 @pytest.mark.parametrize("variant", ["minimal", "concise", "detailed"])
-def test_all_profiles_have_style_strategy_and_language_aware_length(variant):
+def test_all_profiles_have_style_strategy_and_natural_brevity(variant):
     compact = system_prompt(variant)
     complete = system_prompt(variant, style="complete")
     aggressive = system_prompt(variant, strategy="aggressive")
@@ -42,17 +42,18 @@ def test_all_profiles_have_style_strategy_and_language_aware_length(variant):
     assert "Strategy: conservative" in compact
     assert "Strategy: aggressive" in aggressive
     assert compact != complete != aggressive
-    assert "20 CJK characters" in compact
-    assert "26 CJK characters" in complete
-    assert "40 display columns" in compact
-    assert "52 display columns" in complete
+    for prompt in (compact, complete, aggressive):
+        assert "use a compact, natural sidebar label" in prompt
+        assert "preserves the subject and essential identifiers" in prompt
+        assert "Do not truncate names" in prompt
+        assert "CJK characters" not in prompt
+        assert "display columns" not in prompt
+        assert "words or" not in prompt
 
 
-def test_length_hint_follows_effective_hard_bounds():
-    prompt = system_prompt("minimal", max_display_width=30, max_title_length=9)
-    assert "9 CJK characters" in prompt
-    assert "at most 9 characters" in prompt
-    assert "30 display columns" in prompt
+@pytest.mark.parametrize("variant", ["minimal", "concise", "detailed"])
+def test_legacy_length_keys_do_not_change_prompts(variant):
+    assert system_prompt(variant, max_display_width=30, max_title_length=9) == system_prompt(variant)
 
 
 def test_pr_references_are_excluded_only_when_incidental():
